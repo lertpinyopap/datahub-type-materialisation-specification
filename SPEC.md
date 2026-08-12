@@ -260,6 +260,7 @@ table ::= string
 
 job_event_type ::= JOB_START | JOB_END
 job_result ::= COMPLETED | COMPLETED_WITH_ERRORS | FAILED
+  | FAILED_TO_PARSE | FAILED_TO_INHERIT | FAILED_TO_RESOLVE
 ```
 
 The job table records event rows for each materialisation load. Each load emits
@@ -283,8 +284,9 @@ The job event columns are:
   rows for failures from the same load.
 - `event_type`: the lifecycle event type.
 - `event_timestamp`: the time the event occurred.
-- `result`: the load result. `JOB_START` events should leave this value null.
-  `JOB_END` events must set it to one of the `job_result` values.
+- `result`: the load result. `JOB_START` events should leave this value null
+  unless the materialisation fails before load time. `JOB_END` events must set
+  it to `COMPLETED`, `COMPLETED_WITH_ERRORS`, or `FAILED`.
 - `caller_job_id`: the identifier supplied by the calling job system, such as an
   Airflow task id.
 
@@ -300,6 +302,12 @@ The job event columns are:
 - `COMPLETED_WITH_ERRORS`: the materialisation load completed after writing one
   or more failed records to quarantine output.
 - `FAILED`: the materialisation load did not complete successfully.
+- `FAILED_TO_PARSE`: the materialisation failed during schema-time or
+  parse-time validation.
+- `FAILED_TO_INHERIT`: the materialisation failed while loading or overlaying
+  inherited specifications.
+- `FAILED_TO_RESOLVE`: the materialisation failed while resolving variables or
+  other pre-load values.
 
 The quarantine table retains its own `loaded_at`, `job_id`, and
 `failure_details` metadata columns so failed rows can be inspected directly
@@ -538,7 +546,8 @@ fields:
 ```
 
 Reference implementations should parse and validate supported data types rather
-than treating them as arbitrary strings.
+than treating them as arbitrary strings. See also
+[section 12](#12-validation-rules) for automatic data type validation.
 
 ## 11. Field Transforms
 
@@ -740,6 +749,13 @@ macro ::= dbt macro name
   optional scale.
 - `custom`: apply a named custom validation to the column.
 
+Every target field has an automatically applied validation that the transformed
+source value can be represented by the field's declared `data_type`. This
+validation applies even when `validations` is omitted. A value that cannot be
+converted to the declared `data_type`, or that cannot be represented within that
+type's constraints, is a validation or conversion failure and is handled
+according to `failure_mode`.
+
 Custom validation macro signature:
 
 ```text
@@ -820,6 +836,11 @@ LOAD time ::= rules that require source data or source metadata
 
 Schema-time rules are enforced by
 `schema/type-materialisation.schema.json`.
+
+Failures before LOAD time are recorded against the `JOB_START` event when a job
+table row can be emitted. Schema-time and parse-time failures use
+`FAILED_TO_PARSE`, inheritance-time failures use `FAILED_TO_INHERIT`, and
+resolve-time failures use `FAILED_TO_RESOLVE`.
 
 Parse-time rules:
 
