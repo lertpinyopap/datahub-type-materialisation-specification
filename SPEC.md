@@ -487,7 +487,9 @@ pos ::= integer >= 0
 column ::= string
 ```
 
-For CSV sources, a field may be selected by position, column name, or both.
+For CSV sources, a field may be selected by position, column name, or both. If
+both are supplied, a mismatch between the header at `pos` and `column` is an
+error.
 
 For table sources, a field must be selected by column name. `pos` is invalid for
 table sources.
