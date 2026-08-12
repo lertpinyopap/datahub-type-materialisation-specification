@@ -16,6 +16,9 @@ implementation behavior.
 - Mark unsettled design choices as open questions rather than silently deciding
   them.
 - Keep examples valid YAML and aligned with the formal specification.
+- Put a short label immediately before every YAML sample so readers can tell it
+  is an example, not normative grammar.
+- When adding an enum to the grammar, describe each enum value in `SPEC.md`.
 
 ## Specification Intent
 
@@ -34,11 +37,13 @@ materialised into typed relational data. It should cover:
 
 ## Implementation Guidance
 
-Reference implementations are expected in Python and dbt. When adding
-implementation notes:
+The reference implementation should target dbt as the materialisation runtime.
+Python may be used for parsing, validation, generation, and test tooling. When
+adding implementation notes:
 
 - Keep them subordinate to the specification.
-- Avoid binding the spec to one runtime unless explicitly agreed.
+- Do not introduce Python as a separate materialisation runtime unless
+  explicitly agreed.
 - Prefer simple reference behavior over production-specific assumptions.
 - Add conformance-oriented examples where useful.
 

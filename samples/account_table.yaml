@@ -22,5 +22,7 @@ target:
       source:
         column: account_name
       data_type: varchar(255)
+      transforms:
+        - type: trim
       nullable: true
       unique: false

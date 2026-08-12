@@ -4,7 +4,7 @@
   "title": "Type Materialisation Specification",
   "type": "object",
   "additionalProperties": false,
-  "required": ["id", "source", "target"],
+  "required": ["id"],
   "properties": {
     "id": {
       "$ref": "#/$defs/specificationId"
@@ -13,28 +13,50 @@
       "type": "string"
     },
     "extends": {
-      "$ref": "#/$defs/specificationId"
+      "$ref": "#/$defs/specificationId",
+      "description": "Parent specification id. The parent file is expected in the same folder as <id>.yaml."
     },
     "control_data": {
       "$ref": "#/$defs/controlData"
     },
     "source": {
-      "oneOf": [
-        {
-          "$ref": "#/$defs/csvSource"
-        },
-        {
-          "$ref": "#/$defs/tableSource"
-        }
-      ]
+      "$ref": "#/$defs/sourcePatch"
     },
     "target": {
-      "$ref": "#/$defs/target"
+      "$ref": "#/$defs/targetPatch"
     }
   },
   "allOf": [
     {
       "if": {
+        "not": {
+          "required": ["extends"]
+        }
+      },
+      "then": {
+        "required": ["source", "target"],
+        "properties": {
+          "source": {
+            "oneOf": [
+              {
+                "$ref": "#/$defs/csvSource"
+              },
+              {
+                "$ref": "#/$defs/tableSource"
+              }
+            ]
+          },
+          "target": {
+            "$ref": "#/$defs/fullTarget"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "not": {
+          "required": ["extends"]
+        },
         "properties": {
           "source": {
             "properties": {
@@ -63,6 +85,9 @@
     },
     {
       "if": {
+        "not": {
+          "required": ["extends"]
+        },
         "properties": {
           "source": {
             "properties": {
@@ -94,6 +119,9 @@
     },
     {
       "if": {
+        "not": {
+          "required": ["extends"]
+        },
         "properties": {
           "source": {
             "properties": {
@@ -142,20 +170,92 @@
         "failure_mode": {
           "type": "string",
           "enum": ["fail_file", "quarantine_row"]
+        },
+        "quarantine": {
+          "$ref": "#/$defs/quarantineTable"
+        }
+      }
+    },
+    "quarantineTable": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "database": {
+          "$ref": "#/$defs/templatedString"
+        },
+        "schema": {
+          "$ref": "#/$defs/templatedString"
+        },
+        "table": {
+          "$ref": "#/$defs/templatedString"
+        }
+      }
+    },
+    "sourcePatch": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "format": {
+          "type": "string",
+          "enum": ["csv", "table"]
+        },
+        "separator": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1
+        },
+        "quote_char": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1
+        },
+        "row_terminator": {
+          "type": "string",
+          "minLength": 1
+        },
+        "quoting": {
+          "type": "string",
+          "enum": ["minimal", "all", "non_numeric", "none", "notnull", "strings"]
+        },
+        "header": {
+          "type": "boolean"
+        },
+        "database": {
+          "$ref": "#/$defs/templatedString"
+        },
+        "schema": {
+          "$ref": "#/$defs/templatedString"
+        },
+        "table": {
+          "$ref": "#/$defs/templatedString"
         }
       }
     },
     "csvSource": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["format", "separator", "header"],
+      "required": ["format", "header"],
       "properties": {
         "format": {
           "const": "csv"
         },
         "separator": {
           "type": "string",
+          "minLength": 1,
+          "maxLength": 1
+        },
+        "quote_char": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1
+        },
+        "row_terminator": {
+          "type": "string",
           "minLength": 1
+        },
+        "quoting": {
+          "type": "string",
+          "enum": ["minimal", "all", "non_numeric", "none", "notnull", "strings"]
         },
         "header": {
           "type": "boolean"
@@ -181,7 +281,23 @@
         }
       }
     },
-    "target": {
+    "targetPatch": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "$ref": "#/$defs/templatedString"
+        },
+        "fields": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/fieldPatch"
+          }
+        }
+      }
+    },
+    "fullTarget": {
       "type": "object",
       "additionalProperties": false,
       "required": ["name", "fields"],
@@ -193,15 +309,15 @@
           "type": "array",
           "minItems": 1,
           "items": {
-            "$ref": "#/$defs/field"
+            "$ref": "#/$defs/fullField"
           }
         }
       }
     },
-    "field": {
+    "fieldPatch": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["id", "source", "data_type"],
+      "required": ["id"],
       "properties": {
         "id": {
           "$ref": "#/$defs/specificationId"
@@ -218,6 +334,12 @@
         "unique": {
           "type": "boolean"
         },
+        "transforms": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/transformRule"
+          }
+        },
         "validations": {
           "type": "array",
           "items": {
@@ -225,6 +347,16 @@
           }
         }
       }
+    },
+    "fullField": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/fieldPatch"
+        },
+        {
+          "required": ["source", "data_type"]
+        }
+      ]
     },
     "fieldSource": {
       "type": "object",
@@ -242,7 +374,7 @@
     "csvField": {
       "allOf": [
         {
-          "$ref": "#/$defs/field"
+          "$ref": "#/$defs/fullField"
         },
         {
           "properties": {
@@ -280,7 +412,7 @@
     "tableField": {
       "allOf": [
         {
-          "$ref": "#/$defs/field"
+          "$ref": "#/$defs/fullField"
         },
         {
           "properties": {
@@ -294,15 +426,245 @@
         }
       ]
     },
-    "validationRule": {
+    "transformRule": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/trimTransform"
+        },
+        {
+          "$ref": "#/$defs/parseDateTransform"
+        },
+        {
+          "$ref": "#/$defs/parseTimestampTransform"
+        },
+        {
+          "$ref": "#/$defs/roundTransform"
+        },
+        {
+          "$ref": "#/$defs/customTransform"
+        }
+      ]
+    },
+    "trimTransform": {
       "type": "object",
-      "additionalProperties": true,
+      "additionalProperties": false,
       "required": ["type"],
       "properties": {
         "type": {
-          "$ref": "#/$defs/specificationId"
+          "const": "trim"
+        },
+        "side": {
+          "type": "string",
+          "enum": ["both", "left", "right"]
         }
       }
+    },
+    "parseDateTransform": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "format"],
+      "properties": {
+        "type": {
+          "const": "parse_date"
+        },
+        "format": {
+          "$ref": "#/$defs/templatedString"
+        }
+      }
+    },
+    "parseTimestampTransform": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "format"],
+      "properties": {
+        "type": {
+          "const": "parse_timestamp"
+        },
+        "format": {
+          "$ref": "#/$defs/templatedString"
+        }
+      }
+    },
+    "roundTransform": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "scale"],
+      "properties": {
+        "type": {
+          "const": "round"
+        },
+        "scale": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "mode": {
+          "type": "string",
+          "enum": ["half_up", "half_even", "down", "up"]
+        }
+      }
+    },
+    "customTransform": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "macro"],
+      "properties": {
+        "type": {
+          "const": "custom"
+        },
+        "macro": {
+          "$ref": "#/$defs/dbtMacroName"
+        }
+      }
+    },
+    "dbtMacroName": {
+      "type": "string",
+      "pattern": "^[A-Za-z][A-Za-z0-9_]*(\\.[A-Za-z][A-Za-z0-9_]*)?$"
+    },
+    "validationRule": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/minLengthValidation"
+        },
+        {
+          "$ref": "#/$defs/maxLengthValidation"
+        },
+        {
+          "$ref": "#/$defs/regexValidation"
+        },
+        {
+          "$ref": "#/$defs/allowedValuesValidation"
+        },
+        {
+          "$ref": "#/$defs/minValueValidation"
+        },
+        {
+          "$ref": "#/$defs/maxValueValidation"
+        },
+        {
+          "$ref": "#/$defs/precisionValidation"
+        },
+        {
+          "$ref": "#/$defs/customValidation"
+        }
+      ]
+    },
+    "minLengthValidation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "value"],
+      "properties": {
+        "type": {
+          "const": "min_length"
+        },
+        "value": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "maxLengthValidation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "value"],
+      "properties": {
+        "type": {
+          "const": "max_length"
+        },
+        "value": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "regexValidation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "pattern"],
+      "properties": {
+        "type": {
+          "const": "regex"
+        },
+        "pattern": {
+          "$ref": "#/$defs/templatedString"
+        }
+      }
+    },
+    "allowedValuesValidation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "values"],
+      "properties": {
+        "type": {
+          "const": "allowed_values"
+        },
+        "values": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/scalarValue"
+          }
+        }
+      }
+    },
+    "minValueValidation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "value"],
+      "properties": {
+        "type": {
+          "const": "min_value"
+        },
+        "value": {
+          "$ref": "#/$defs/scalarValue"
+        }
+      }
+    },
+    "maxValueValidation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "value"],
+      "properties": {
+        "type": {
+          "const": "max_value"
+        },
+        "value": {
+          "$ref": "#/$defs/scalarValue"
+        }
+      }
+    },
+    "precisionValidation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "precision"],
+      "properties": {
+        "type": {
+          "const": "precision"
+        },
+        "precision": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "scale": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "customValidation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "macro"],
+      "properties": {
+        "type": {
+          "const": "custom"
+        },
+        "macro": {
+          "$ref": "#/$defs/dbtMacroName"
+        }
+      }
+    },
+    "scalarValue": {
+      "type": ["string", "number", "integer", "boolean", "null"]
     }
   }
 }

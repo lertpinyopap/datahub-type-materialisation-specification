@@ -15,8 +15,9 @@ single specification should describe the source format, target fields, typing
 rules, validation rules, error handling, and any shared inheritance pattern used
 across related tables.
 
-Reference implementations are expected to be written in Python and dbt as the
-specification matures.
+The reference implementation is expected to generate and validate dbt artifacts.
+Python may be used for supporting tooling, but dbt is the materialisation
+runtime.
 
 ## Documentation
 
@@ -29,16 +30,23 @@ specification matures.
 
 ## Example
 
+Sample: CSV account file materialisation.
+
 ```yaml
 id: account_file_format
 description: Account file mapping.
 control_data:
   materialisation_type: table
   failure_mode: quarantine_row
+  quarantine:
+    table: account_QUARANTINE
 source:
   format: csv
-  separator: ","
   header: true
+  separator: ","
+  quote_char: '"'
+  row_terminator: "\r\n"
+  quoting: minimal
 target:
   name: account
   fields:
@@ -47,6 +55,8 @@ target:
         pos: 0
         column: account_id
       data_type: varchar(20)
+      transforms:
+        - type: trim
       unique: true
       nullable: false
       validations:

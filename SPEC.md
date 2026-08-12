@@ -7,8 +7,7 @@ for describing how flat, raw, or schema-on-read data is transformed into typed
 relational data.
 
 The specification is designed to support CSV sources, table sources, reusable
-table families through inheritance, and reference implementations in Python and
-dbt.
+table families through inheritance, and dbt-based materialisation.
 
 ## 2. Notation
 
@@ -26,14 +25,25 @@ The grammar is descriptive. The formal static validator is the JSON Schema in
 ## 3. Overall Document
 
 ```text
-type_materialisation_spec ::=
+type_materialisation_spec ::= complete_spec | extending_spec
+
+complete_spec ::=
   id
   description?
-  extends?
   control_data?
   source
   target
+
+extending_spec ::=
+  id
+  description?
+  extends  # see section 15, Inheritance
+  control_data?
+  source?
+  target?
 ```
+
+Sample: complete CSV-backed materialisation specification.
 
 ```yaml
 id: account_file_format
@@ -62,14 +72,19 @@ target:
 ```text
 id ::= string
 description ::= string
-extends ::= string
+extends ::= string  # see section 15, Inheritance
 ```
 
 `id` is the stable identifier for the specification.
 
 `description` is human-readable documentation for the specification.
 
-`extends` identifies a parent specification to inherit from.
+`extends` identifies a parent specification to inherit from. An extending
+specification may be partial because missing attributes can be inherited from
+the parent. Inheritance is resolved after the base document parses; see
+[section 15](#15-inheritance).
+
+Sample: specification identity with inheritance.
 
 ```yaml
 id: customer_reference_code_data
@@ -83,9 +98,11 @@ extends: abstract_reference_code_data
 control_data ::=
   materialisation_type?
   failure_mode?
+  quarantine?
 
 materialisation_type ::= view | materialised_view | table
 failure_mode ::= fail_file | quarantine_row
+quarantine ::= quarantine_table
 ```
 
 `control_data` defines behavior for the whole materialisation.
@@ -96,10 +113,84 @@ implementations should default to `table`.
 `failure_mode` defines how validation or conversion failures are handled. If
 omitted, implementations should default to `fail_file`.
 
+`quarantine` optionally describes the quarantine table used when
+`failure_mode` is `quarantine_row`.
+
+`materialisation_type` values:
+
+- `view`: produce a typed view over the source data.
+- `materialised_view`: produce a persisted or incrementally refreshed typed
+  view.
+- `table`: produce a typed table populated from the source data.
+
+`failure_mode` values:
+
+- `fail_file`: fail the whole materialisation when a record fails validation or
+  type conversion.
+- `quarantine_row`: write the failing record to quarantine output and continue
+  processing subsequent records.
+
+Sample: control data.
+
 ```yaml
 control_data:
   materialisation_type: table
   failure_mode: quarantine_row
+  quarantine:
+    table: account_QUARANTINE
+```
+
+### 5.1 Quarantine Table
+
+```text
+quarantine_table ::=
+  database?
+  schema?
+  table?
+
+database ::= string
+schema ::= string
+table ::= string
+```
+
+The quarantine table is used when `failure_mode` is `quarantine_row`.
+
+If `quarantine.table` is omitted, implementations should default to
+`<target.name>_QUARANTINE`.
+
+If `quarantine.database` or `quarantine.schema` are omitted, implementations
+should use their default database or schema resolution rules for generated
+objects.
+
+The quarantine table must be created if it does not exist. If it already exists,
+it must be expanded to cover the number of source fields present in the source
+data, but it must never be shrunk automatically.
+
+Each quarantined row contains quarantine metadata followed by the source data in
+source order.
+
+The quarantine metadata columns are:
+
+- `loaded_at`: the time the row was loaded.
+- `job_id`: the identifier for the materialisation job.
+- `failure_details`: details of the first failure detected for the row.
+
+For convenience, quarantine metadata columns appear first in the quarantine
+table. Source data columns follow in file order for CSV sources and table column
+order for table sources.
+
+Future versions may add all failure details to the quarantine output to support
+faster issue resolution.
+
+Sample: quarantine table configuration.
+
+```yaml
+control_data:
+  failure_mode: quarantine_row
+  quarantine:
+    database: ops
+    schema: data_quality
+    table: account_load_QUARANTINE
 ```
 
 ## 6. Source
@@ -112,23 +203,60 @@ source.format ::= csv | table
 `source` describes the raw data being read before target field extraction,
 typing, and validation.
 
+`source.format` values:
+
+- `csv`: delimited text input where fields may be selected by position, column
+  name, or both.
+- `table`: relational table input where fields are selected by column name.
+
 ### 6.1 CSV Source
 
 ```text
 csv_source ::=
   format: csv
-  separator
   header
+  separator?
+  quote_char?
+  row_terminator?
+  quoting?
 
-separator ::= string
 header ::= true | false
+separator ::= one character string
+quote_char ::= one character string
+row_terminator ::= string
+quoting ::= minimal | all | non_numeric | none | notnull | strings
 ```
+
+CSV dialect options align with Python CSV dialect concepts:
+
+- `separator`: field separator character, equivalent to Python `delimiter`.
+  Defaults to `,`.
+- `quote_char`: field quoting character, equivalent to Python `quotechar`.
+  Defaults to `"`.
+- `row_terminator`: row terminator string, equivalent to Python
+  `lineterminator`. Defaults to `\r\n`.
+- `quoting`: quoting behavior, equivalent to Python `quoting`. Defaults to
+  `minimal`.
+
+`quoting` values:
+
+- `minimal`: quote only fields containing special characters.
+- `all`: quote all fields.
+- `non_numeric`: quote non-numeric fields.
+- `none`: do not treat quote characters specially.
+- `notnull`: quote fields that are not null.
+- `strings`: quote fields that are strings.
+
+Sample: CSV source.
 
 ```yaml
 source:
   format: csv
-  separator: ","
   header: true
+  separator: ","
+  quote_char: '"'
+  row_terminator: "\r\n"
+  quoting: minimal
 ```
 
 ### 6.2 Table Source
@@ -144,6 +272,8 @@ database ::= string
 schema ::= string
 table ::= string
 ```
+
+Sample: table source.
 
 ```yaml
 source:
@@ -165,6 +295,8 @@ name ::= string
 
 `target` describes the typed data produced by the materialisation.
 
+Sample: target table definition.
+
 ```yaml
 target:
   name: account
@@ -183,6 +315,7 @@ field ::=
   id
   source
   data_type
+  transforms?
   nullable?
   unique?
   validations?
@@ -193,6 +326,8 @@ unique ::= true | false
 
 `target.fields` is an ordered list of fields to materialise in the target.
 
+Sample: target field.
+
 ```yaml
 fields:
   - id: account_id
@@ -200,6 +335,8 @@ fields:
       pos: 0
       column: account_id
     data_type: varchar(20)
+    transforms:
+      - type: trim
     nullable: false
     unique: true
 ```
@@ -225,6 +362,8 @@ For CSV sources, a field may be selected by position, column name, or both.
 For table sources, a field must be selected by column name. `pos` is invalid for
 table sources.
 
+Sample: CSV field source using both position and column.
+
 ```yaml
 fields:
   - id: account_id
@@ -233,6 +372,8 @@ fields:
       column: account_id
     data_type: varchar(20)
 ```
+
+Sample: table field source using column only.
 
 ```yaml
 fields:
@@ -250,6 +391,8 @@ data_type ::= string
 
 The initial data type format should align with SQL-like type declarations.
 
+Sample: SQL-like data type declarations.
+
 ```yaml
 fields:
   - id: account_id
@@ -265,19 +408,217 @@ fields:
 Reference implementations should parse and validate supported data types rather
 than treating them as arbitrary strings.
 
-## 11. Validation Rules
+## 11. Field Transforms
+
+```text
+transforms ::= transform_rule[]
+
+transform_rule ::= trim | parse_date | parse_timestamp | round | custom
+
+trim ::=
+  type: trim
+  side?
+
+side ::= both | left | right
+
+parse_date ::=
+  type: parse_date
+  format
+
+parse_timestamp ::=
+  type: parse_timestamp
+  format
+
+format ::= Python datetime format string
+
+round ::=
+  type: round
+  scale
+  mode?
+
+scale ::= integer >= 0
+mode ::= half_up | half_even | down | up
+
+custom ::=
+  type: custom
+  macro
+
+macro ::= dbt macro name
+```
+
+Transforms are simple single-column instructions applied to the extracted field
+value. They must not reference other source fields or target fields.
+
+Transforms are applied in the order they appear. A transform output must be
+compatible with the field's `data_type`.
+
+`transform_rule.type` values:
+
+- `trim`: remove whitespace from a string value.
+- `parse_date`: parse a string value into a date using `format`.
+- `parse_timestamp`: parse a string value into a timestamp using `format`.
+- `round`: round a numeric value to a decimal `scale`.
+- `custom`: apply a named dbt macro to the column.
+
+`side` values:
+
+- `both`: trim leading and trailing whitespace.
+- `left`: trim leading whitespace.
+- `right`: trim trailing whitespace.
+
+If `side` is omitted, implementations should default to `both`.
+
+`mode` values:
+
+- `half_up`: round half values away from zero.
+- `half_even`: round half values to the nearest even digit.
+- `down`: round toward zero.
+- `up`: round away from zero.
+
+If `mode` is omitted, implementations should default to `half_up`.
+
+Date and timestamp `format` values use Python `datetime` `strptime` /
+`strftime`-style format codes. dbt reference implementations should map these
+format strings to database-native parsing functions where required.
+
+Common date and timestamp format examples:
+
+- `%Y-%m-%d`: `2026-08-13`
+- `%d/%m/%Y`: `13/08/2026`
+- `%Y-%m-%d %H:%M:%S`: `2026-08-13 14:30:00`
+- `%Y-%m-%dT%H:%M:%S%z`: `2026-08-13T14:30:00+1000`
+
+Custom transforms are a constrained dbt extension point. `macro` names a dbt
+macro that is expected to be available to the dbt project at runtime. The macro
+is applied to the current column only.
+
+```text
+custom_transform_macro ::= macro_name(column_expression)
+custom_transform_macro_result ::= SQL expression returning transformed value
+```
+
+The dbt macro receives the SQL expression for the current column and returns a
+SQL expression for the transformed column.
+
+Sample: common field transforms.
+
+```yaml
+fields:
+  - id: account_name
+    source:
+      column: account_name
+    data_type: varchar(255)
+    transforms:
+      - type: trim
+  - id: opened_on
+    source:
+      column: opened_on
+    data_type: date
+    transforms:
+      - type: parse_date
+        format: "%d/%m/%Y"
+  - id: balance
+    source:
+      column: balance
+    data_type: decimal(18,2)
+    transforms:
+      - type: round
+        scale: 2
+        mode: half_up
+```
+
+Sample: custom dbt macro transform.
+
+```yaml
+fields:
+  - id: account_id
+    source:
+      column: account_id
+    data_type: varchar(20)
+    transforms:
+      - type: custom
+        macro: normalise_account_id
+```
+
+## 12. Validation Rules
 
 ```text
 validations ::= validation_rule[]
 
 validation_rule ::=
-  type
-  validator_specific_properties?
+  min_length
+  | max_length
+  | regex
+  | allowed_values
+  | min_value
+  | max_value
+  | precision
+  | custom_validation
 
-type ::= string
+min_length ::=
+  type: min_length
+  value
+
+max_length ::=
+  type: max_length
+  value
+
+regex ::=
+  type: regex
+  pattern
+
+allowed_values ::=
+  type: allowed_values
+  values[]
+
+min_value ::=
+  type: min_value
+  value
+
+max_value ::=
+  type: max_value
+  value
+
+precision ::=
+  type: precision
+  precision
+  scale?
+
+custom_validation ::=
+  type: custom
+  macro
+
+value ::= scalar
+pattern ::= regular expression string
+precision ::= integer >= 1
+scale ::= integer >= 0
+macro ::= dbt macro name
 ```
 
-Initial validator examples:
+`validation_rule.type` values:
+
+- `min_length`: string length must be greater than or equal to `value`.
+- `max_length`: string length must be less than or equal to `value`.
+- `regex`: string value must match `pattern`.
+- `allowed_values`: value must be one of `values`.
+- `min_value`: value must be greater than or equal to `value`.
+- `max_value`: value must be less than or equal to `value`.
+- `precision`: numeric value must fit the configured decimal precision and
+  optional scale.
+- `custom`: apply a named custom validation to the column.
+
+Custom validation macro signature:
+
+```text
+custom_validation_macro ::= macro_name(column_expression)
+custom_validation_macro_result ::= SQL expression returning nullable string
+```
+
+A custom validation returns no failure when it returns `NULL`. It returns
+failure details when it returns a string. The string should explain the first
+failure detected for the current column value.
+
+Sample: common field validation rules.
 
 ```yaml
 validations:
@@ -285,13 +626,29 @@ validations:
     value: 16
   - type: max_length
     value: 20
+  - type: regex
+    pattern: "^[A-Z0-9]+$"
+  - type: allowed_values
+    values:
+      - ACTIVE
+      - CLOSED
+  - type: precision
+    precision: 18
+    scale: 2
 ```
 
-Validator behavior will be documented as validators are added. The JSON Schema
-validates the shape of validation rules, not the runtime behavior of each
-validator.
+Sample: custom validation rule.
 
-## 12. Variable Usage
+```yaml
+validations:
+  - type: custom
+    macro: validate_account_id
+```
+
+The JSON Schema validates the shape of validation rules, not the runtime
+behavior of each validator.
+
+## 13. Variable Usage
 
 String values may contain a constrained subset of dbt-compatible Jinja variable
 expressions.
@@ -308,6 +665,8 @@ variable_expression ::=
 
 Variable expressions are resolved after YAML parsing and before source loading.
 
+Sample: table source with dbt-style variables.
+
 ```yaml
 source:
   format: table
@@ -316,11 +675,12 @@ source:
   table: "{{ env_var('ENV') }}_account_file_landed"
 ```
 
-## 13. Validation Phases
+## 14. Validation Phases
 
 ```text
 SCHEMA time ::= YAML parses and conforms to JSON Schema
 PARSE time ::= rules that require the parsed YAML document
+INHERITANCE time ::= parent specifications are loaded and overlaid
 RESOLVE time ::= rules that require variable resolution
 LOAD time ::= rules that require source data or source metadata
 ```
@@ -338,11 +698,19 @@ Parse-time rules:
 - For `source.format = table`, `field.source.column` is required.
 - For `source.format = table`, `field.source.pos` is invalid.
 
+Inheritance-time rules:
+
+- Parent specifications referenced by `extends` must be available before
+  variable expressions are resolved.
+- The resolved specification after inheritance must be complete.
+
 Resolve-time rules:
 
 - Supported variable expressions must resolve to strings.
 - A variable with no value and no default fails resolution.
 - Unsupported Jinja expressions are invalid.
+- Custom transform macros must be available to dbt implementations before the
+  materialisation is executed.
 
 Load-time rules:
 
@@ -351,13 +719,26 @@ Load-time rules:
 - For `source.format = table`, `field.source.column` must exist in the source
   table.
 
-## 14. Inheritance
+## 15. Inheritance
 
 ```text
 extends ::= parent_specification_id
+
+parent_specification_path ::= same_directory + "/" + parent_specification_id + ".yaml"
+inheritance_chain ::= oldest_ancestor -> ... -> parent -> child
+resolved_specification ::= overlay(inheritance_chain)
+
+source_override ::= partial source mapping
+target_override ::= partial target mapping
+field_override ::= id + partial field mapping
 ```
 
-Inheritance allows a specification to reuse a shared baseline.
+Inheritance allows a specification to reuse a shared baseline. It is a simple
+additive overlay model: parent attributes are loaded first, child attributes are
+loaded over the top, and the child always wins when both define the same
+attribute.
+
+Sample: child specification extending a parent.
 
 ```yaml
 id: customer_reference_code_data
@@ -365,32 +746,162 @@ extends: abstract_reference_code_data
 description: Customer reference code data.
 ```
 
-Initial inheritance rules:
+Sample: parent specification file named `abstract_reference_code_data.yaml`.
+
+```yaml
+id: abstract_reference_code_data
+description: Shared shape for reference code data tables.
+control_data:
+  materialisation_type: table
+  failure_mode: quarantine_row
+source:
+  format: table
+  database: raw
+  schema: reference_data
+  table: abstract_reference_code_data
+target:
+  name: abstract_reference_code_data
+  fields:
+    - id: code
+      source:
+        column: code
+      data_type: varchar(50)
+      nullable: false
+      unique: true
+```
+
+Sample: child specification overriding parent attributes and adding a field.
+
+```yaml
+id: customer_reference_code_data
+extends: abstract_reference_code_data
+description: Customer reference code data.
+source:
+  table: customer_reference_code_data
+target:
+  name: customer_reference_code_data
+  fields:
+    - id: code
+      data_type: varchar(20)
+    - id: description
+      source:
+        column: description
+      data_type: varchar(255)
+      nullable: true
+```
+
+Inheritance rules:
 
 - A child specification references one parent through `extends`.
-- Parent specifications may be abstract or concrete.
-- Child scalar properties override parent scalar properties.
-- Child mapping properties are merged with parent mapping properties.
+- Multiple layers of inheritance are supported through chained `extends`.
+- Parent specifications are expected to be available in the same folder as the
+  child specification and named `<id>.yaml`.
+- Implementations load the oldest ancestor first, then each descendant in order,
+  ending with the child specification.
+- Child scalar attributes override parent scalar attributes.
+- Child mapping attributes are merged over parent mapping attributes.
 - Child target field definitions are matched to parent target field definitions
   by `id`.
 - A child target field may override inherited field properties.
 - A child may add target fields not present in the parent.
+- A child cannot remove a parent attribute. It can only inherit it, override it,
+  or add additional attributes.
+- Cyclic inheritance is invalid.
+- The final resolved specification must satisfy the complete specification
+  shape.
 
-Open question: whether a child may remove inherited fields should be confirmed
-before implementation.
+### 15.1 Inheritance Examples
 
-Open question: whether multiple inheritance is required should be confirmed
-before implementation.
+Sample: parent adds the base field list.
 
-## 15. Reference Implementations
+```yaml
+target:
+  fields:
+    - id: code
+      source:
+        column: code
+      data_type: varchar(50)
+      nullable: false
+```
 
-Reference implementations should be added for Python and dbt.
+Sample: child adds a new field.
 
-The Python reference implementation should focus on parsing, validating, and
-executing the specification against local or test source data.
+```yaml
+target:
+  fields:
+    - id: description
+      source:
+        column: description
+      data_type: varchar(255)
+      nullable: true
+```
 
-The dbt reference implementation should focus on generating or validating
-database-native materialisation logic from the specification.
+Sample: final result after list items are merged.
 
-Reference implementations should not introduce behavior that is absent from
+```yaml
+target:
+  fields:
+    - id: code
+      source:
+        column: code
+      data_type: varchar(50)
+      nullable: false
+    - id: description
+      source:
+        column: description
+      data_type: varchar(255)
+      nullable: true
+```
+
+Sample: parent field to be overridden.
+
+```yaml
+target:
+  fields:
+    - id: code
+      source:
+        column: code
+      data_type: varchar(50)
+      nullable: false
+      unique: true
+```
+
+Sample: child field with the same `id`.
+
+```yaml
+target:
+  fields:
+    - id: code
+      data_type: varchar(20)
+```
+
+Sample: final result after the matching field is overlaid.
+
+```yaml
+target:
+  fields:
+    - id: code
+      source:
+        column: code
+      data_type: varchar(20)
+      nullable: false
+      unique: true
+```
+
+In the second example, the child overrides `data_type` because it supplied a new
+value for the same field `id`. The inherited `source`, `nullable`, and `unique`
+attributes remain because child specifications cannot remove inherited
+attributes.
+
+## 16. Reference Implementations
+
+The reference implementation should produce dbt artifacts that perform
+materialisation, transforms, validations, quarantine handling, and target writes.
+
+Python may be used for repository tooling such as YAML parsing, JSON Schema
+validation, inheritance resolution, dbt artifact generation, golden-file tests,
+and test harnesses. Python is not a separate materialisation runtime for this
+specification.
+
+Reference implementation code should not introduce behavior that is absent from
 this specification without first updating this document.

@@ -4,10 +4,15 @@ description: Maps raw account CSV data into a typed account table.
 control_data:
   materialisation_type: table
   failure_mode: quarantine_row
+  quarantine:
+    table: account_QUARANTINE
 source:
   format: csv
-  separator: ","
   header: true
+  separator: ","
+  quote_char: '"'
+  row_terminator: "\r\n"
+  quoting: minimal
 target:
   name: account
   fields:
@@ -16,6 +21,8 @@ target:
         pos: 0
         column: account_id
       data_type: varchar(20)
+      transforms:
+        - type: trim
       nullable: false
       unique: true
       validations:
@@ -23,10 +30,17 @@ target:
           value: 16
         - type: max_length
           value: 20
+        - type: regex
+          pattern: "^[A-Z0-9]+$"
     - id: account_name
       source:
         pos: 1
         column: account_name
       data_type: varchar(255)
+      transforms:
+        - type: trim
       nullable: true
       unique: false
+      validations:
+        - type: custom
+          macro: validate_account_name
