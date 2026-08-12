@@ -173,10 +173,28 @@
         },
         "quarantine": {
           "$ref": "#/$defs/quarantineTable"
+        },
+        "job": {
+          "$ref": "#/$defs/jobTable"
         }
       }
     },
     "quarantineTable": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "database": {
+          "$ref": "#/$defs/templatedString"
+        },
+        "schema": {
+          "$ref": "#/$defs/templatedString"
+        },
+        "table": {
+          "$ref": "#/$defs/templatedString"
+        }
+      }
+    },
+    "jobTable": {
       "type": "object",
       "additionalProperties": false,
       "properties": {

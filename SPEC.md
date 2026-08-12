@@ -22,6 +22,24 @@ property[] ::= list property
 The grammar is descriptive. The formal static validator is the JSON Schema in
 `schema/type-materialisation.schema.json`.
 
+Unless otherwise stated, a required string value must contain at least one
+non-whitespace character after YAML parsing. Optional string values follow the
+same rule when present.
+
+Identifiers are a constrained form of string used for stable specification and
+field identity:
+
+```text
+identifier ::= string matching ^[A-Za-z][A-Za-z0-9_-]*$
+```
+
+An identifier starts with an ASCII letter and may then contain ASCII letters,
+digits, underscores, or hyphens.
+
+Identifiers are compared case-insensitively to align with database identifier
+handling. For example, `account_1` and `ACCOUNT_1` identify the same
+specification or field.
+
 ## 3. Overall Document
 
 ```text
@@ -65,14 +83,41 @@ target:
       data_type: varchar(20)
       nullable: false
       unique: true
+    - id: account_name
+      source:
+        pos: 1
+        column: account_name
+      data_type: varchar(255)
+      transforms:
+        - type: trim
+      nullable: true
+    - id: opened_on
+      source:
+        pos: 2
+        column: opened_on
+      data_type: date
+      transforms:
+        - type: parse_date
+          format: "%d/%m/%Y"
+      nullable: false
+    - id: balance
+      source:
+        pos: 3
+        column: balance
+      data_type: decimal(18,2)
+      transforms:
+        - type: round
+          scale: 2
+          mode: half_up
+      nullable: false
 ```
 
 ## 4. Identity
 
 ```text
-id ::= string
+id ::= identifier
 description ::= string
-extends ::= string  # see section 15, Inheritance
+extends ::= identifier  # see section 15, Inheritance
 ```
 
 `id` is the stable identifier for the specification.
@@ -99,10 +144,12 @@ control_data ::=
   materialisation_type?
   failure_mode?
   quarantine?
+  job?
 
 materialisation_type ::= view | materialised_view | table
 failure_mode ::= fail_file | quarantine_row
 quarantine ::= quarantine_table
+job ::= job_table
 ```
 
 `control_data` defines behavior for the whole materialisation.
@@ -115,6 +162,8 @@ omitted, implementations should default to `fail_file`.
 
 `quarantine` optionally describes the quarantine table used when
 `failure_mode` is `quarantine_row`.
+
+`job` optionally describes the job table used to record load lifecycle events.
 
 `materialisation_type` values:
 
@@ -138,6 +187,8 @@ control_data:
   failure_mode: quarantine_row
   quarantine:
     table: account_QUARANTINE
+  job:
+    table: account_JOB
 ```
 
 ### 5.1 Quarantine Table
@@ -172,7 +223,8 @@ source order.
 The quarantine metadata columns are:
 
 - `loaded_at`: the time the row was loaded.
-- `job_id`: the identifier for the materialisation job.
+- `job_id`: the identifier for the materialisation job. This references the
+  `job_id` shared by the start and end events in the job table.
 - `failure_details`: details of the first failure detected for the row.
 
 For convenience, quarantine metadata columns appear first in the quarantine
@@ -191,6 +243,75 @@ control_data:
     database: ops
     schema: data_quality
     table: account_load_QUARANTINE
+```
+
+### 5.2 Job Table
+
+```text
+job_table ::=
+  database?
+  schema?
+  table?
+
+database ::= string
+schema ::= string
+table ::= string
+
+job_event_type ::= JOB_START | JOB_END
+job_result ::= COMPLETED | COMPLETED_WITH_ERRORS | FAILED
+```
+
+The job table records event rows for each materialisation load. Each load emits
+a `JOB_START` event and a `JOB_END` event. The two events for the same load
+must share the same `job_id`.
+
+If `job.table` is omitted, implementations should default to
+`<target.name>_JOB`.
+
+If `job.database` or `job.schema` are omitted, implementations should use their
+default database or schema resolution rules for generated objects.
+
+The job table must be created if it does not exist. If it already exists, it
+must be expanded to cover the required job event columns, but it must never be
+shrunk automatically.
+
+The job event columns are:
+
+- `job_id`: the identifier for a single materialisation load. This is shared by
+  the load's `JOB_START` and `JOB_END` events and is referenced by quarantine
+  rows for failures from the same load.
+- `event_type`: the lifecycle event type.
+- `event_timestamp`: the time the event occurred.
+- `result`: the load result. `JOB_START` events should leave this value null.
+  `JOB_END` events must set it to one of the `job_result` values.
+- `caller_job_id`: the identifier supplied by the calling job system, such as an
+  Airflow task id.
+
+`job_event_type` values:
+
+- `JOB_START`: the materialisation load has started.
+- `JOB_END`: the materialisation load has ended.
+
+`job_result` values:
+
+- `COMPLETED`: the materialisation load completed without validation,
+  conversion, or runtime failures.
+- `COMPLETED_WITH_ERRORS`: the materialisation load completed after writing one
+  or more failed records to quarantine output.
+- `FAILED`: the materialisation load did not complete successfully.
+
+The quarantine table retains its own `loaded_at`, `job_id`, and
+`failure_details` metadata columns so failed rows can be inspected directly
+while still tying back to the exact load lifecycle details in the job table.
+
+Sample: job table configuration.
+
+```yaml
+control_data:
+  job:
+    database: ops
+    schema: data_quality
+    table: account_JOB
 ```
 
 ## 6. Source
@@ -235,17 +356,20 @@ CSV dialect options align with Python CSV dialect concepts:
   Defaults to `"`.
 - `row_terminator`: row terminator string, equivalent to Python
   `lineterminator`. Defaults to `\r\n`.
-- `quoting`: quoting behavior, equivalent to Python `quoting`. Defaults to
-  `minimal`.
+- `quoting`: how the reader interprets quoted fields, equivalent to Python
+  `quoting`. Defaults to `minimal`.
 
 `quoting` values:
 
-- `minimal`: quote only fields containing special characters.
-- `all`: quote all fields.
-- `non_numeric`: quote non-numeric fields.
-- `none`: do not treat quote characters specially.
-- `notnull`: quote fields that are not null.
-- `strings`: quote fields that are strings.
+- `minimal`: parse quote characters only where needed for fields containing
+  special characters.
+- `all`: parse all fields as quoted fields.
+- `non_numeric`: parse quoted fields as non-numeric values and unquoted fields
+  as numeric values where supported.
+- `none`: do not treat quote characters specially while reading.
+- `notnull`: parse quoted fields as non-null values and unquoted empty fields
+  as null where supported.
+- `strings`: parse quoted fields as string values where supported.
 
 Sample: CSV source.
 
@@ -295,6 +419,8 @@ name ::= string
 
 `target` describes the typed data produced by the materialisation.
 
+`target.fields` must contain at least one field.
+
 Sample: target table definition.
 
 ```yaml
@@ -320,11 +446,14 @@ field ::=
   unique?
   validations?
 
+id ::= identifier
 nullable ::= true | false
 unique ::= true | false
 ```
 
 `target.fields` is an ordered list of fields to materialise in the target.
+Each field `id` is an identifier and must be unique within the resolved target
+field list.
 
 Sample: target field.
 
@@ -600,7 +729,8 @@ macro ::= dbt macro name
 - `min_length`: string length must be greater than or equal to `value`.
 - `max_length`: string length must be less than or equal to `value`.
 - `regex`: string value must match `pattern`.
-- `allowed_values`: value must be one of `values`.
+- `allowed_values`: value must be one of `values`; `values` must contain at
+  least one scalar value.
 - `min_value`: value must be greater than or equal to `value`.
 - `max_value`: value must be less than or equal to `value`.
 - `precision`: numeric value must fit the configured decimal precision and
@@ -723,6 +853,7 @@ Load-time rules:
 
 ```text
 extends ::= parent_specification_id
+parent_specification_id ::= identifier
 
 parent_specification_path ::= same_directory + "/" + parent_specification_id + ".yaml"
 inheritance_chain ::= oldest_ancestor -> ... -> parent -> child
