@@ -14,7 +14,9 @@ source:
   row_terminator: "\r\n"
   quoting: minimal
 target:
-  name: account
+  id: account
+  database: analytics
+  schema: business
   fields:
     - id: account_id
       source:

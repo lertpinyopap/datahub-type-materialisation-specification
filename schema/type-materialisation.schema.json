@@ -28,35 +28,25 @@
   },
   "allOf": [
     {
-      "if": {
-        "not": {
-          "required": ["extends"]
-        }
-      },
-      "then": {
-        "required": ["source", "target"],
-        "properties": {
-          "source": {
-            "oneOf": [
-              {
-                "$ref": "#/$defs/csvSource"
-              },
-              {
-                "$ref": "#/$defs/tableSource"
-              }
-            ]
-          },
-          "target": {
-            "$ref": "#/$defs/fullTarget"
-          }
+      "required": ["source", "target"],
+      "properties": {
+        "source": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/csvSource"
+            },
+            {
+              "$ref": "#/$defs/tableSource"
+            }
+          ]
+        },
+        "target": {
+          "$ref": "#/$defs/fullTarget"
         }
       }
     },
     {
       "if": {
-        "not": {
-          "required": ["extends"]
-        },
         "properties": {
           "source": {
             "properties": {
@@ -85,9 +75,6 @@
     },
     {
       "if": {
-        "not": {
-          "required": ["extends"]
-        },
         "properties": {
           "source": {
             "properties": {
@@ -119,9 +106,6 @@
     },
     {
       "if": {
-        "not": {
-          "required": ["extends"]
-        },
         "properties": {
           "source": {
             "properties": {
@@ -303,7 +287,16 @@
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "name": {
+        "id": {
+          "$ref": "#/$defs/specificationId"
+        },
+        "database": {
+          "$ref": "#/$defs/templatedString"
+        },
+        "schema": {
+          "$ref": "#/$defs/templatedString"
+        },
+        "table_name": {
           "$ref": "#/$defs/templatedString"
         },
         "fields": {
@@ -318,9 +311,18 @@
     "fullTarget": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["name", "fields"],
+      "required": ["id", "database", "schema", "fields"],
       "properties": {
-        "name": {
+        "id": {
+          "$ref": "#/$defs/specificationId"
+        },
+        "database": {
+          "$ref": "#/$defs/templatedString"
+        },
+        "schema": {
+          "$ref": "#/$defs/templatedString"
+        },
+        "table_name": {
           "$ref": "#/$defs/templatedString"
         },
         "fields": {
@@ -336,6 +338,14 @@
       "type": "object",
       "additionalProperties": false,
       "required": ["id"],
+      "not": {
+        "properties": {
+          "id": {
+            "$ref": "#/$defs/reservedAuditFieldId"
+          }
+        },
+        "required": ["id"]
+      },
       "properties": {
         "id": {
           "$ref": "#/$defs/specificationId"
@@ -683,6 +693,10 @@
     },
     "scalarValue": {
       "type": ["string", "number", "integer", "boolean", "null"]
+    },
+    "reservedAuditFieldId": {
+      "type": "string",
+      "pattern": "^([Aa][Uu][Dd][Ii][Tt]_[Dd][Aa][Tt][Aa]_[Pp][Rr][Oo][Cc][Ee][Ss][Ss]_[Kk][Ee][Yy]|[Aa][Uu][Dd][Ii][Tt]_[Cc][Rr][Ee][Aa][Tt][Ee][Dd]_[Dd][Aa][Tt][Ee][Tt][Ii][Mm][Ee]|[Aa][Uu][Dd][Ii][Tt]_[Ll][Aa][Ss][Tt]_[Cc][Hh][Aa][Nn][Gg][Ee][Dd]_[Dd][Aa][Tt][Ee][Tt][Ii][Mm][Ee])$"
     }
   }
 }

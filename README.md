@@ -23,8 +23,11 @@ runtime.
 
 - [SPEC.md](./SPEC.md) contains the formal Type Materialisation Specification.
 - [schema/type-materialisation.schema.json](./schema/type-materialisation.schema.json)
-  contains the JSON Schema for static YAML validation.
-- [samples/](./samples) contains valid sample specifications.
+  contains the JSON Schema for static concrete specification validation.
+- [schema/type-materialisation-abstract.schema.json](./schema/type-materialisation-abstract.schema.json)
+  contains the JSON Schema for static abstract specification shape validation.
+- [samples/](./samples) contains valid concrete and abstract sample
+  specifications.
 - [AGENTS.md](./AGENTS.md) contains working instructions for Codex and other
   repository agents.
 
@@ -48,7 +51,9 @@ source:
   row_terminator: "\r\n"
   quoting: minimal
 target:
-  name: account
+  id: account
+  database: analytics
+  schema: business
   fields:
     - id: account_id
       source:

@@ -20,8 +20,11 @@ property? ::= optional property
 property[] ::= list property
 ```
 
-The grammar is descriptive. The formal static validator is the JSON Schema in
-`schema/type-materialisation.schema.json`.
+The grammar is descriptive. The formal static validator for concrete
+specifications is the JSON Schema in
+`schema/type-materialisation.schema.json`. Abstract specifications used for
+inheritance can be shape-checked with
+`schema/type-materialisation-abstract.schema.json`.
 
 Unless otherwise stated, a required string value must contain at least one
 non-whitespace character after YAML parsing. Optional string values follow the
@@ -44,7 +47,7 @@ specification or field.
 ## 3. Overall Document
 
 ```text
-type_materialisation_spec ::= complete_spec | extending_spec
+type_materialisation_spec ::= complete_spec | abstract_spec | extending_spec
 
 complete_spec ::=
   id
@@ -52,6 +55,13 @@ complete_spec ::=
   control_data?
   source
   target
+
+abstract_spec ::=
+  id
+  description?
+  control_data?
+  source?
+  target?
 
 extending_spec ::=
   id
@@ -75,7 +85,9 @@ source:
   separator: ","
   header: true
 target:
-  name: account
+  id: account
+  database: analytics
+  schema: business
   fields:
     - id: account_id
       source:
@@ -112,6 +124,12 @@ target:
           mode: half_up
       nullable: false
 ```
+
+An abstract specification is incomplete by itself and is not directly
+materialisable. It may omit any optional or required element from a complete
+specification so that descendants can supply the missing attributes through
+inheritance. Any element that an abstract specification does include must still
+be valid for its declared shape.
 
 ## 4. Identity
 
@@ -189,7 +207,8 @@ control_data:
   quarantine:
     table: account_QUARANTINE
   job:
-    table: account_JOB
+    schema: BUSINESS
+    table: TYPE_MATERIALISATION_JOBS
 ```
 
 ### 5.1 Quarantine Table
@@ -207,12 +226,19 @@ table ::= string
 
 The quarantine table is used when `failure_mode` is `quarantine_row`.
 
-If `quarantine.table` is omitted, implementations should default to
-`<target.name>_QUARANTINE`.
+In generated-object defaulting rules, the resolved target database, schema, and
+table are the physical relation location declared by the resolved target.
+The resolved target table name is `target.table_name` when supplied, otherwise
+`target.id`.
 
-If `quarantine.database` or `quarantine.schema` are omitted, implementations
-should use their default database or schema resolution rules for generated
-objects.
+If `quarantine.database` is omitted, implementations should default it to the
+resolved target database.
+
+If `quarantine.schema` is omitted, implementations should default it to the
+resolved target schema.
+
+If `quarantine.table` is omitted, implementations should default it to the
+resolved target table name with `_QUARANTINE` appended.
 
 The quarantine table must be created if it does not exist. If it already exists,
 it must be expanded to cover the number of source fields present in the source
@@ -268,10 +294,12 @@ a `JOB_START` event and a `JOB_END` event. The two events for the same load
 must share the same `job_id`.
 
 If `job.table` is omitted, implementations should default to
-`<target.name>_JOB`.
+`TYPE_MATERIALISATION_JOBS`.
 
-If `job.database` or `job.schema` are omitted, implementations should use their
-default database or schema resolution rules for generated objects.
+If `job.database` is omitted, implementations should default it to the resolved
+target database.
+
+If `job.schema` is omitted, implementations should default it to `BUSINESS`.
 
 The job table must be created if it does not exist. If it already exists, it
 must be expanded to cover the required job event columns, but it must never be
@@ -287,8 +315,12 @@ The job event columns are:
 - `result`: the load result. `JOB_START` events should leave this value null
   unless the materialisation fails before load time. `JOB_END` events must set
   it to `COMPLETED`, `COMPLETED_WITH_ERRORS`, or `FAILED`.
-- `caller_job_id`: the identifier supplied by the calling job system, such as an
-  Airflow task id.
+- `audit_data_process_key`: the operational process key for the pipeline
+  execution or run that produced the job event.
+- `audit_created_datetime`: the time the job event row was first created in the
+  platform.
+- `audit_last_changed_datetime`: the time the job event row was most recently
+  changed in the platform.
 
 `job_event_type` values:
 
@@ -313,14 +345,19 @@ The quarantine table retains its own `loaded_at`, `job_id`, and
 `failure_details` metadata columns so failed rows can be inspected directly
 while still tying back to the exact load lifecycle details in the job table.
 
+The `audit_data_process_key` links job events to centralized operational
+metadata for lineage tracing, reconciliation, and observability. The same
+`audit_data_process_key` must be applied to target rows created or changed by
+the materialisation process.
+
 Sample: job table configuration.
 
 ```yaml
 control_data:
   job:
     database: ops
-    schema: data_quality
-    table: account_JOB
+    schema: BUSINESS
+    table: TYPE_MATERIALISATION_JOBS
 ```
 
 ## 6. Source
@@ -420,21 +457,58 @@ source:
 
 ```text
 target ::=
-  name
+  id
+  database
+  schema
+  table_name?
   fields[]
 
-name ::= string
+id ::= identifier
+database ::= string
+schema ::= string
+table_name ::= string
 ```
 
 `target` describes the typed data produced by the materialisation.
 
+`target.id` is the stable identifier for the target. It is compared
+case-insensitively like other identifiers.
+
+`target.database` and `target.schema` are required for complete or resolved
+specifications. There is no default target database or target schema.
+
+`target.table_name` is the target table name. If omitted, implementations
+should use `target.id` as the table name.
+
 `target.fields` must contain at least one field.
+
+### 7.1 Target Audit Metadata
+
+Every target row created or changed by a materialisation process must include
+operational traceability metadata. These audit metadata columns are generated by
+the implementation and are not declared in `target.fields`.
+
+The target audit metadata columns are:
+
+- `audit_data_process_key`: the operational process key for the pipeline
+  execution or run that produced the row. This links target rows to centralized
+  operational metadata for lineage tracing, reconciliation, and observability.
+- `audit_created_datetime`: the timestamp when the row was first created in the
+  platform. This value is immutable for the lifetime of the row and supports
+  data freshness checks and initial load tracking.
+- `audit_last_changed_datetime`: the timestamp of the most recent change applied
+  to the row. This value is updated on every insert, update, or delete and
+  supports incremental processing and observability.
+
+Target field ids must not use the reserved audit metadata column names.
 
 Sample: target table definition.
 
 ```yaml
 target:
-  name: account
+  id: account
+  database: analytics
+  schema: business
   fields:
     - id: account_id
       source:
@@ -834,8 +908,10 @@ RESOLVE time ::= rules that require variable resolution
 LOAD time ::= rules that require source data or source metadata
 ```
 
-Schema-time rules are enforced by
-`schema/type-materialisation.schema.json`.
+Schema-time rules for concrete specifications are enforced by
+`schema/type-materialisation.schema.json`. Schema-time shape rules for abstract
+specifications are enforced by
+`schema/type-materialisation-abstract.schema.json`.
 
 Failures before LOAD time are recorded against the `JOB_START` event when a job
 table row can be emitted. Schema-time and parse-time failures use
@@ -851,12 +927,18 @@ Parse-time rules:
   is invalid.
 - For `source.format = table`, `field.source.column` is required.
 - For `source.format = table`, `field.source.pos` is invalid.
+- Target field ids must not use reserved audit metadata column names:
+  `audit_data_process_key`, `audit_created_datetime`, or
+  `audit_last_changed_datetime`.
 
 Inheritance-time rules:
 
 - Parent specifications referenced by `extends` must be available before
   variable expressions are resolved.
-- The resolved specification after inheritance must be complete.
+- An abstract specification may remain incomplete while it is only used as an
+  inheritance parent.
+- A specification selected for materialisation must be complete after
+  inheritance resolution.
 
 Resolve-time rules:
 
@@ -893,6 +975,14 @@ additive overlay model: parent attributes are loaded first, child attributes are
 loaded over the top, and the child always wins when both define the same
 attribute.
 
+Abstract specifications are intended for inheritance. They may omit any element
+that would be required in a complete specification, including `source`, target
+id, target database, target schema, target fields, field source, or field data
+type. Omitted attributes must be supplied by descendants before the
+specification can be materialised. Supplied attributes in an abstract
+specification must still satisfy the same schema-time and parse-time rules as
+the equivalent attributes in a complete specification.
+
 Sample: child specification extending a parent.
 
 ```yaml
@@ -915,7 +1005,9 @@ source:
   schema: reference_data
   table: abstract_reference_code_data
 target:
-  name: abstract_reference_code_data
+  id: abstract_reference_code_data
+  database: analytics
+  schema: business
   fields:
     - id: code
       source:
@@ -934,7 +1026,7 @@ description: Customer reference code data.
 source:
   table: customer_reference_code_data
 target:
-  name: customer_reference_code_data
+  id: customer_reference_code_data
   fields:
     - id: code
       data_type: varchar(20)

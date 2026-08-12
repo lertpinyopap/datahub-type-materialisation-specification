@@ -1,11 +1,11 @@
-# yaml-language-server: $schema=../schema/type-materialisation.schema.json
+# yaml-language-server: $schema=../schema/type-materialisation-abstract.schema.json
 id: customer_reference_code_data
 extends: abstract_reference_code_data
 description: Customer reference code data.
 source:
   table: customer_reference_code_data
 target:
-  name: customer_reference_code_data
+  id: customer_reference_code_data
   fields:
     - id: code
       data_type: varchar(20)

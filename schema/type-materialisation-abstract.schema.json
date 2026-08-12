@@ -1,0 +1,175 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://datahub/type-materialisation-abstract.schema.json",
+  "title": "Abstract Type Materialisation Specification",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["id"],
+  "properties": {
+    "id": {
+      "$ref": "type-materialisation.schema.json#/$defs/specificationId"
+    },
+    "description": {
+      "type": "string"
+    },
+    "extends": {
+      "$ref": "type-materialisation.schema.json#/$defs/specificationId",
+      "description": "Parent specification id. The parent file is expected in the same folder as <id>.yaml."
+    },
+    "control_data": {
+      "$ref": "type-materialisation.schema.json#/$defs/controlData"
+    },
+    "source": {
+      "$ref": "type-materialisation.schema.json#/$defs/sourcePatch"
+    },
+    "target": {
+      "$ref": "type-materialisation.schema.json#/$defs/targetPatch"
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "source": {
+            "properties": {
+              "format": {
+                "const": "csv"
+              }
+            },
+            "required": ["format"]
+          }
+        },
+        "required": ["source"]
+      },
+      "then": {
+        "properties": {
+          "target": {
+            "properties": {
+              "fields": {
+                "items": {
+                  "$ref": "#/$defs/csvFieldPatch"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "source": {
+            "properties": {
+              "format": {
+                "const": "csv"
+              },
+              "header": {
+                "const": false
+              }
+            },
+            "required": ["format", "header"]
+          }
+        },
+        "required": ["source"]
+      },
+      "then": {
+        "properties": {
+          "target": {
+            "properties": {
+              "fields": {
+                "items": {
+                  "$ref": "#/$defs/csvNoHeaderFieldPatch"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "source": {
+            "properties": {
+              "format": {
+                "const": "table"
+              }
+            },
+            "required": ["format"]
+          }
+        },
+        "required": ["source"]
+      },
+      "then": {
+        "properties": {
+          "target": {
+            "properties": {
+              "fields": {
+                "items": {
+                  "$ref": "#/$defs/tableFieldPatch"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "csvFieldPatch": {
+      "allOf": [
+        {
+          "$ref": "type-materialisation.schema.json#/$defs/fieldPatch"
+        },
+        {
+          "properties": {
+            "source": {
+              "anyOf": [
+                {
+                  "required": ["pos"]
+                },
+                {
+                  "required": ["column"]
+                }
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "csvNoHeaderFieldPatch": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/csvFieldPatch"
+        },
+        {
+          "properties": {
+            "source": {
+              "required": ["pos"],
+              "not": {
+                "required": ["column"]
+              }
+            }
+          }
+        }
+      ]
+    },
+    "tableFieldPatch": {
+      "allOf": [
+        {
+          "$ref": "type-materialisation.schema.json#/$defs/fieldPatch"
+        },
+        {
+          "properties": {
+            "source": {
+              "required": ["column"],
+              "not": {
+                "required": ["pos"]
+              }
+            }
+          }
+        }
+      ]
+    }
+  }
+}

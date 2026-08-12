@@ -13,7 +13,9 @@ source:
   schema: reference_data
   table: abstract_reference_code_data
 target:
-  name: abstract_reference_code_data
+  id: abstract_reference_code_data
+  database: analytics
+  schema: business
   fields:
     - id: code
       source:
