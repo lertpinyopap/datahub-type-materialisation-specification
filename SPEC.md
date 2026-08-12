@@ -7,7 +7,8 @@ for describing how flat, raw, or schema-on-read data is transformed into typed
 relational data.
 
 The specification is designed to support CSV sources, table sources, reusable
-table families through inheritance, and dbt-based materialisation.
+table families through inheritance, and dbt-based materialisation, and may be
+extended to other source formats in the future.
 
 ## 2. Notation
 
