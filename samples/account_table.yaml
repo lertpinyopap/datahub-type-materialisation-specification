@@ -1,0 +1,26 @@
+# yaml-language-server: $schema=../schema/type-materialisation.schema.json
+id: account_table
+description: Maps landed account table data into a typed account table.
+control_data:
+  materialisation_type: table
+  failure_mode: fail_file
+source:
+  format: table
+  database: "{{ env_var('RAW_DATABASE') }}"
+  schema: "{{ var('raw_schema', 'landing') }}"
+  table: "{{ env_var('ENV') }}_account_file_landed"
+target:
+  name: account
+  fields:
+    - id: account_id
+      source:
+        column: account_id
+      data_type: varchar(20)
+      nullable: false
+      unique: true
+    - id: account_name
+      source:
+        column: account_name
+      data_type: varchar(255)
+      nullable: true
+      unique: false

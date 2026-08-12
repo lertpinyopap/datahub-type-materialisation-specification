@@ -1,0 +1,308 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://datahub/type-materialisation.schema.json",
+  "title": "Type Materialisation Specification",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["id", "source", "target"],
+  "properties": {
+    "id": {
+      "$ref": "#/$defs/specificationId"
+    },
+    "description": {
+      "type": "string"
+    },
+    "extends": {
+      "$ref": "#/$defs/specificationId"
+    },
+    "control_data": {
+      "$ref": "#/$defs/controlData"
+    },
+    "source": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/csvSource"
+        },
+        {
+          "$ref": "#/$defs/tableSource"
+        }
+      ]
+    },
+    "target": {
+      "$ref": "#/$defs/target"
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "source": {
+            "properties": {
+              "format": {
+                "const": "csv"
+              }
+            },
+            "required": ["format"]
+          }
+        },
+        "required": ["source"]
+      },
+      "then": {
+        "properties": {
+          "target": {
+            "properties": {
+              "fields": {
+                "items": {
+                  "$ref": "#/$defs/csvField"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "source": {
+            "properties": {
+              "format": {
+                "const": "csv"
+              },
+              "header": {
+                "const": false
+              }
+            },
+            "required": ["format", "header"]
+          }
+        },
+        "required": ["source"]
+      },
+      "then": {
+        "properties": {
+          "target": {
+            "properties": {
+              "fields": {
+                "items": {
+                  "$ref": "#/$defs/csvNoHeaderField"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "source": {
+            "properties": {
+              "format": {
+                "const": "table"
+              }
+            },
+            "required": ["format"]
+          }
+        },
+        "required": ["source"]
+      },
+      "then": {
+        "properties": {
+          "target": {
+            "properties": {
+              "fields": {
+                "items": {
+                  "$ref": "#/$defs/tableField"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "specificationId": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^[A-Za-z][A-Za-z0-9_-]*$"
+    },
+    "templatedString": {
+      "type": "string",
+      "minLength": 1
+    },
+    "controlData": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "materialisation_type": {
+          "type": "string",
+          "enum": ["view", "materialised_view", "table"]
+        },
+        "failure_mode": {
+          "type": "string",
+          "enum": ["fail_file", "quarantine_row"]
+        }
+      }
+    },
+    "csvSource": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["format", "separator", "header"],
+      "properties": {
+        "format": {
+          "const": "csv"
+        },
+        "separator": {
+          "type": "string",
+          "minLength": 1
+        },
+        "header": {
+          "type": "boolean"
+        }
+      }
+    },
+    "tableSource": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["format", "database", "schema", "table"],
+      "properties": {
+        "format": {
+          "const": "table"
+        },
+        "database": {
+          "$ref": "#/$defs/templatedString"
+        },
+        "schema": {
+          "$ref": "#/$defs/templatedString"
+        },
+        "table": {
+          "$ref": "#/$defs/templatedString"
+        }
+      }
+    },
+    "target": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "fields"],
+      "properties": {
+        "name": {
+          "$ref": "#/$defs/templatedString"
+        },
+        "fields": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/field"
+          }
+        }
+      }
+    },
+    "field": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "source", "data_type"],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/specificationId"
+        },
+        "source": {
+          "$ref": "#/$defs/fieldSource"
+        },
+        "data_type": {
+          "$ref": "#/$defs/templatedString"
+        },
+        "nullable": {
+          "type": "boolean"
+        },
+        "unique": {
+          "type": "boolean"
+        },
+        "validations": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/validationRule"
+          }
+        }
+      }
+    },
+    "fieldSource": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "pos": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "column": {
+          "$ref": "#/$defs/templatedString"
+        }
+      }
+    },
+    "csvField": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/field"
+        },
+        {
+          "properties": {
+            "source": {
+              "anyOf": [
+                {
+                  "required": ["pos"]
+                },
+                {
+                  "required": ["column"]
+                }
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "csvNoHeaderField": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/csvField"
+        },
+        {
+          "properties": {
+            "source": {
+              "required": ["pos"],
+              "not": {
+                "required": ["column"]
+              }
+            }
+          }
+        }
+      ]
+    },
+    "tableField": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/field"
+        },
+        {
+          "properties": {
+            "source": {
+              "required": ["column"],
+              "not": {
+                "required": ["pos"]
+              }
+            }
+          }
+        }
+      ]
+    },
+    "validationRule": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["type"],
+      "properties": {
+        "type": {
+          "$ref": "#/$defs/specificationId"
+        }
+      }
+    }
+  }
+}
