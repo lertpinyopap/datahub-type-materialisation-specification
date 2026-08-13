@@ -1,8 +1,8 @@
 # Agent Instructions
 
-This repository defines the Type Materialisation Specification. Treat the
-specification as the product: documentation changes can alter downstream
-implementation behavior.
+This repository defines the Type Materialisation Specification and its Python
+reference implementation. Treat the specification as the product:
+documentation changes can alter downstream implementation behavior.
 
 ## Working Principles
 
@@ -46,6 +46,28 @@ adding implementation notes:
   explicitly agreed.
 - Prefer simple reference behavior over production-specific assumptions.
 - Add conformance-oriented examples where useful.
+
+## Python Reference Implementation
+
+The Python implementation in `src/type_materialisation/` is the reference
+implementation, not miscellaneous utility code. The installed CLI command is
+`tms`.
+
+- Target Python 3.13.
+- Use idiomatic, typed Python with standard-library facilities where practical.
+- Keep dependencies explicit in `requirements.txt`; install package wiring with
+  `python -m pip install --no-build-isolation --no-deps -e .` after installing
+  requirements.
+- Keep package code under `src/type_materialisation/`.
+- Keep the public CLI command named `tms`, even though the import package is
+  `type_materialisation`.
+- Prefer small modules with clear responsibility: parsing, schema validation,
+  CSV validation, macro loading, and dbt generation support.
+- Custom macros are Python objects implementing the Type Materialisation macro
+  interface. SQL generation is required; local Python execution is optional and
+  should produce a warning in `tms validate` when absent.
+- Do not add generated dbt project files to the repository unless explicitly
+  requested; generated dbt artifacts should normally remain transient.
 
 ## Change Control
 

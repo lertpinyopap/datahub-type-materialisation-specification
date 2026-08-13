@@ -155,6 +155,13 @@
           "type": "string",
           "enum": ["fail_file", "quarantine_row"]
         },
+        "change_type": {
+          "type": "string",
+          "enum": ["scd1", "scd2"]
+        },
+        "scd": {
+          "$ref": "#/$defs/scdConfig"
+        },
         "quarantine": {
           "$ref": "#/$defs/quarantineTable"
         },
@@ -193,6 +200,181 @@
         }
       }
     },
+    "scdConfig": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "business_key": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/specificationId"
+          }
+        },
+        "delete_detection": {
+          "$ref": "#/$defs/scdDeleteDetection"
+        },
+        "effective_from": {
+          "$ref": "#/$defs/scdEffectiveFrom"
+        },
+        "effective_to": {
+          "$ref": "#/$defs/scdEffectiveTo"
+        },
+        "business_data_hash": {
+          "$ref": "#/$defs/scdBusinessDataHash"
+        }
+      }
+    },
+    "scdDeleteDetection": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["mode"],
+          "properties": {
+            "mode": {
+              "const": "missing_from_source"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["mode", "field", "deleted_values"],
+          "properties": {
+            "mode": {
+              "const": "field"
+            },
+            "field": {
+              "$ref": "#/$defs/specificationId"
+            },
+            "deleted_values": {
+              "type": "array",
+              "minItems": 1,
+              "items": {
+                "$ref": "#/$defs/scalarValue"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "scdEffectiveFrom": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["mode"],
+          "properties": {
+            "mode": {
+              "enum": ["start_of_time", "load_datetime"]
+            },
+            "truncate_to_day": {
+              "type": "boolean"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["mode", "field"],
+          "properties": {
+            "mode": {
+              "const": "field"
+            },
+            "field": {
+              "$ref": "#/$defs/specificationId"
+            },
+            "truncate_to_day": {
+              "type": "boolean"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["mode", "value"],
+          "properties": {
+            "mode": {
+              "const": "explicit"
+            },
+            "value": {
+              "$ref": "#/$defs/scalarValue"
+            },
+            "truncate_to_day": {
+              "type": "boolean"
+            }
+          }
+        }
+      ]
+    },
+    "scdEffectiveTo": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["mode"],
+          "properties": {
+            "mode": {
+              "const": "next_effective_from"
+            },
+            "end_of_time": {
+              "$ref": "#/$defs/scalarValue"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["mode", "field"],
+          "properties": {
+            "mode": {
+              "const": "field"
+            },
+            "field": {
+              "$ref": "#/$defs/specificationId"
+            },
+            "end_of_time": {
+              "$ref": "#/$defs/scalarValue"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["mode", "value"],
+          "properties": {
+            "mode": {
+              "const": "explicit"
+            },
+            "value": {
+              "$ref": "#/$defs/scalarValue"
+            },
+            "end_of_time": {
+              "$ref": "#/$defs/scalarValue"
+            }
+          }
+        }
+      ]
+    },
+    "scdBusinessDataHash": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["mode"],
+      "properties": {
+        "mode": {
+          "type": "string",
+          "enum": ["include", "exclude"]
+        },
+        "fields": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/specificationId"
+          }
+        }
+      }
+    },
     "sourcePatch": {
       "type": "object",
       "additionalProperties": false,
@@ -221,6 +403,12 @@
         },
         "header": {
           "type": "boolean"
+        },
+        "location": {
+          "$ref": "#/$defs/csvSourceLocation"
+        },
+        "upload": {
+          "$ref": "#/$defs/csvSourceUpload"
         },
         "database": {
           "$ref": "#/$defs/templatedString"
@@ -261,13 +449,67 @@
         },
         "header": {
           "type": "boolean"
+        },
+        "location": {
+          "$ref": "#/$defs/csvSourceLocation"
+        },
+        "upload": {
+          "$ref": "#/$defs/csvSourceUpload"
         }
       }
+    },
+    "csvSourceLocation": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "database": {
+          "$ref": "#/$defs/templatedString"
+        },
+        "schema": {
+          "$ref": "#/$defs/templatedString"
+        },
+        "stage": {
+          "$ref": "#/$defs/templatedString"
+        },
+        "filename": {
+          "$ref": "#/$defs/templatedString"
+        }
+      }
+    },
+    "csvSourceUpload": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["enabled"],
+          "properties": {
+            "enabled": {
+              "const": false
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["enabled", "file", "overwrite"],
+          "properties": {
+            "enabled": {
+              "const": true
+            },
+            "file": {
+              "$ref": "#/$defs/templatedString"
+            },
+            "overwrite": {
+              "type": "boolean"
+            }
+          }
+        }
+      ]
     },
     "tableSource": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["format", "database", "schema", "table"],
+      "required": ["format", "schema", "table"],
       "properties": {
         "format": {
           "const": "table"
@@ -311,7 +553,7 @@
     "fullTarget": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["id", "database", "schema", "fields"],
+      "required": ["id", "schema", "fields"],
       "properties": {
         "id": {
           "$ref": "#/$defs/specificationId"
@@ -341,7 +583,7 @@
       "not": {
         "properties": {
           "id": {
-            "$ref": "#/$defs/reservedAuditFieldId"
+            "$ref": "#/$defs/reservedGeneratedFieldId"
           }
         },
         "required": ["id"]
@@ -540,13 +782,13 @@
           "const": "custom"
         },
         "macro": {
-          "$ref": "#/$defs/dbtMacroName"
+          "$ref": "#/$defs/pythonMacroName"
         }
       }
     },
-    "dbtMacroName": {
+    "pythonMacroName": {
       "type": "string",
-      "pattern": "^[A-Za-z][A-Za-z0-9_]*(\\.[A-Za-z][A-Za-z0-9_]*)?$"
+      "pattern": "^[A-Za-z][A-Za-z0-9_]*(\\.[A-Za-z][A-Za-z0-9_]*)+$"
     },
     "validationRule": {
       "oneOf": [
@@ -687,16 +929,16 @@
           "const": "custom"
         },
         "macro": {
-          "$ref": "#/$defs/dbtMacroName"
+          "$ref": "#/$defs/pythonMacroName"
         }
       }
     },
     "scalarValue": {
       "type": ["string", "number", "integer", "boolean", "null"]
     },
-    "reservedAuditFieldId": {
+    "reservedGeneratedFieldId": {
       "type": "string",
-      "pattern": "^([Aa][Uu][Dd][Ii][Tt]_[Dd][Aa][Tt][Aa]_[Pp][Rr][Oo][Cc][Ee][Ss][Ss]_[Kk][Ee][Yy]|[Aa][Uu][Dd][Ii][Tt]_[Cc][Rr][Ee][Aa][Tt][Ee][Dd]_[Dd][Aa][Tt][Ee][Tt][Ii][Mm][Ee]|[Aa][Uu][Dd][Ii][Tt]_[Ll][Aa][Ss][Tt]_[Cc][Hh][Aa][Nn][Gg][Ee][Dd]_[Dd][Aa][Tt][Ee][Tt][Ii][Mm][Ee])$"
+      "pattern": "^([Aa][Uu][Dd][Ii][Tt]_[Dd][Aa][Tt][Aa]_[Pp][Rr][Oo][Cc][Ee][Ss][Ss]_[Kk][Ee][Yy]|[Aa][Uu][Dd][Ii][Tt]_[Cc][Rr][Ee][Aa][Tt][Ee][Dd]_[Dd][Aa][Tt][Ee][Tt][Ii][Mm][Ee]|[Aa][Uu][Dd][Ii][Tt]_[Ll][Aa][Ss][Tt]_[Cc][Hh][Aa][Nn][Gg][Ee][Dd]_[Dd][Aa][Tt][Ee][Tt][Ii][Mm][Ee]|[Ii][Ss]_[Cc][Uu][Rr][Rr][Ee][Nn][Tt]_[Ff][Ll][Aa][Gg]|[Ii][Ss]_[Dd][Ee][Ll][Ee][Tt][Ee][Dd]_[Ff][Ll][Aa][Gg]|[Vv][Aa][Ll][Ii][Dd]_[Ff][Rr][Oo][Mm]_[Dd][Aa][Tt][Ee][Tt][Ii][Mm][Ee]|[Vv][Aa][Ll][Ii][Dd]_[Tt][Oo]_[Dd][Aa][Tt][Ee][Tt][Ii][Mm][Ee]|[Bb][Uu][Ss][Ii][Nn][Ee][Ss][Ss]_[Dd][Aa][Tt][Aa]_[Hh][Aa][Ss][Hh])$"
     }
   }
 }

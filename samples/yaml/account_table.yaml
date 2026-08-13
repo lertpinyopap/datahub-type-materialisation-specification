@@ -1,4 +1,4 @@
-# yaml-language-server: $schema=../schema/type-materialisation.schema.json
+# yaml-language-server: $schema=../../schema/type-materialisation.schema.json
 id: account_table
 description: Maps landed account table data into a typed account table.
 control_data:
@@ -26,5 +26,7 @@ target:
       data_type: varchar(255)
       transforms:
         - type: trim
+        - type: custom
+          macro: account_macros.normalise_account_name
       nullable: true
       unique: false

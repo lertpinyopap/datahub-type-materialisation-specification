@@ -1,4 +1,4 @@
-# yaml-language-server: $schema=../schema/type-materialisation.schema.json
+# yaml-language-server: $schema=../../schema/type-materialisation.schema.json
 id: abstract_reference_code_data
 description: Shared shape for reference code data tables.
 control_data:

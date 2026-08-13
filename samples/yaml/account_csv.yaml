@@ -1,4 +1,4 @@
-# yaml-language-server: $schema=../schema/type-materialisation.schema.json
+# yaml-language-server: $schema=../../schema/type-materialisation.schema.json
 id: account_csv
 description: Maps raw account CSV data into a typed account table.
 control_data:
@@ -9,6 +9,12 @@ control_data:
 source:
   format: csv
   header: true
+  location:
+    schema: AD_HOC
+    stage: "@csv_stage"
+    filename: account_csv.csv
+  upload:
+    enabled: false
   separator: ","
   quote_char: '"'
   row_terminator: "\r\n"
@@ -34,6 +40,8 @@ target:
           value: 20
         - type: regex
           pattern: "^[A-Z0-9]+$"
+        - type: custom
+          macro: account_macros.validate_account_number
     - id: account_name
       source:
         pos: 1
@@ -41,8 +49,7 @@ target:
       data_type: varchar(255)
       transforms:
         - type: trim
+        - type: custom
+          macro: account_macros.normalise_account_name
       nullable: true
       unique: false
-      validations:
-        - type: custom
-          macro: validate_account_name

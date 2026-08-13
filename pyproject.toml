@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "type-materialisation-tools"
+version = "0.1.0"
+description = "CLI utilities for the Type Materialisation Specification"
+requires-python = ">=3.13"
+dynamic = ["dependencies"]
+
+[project.scripts]
+tms = "type_materialisation.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.dynamic]
+dependencies = {file = ["requirements.txt"]}

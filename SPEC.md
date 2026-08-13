@@ -44,6 +44,12 @@ Identifiers are compared case-insensitively to align with database identifier
 handling. For example, `account_1` and `ACCOUNT_1` identify the same
 specification or field.
 
+All `database` properties in this specification are optional. When a database is
+omitted, implementations must let the active dbt adapter and database session
+context for the job resolve it. Implementations must not silently substitute a
+different configured database. Production specifications should provide
+database values explicitly unless they intentionally rely on runtime context.
+
 ## 3. Overall Document
 
 ```text
@@ -257,12 +263,14 @@ table ::= string
 The quarantine table is used when `failure_mode` is `quarantine_row`.
 
 In generated-object defaulting rules, the resolved target database, schema, and
-table are the physical relation location declared by the resolved target.
+table are the physical relation location declared by the resolved target or
+resolved by the active dbt adapter and session context.
 The resolved target table name is `target.table_name` when supplied, otherwise
 `target.id`.
 
-If `quarantine.database` is omitted, implementations should default it to the
-resolved target database.
+If `quarantine.database` is omitted, implementations should use
+`target.database` when supplied, otherwise the active dbt adapter and database
+session context.
 
 If `quarantine.schema` is omitted, implementations should default it to the
 resolved target schema.
@@ -317,6 +325,7 @@ table ::= string
 job_event_type ::= JOB_START | JOB_END
 job_result ::= COMPLETED | COMPLETED_WITH_ERRORS | FAILED
   | FAILED_TO_PARSE | FAILED_TO_INHERIT | FAILED_TO_RESOLVE
+  | FAILED_TO_COMPILE
 ```
 
 The job table records event rows for each materialisation load. Each load emits
@@ -326,8 +335,8 @@ must share the same `job_id`.
 If `job.table` is omitted, implementations should default to
 `TYPE_MATERIALISATION_JOBS`.
 
-If `job.database` is omitted, implementations should default it to the resolved
-target database.
+If `job.database` is omitted, implementations should use `target.database` when
+supplied, otherwise the active dbt adapter and database session context.
 
 If `job.schema` is omitted, implementations should default it to `BUSINESS`.
 
@@ -370,6 +379,8 @@ The job event columns are:
   inherited specifications.
 - `FAILED_TO_RESOLVE`: the materialisation failed while resolving variables or
   other pre-load values.
+- `FAILED_TO_COMPILE`: the materialisation failed while generating or compiling
+  dbt artifacts from a resolved specification.
 
 The quarantine table retains its own `loaded_at`, `job_id`, and
 `failure_details` metadata columns so failed rows can be inspected directly
@@ -582,12 +593,32 @@ csv_source ::=
   quote_char?
   row_terminator?
   quoting?
+  location?
+  upload?
+
+location ::=
+  database?
+  schema?
+  stage?
+  filename?
+
+upload ::=
+  enabled: false
+  | enabled: true
+    file
+    overwrite
 
 header ::= true | false
 separator ::= one character string
 quote_char ::= one character string
 row_terminator ::= string
 quoting ::= minimal | all | non_numeric | none | notnull | strings
+database ::= templated_string
+schema ::= templated_string
+stage ::= templated_string
+filename ::= templated_string
+file ::= templated_string
+overwrite ::= true | false
 ```
 
 CSV dialect options align with Python CSV dialect concepts:
@@ -600,6 +631,31 @@ CSV dialect options align with Python CSV dialect concepts:
   `lineterminator`. Defaults to `\r\n`.
 - `quoting`: how the reader interprets quoted fields, equivalent to Python
   `quoting`. Defaults to `minimal`.
+
+`location` describes where a CSV file is expected to be available for dbt
+materialisation:
+
+- `database`: database containing the stage. If omitted, the active dbt adapter
+  and database session context resolves it.
+- `schema`: schema containing the stage. Defaults to `AD_HOC`.
+- `stage`: Snowflake stage name. Defaults to `@csv_stage`.
+- `filename`: filename or stage path within the stage. No default.
+
+When `location.stage` includes a leading `@`, implementations should not add a
+second `@`.
+
+`upload` describes whether the reference implementation should upload the local
+CSV file before dbt generation:
+
+- `enabled: false`: no upload is requested.
+- `enabled: true`: Python tooling must upload `file` to `location` before dbt
+  generation.
+- `file`: local file path to upload.
+- `overwrite`: whether an existing staged file should be replaced.
+
+If `upload` is omitted, implementations should default to `enabled: false`.
+CSV upload is handled by Python reference tooling outside dbt generation. dbt
+generation assumes the file is already available in the configured stage.
 
 `quoting` values:
 
@@ -619,6 +675,10 @@ Sample: CSV source.
 source:
   format: csv
   header: true
+  location:
+    schema: AD_HOC
+    stage: "@csv_stage"
+    filename: account.csv
   separator: ","
   quote_char: '"'
   row_terminator: "\r\n"
@@ -630,7 +690,7 @@ source:
 ```text
 table_source ::=
   format: table
-  database
+  database?
   schema
   table
 
@@ -654,7 +714,7 @@ source:
 ```text
 target ::=
   id
-  database
+  database?
   schema
   table_name?
   fields[]
@@ -670,8 +730,9 @@ table_name ::= string
 `target.id` is the stable identifier for the target. It is compared
 case-insensitively like other identifiers.
 
-`target.database` and `target.schema` are required for complete or resolved
-specifications. There is no default target database or target schema.
+`target.schema` is required for complete or resolved specifications. If
+`target.database` is omitted, the active dbt adapter and database session
+context resolves the target database.
 
 `target.table_name` is the target table name. If omitted, implementations
 should use `target.id` as the table name.
@@ -854,7 +915,8 @@ custom ::=
   type: custom
   macro
 
-macro ::= dbt macro name
+macro ::= python_macro_name
+python_macro_name ::= dotted Python reference
 ```
 
 Transforms are simple single-column instructions applied to the extracted field
@@ -869,7 +931,7 @@ compatible with the field's `data_type`.
 - `parse_date`: parse a string value into a date using `format`.
 - `parse_timestamp`: parse a string value into a timestamp using `format`.
 - `round`: round a numeric value to a decimal `scale`.
-- `custom`: apply a named dbt macro to the column.
+- `custom`: apply a named Python macro to the column.
 
 `side` values:
 
@@ -899,17 +961,66 @@ Common date and timestamp format examples:
 - `%Y-%m-%d %H:%M:%S`: `2026-08-13 14:30:00`
 - `%Y-%m-%dT%H:%M:%S%z`: `2026-08-13T14:30:00+1000`
 
-Custom transforms are a constrained dbt extension point. `macro` names a dbt
-macro that is expected to be available to the dbt project at runtime. The macro
-is applied to the current column only.
+Custom transforms are a constrained Python extension point. `macro` names a
+Python macro object using dotted module syntax, for example
+`account_macros.normalise_account_id`. The macro is applied to the current
+column only.
 
 ```text
-custom_transform_macro ::= macro_name(column_expression)
-custom_transform_macro_result ::= SQL expression returning transformed value
+custom_transform_macro ::= macro(value, field?, rule?)
+custom_transform_macro_result ::= transformed value
 ```
 
-The dbt macro receives the SQL expression for the current column and returns a
-SQL expression for the transformed column.
+Reference dbt implementations call Python macros at generation time. A custom
+macro module must expose a SQL-generation hook that emits dbt/Jinja SQL macros
+or SQL expressions for the transient dbt project. A custom macro may also expose
+a same-named Python callable for local execution by tools such as
+`tms validate`. The Python callable itself is not executed inside dbt against
+database row values.
+
+Reference implementations must not depend on dbt Jinja importing or calling
+arbitrary project Python modules from a dbt macro. The portable dbt path is to
+call Python macros before DBT-compilation time, then generate dbt/Jinja SQL
+artifacts that dbt can compile and the target database can execute. A future
+extension may allow a Python macro to generate database-native Python UDFs or
+dbt Python models, but that is a separate execution mode from SQL model macro
+generation.
+
+Python macro object contract:
+
+```text
+python_macro_reference ::= module_path "." macro_object_name
+module_path ::= Python module path resolved from runtime macro_paths[]
+macro_object_name ::= generated dbt macro name
+```
+
+The referenced object must implement the Type Materialisation macro interface.
+
+```text
+class TypeMaterialisationMacro:
+  supports_python_execution: boolean = false
+  generate_dbt_macro() -> dbt_macro_sql
+  execute(value, field?, rule?) -> transformed_value  # optional
+
+dbt_macro_sql ::= complete dbt/Jinja macro definition
+```
+
+`generate_dbt_macro` is required. It must return a dbt/Jinja macro definition
+whose macro name is exactly `macro_object_name`. The generated transform dbt
+macro must accept `column_expression` and return a SQL expression for the
+transformed value.
+
+For local validation support, a custom transform may expose a Python callable
+through `execute` and set `supports_python_execution` to `true`.
+
+```text
+transform_callable ::= execute(value, field?, rule?)
+transform_callable_result ::= transformed value
+```
+
+If the Python callable is absent, `tms validate` should warn that the custom
+transform could not be executed locally and should continue using the
+untransformed value for local checks.
 
 Sample: common field transforms.
 
@@ -938,7 +1049,7 @@ fields:
         mode: half_up
 ```
 
-Sample: custom dbt macro transform.
+Sample: custom Python macro transform.
 
 ```yaml
 fields:
@@ -948,7 +1059,7 @@ fields:
     data_type: varchar(20)
     transforms:
       - type: custom
-        macro: normalise_account_id
+        macro: account_macros.normalise_account_id
 ```
 
 ## 12. Validation Rules
@@ -1003,7 +1114,8 @@ value ::= scalar
 pattern ::= regular expression string
 precision ::= integer >= 1
 scale ::= integer >= 0
-macro ::= dbt macro name
+macro ::= python_macro_name
+python_macro_name ::= dotted Python reference
 ```
 
 `validation_rule.type` values:
@@ -1029,13 +1141,65 @@ according to `failure_mode`.
 Custom validation macro signature:
 
 ```text
-custom_validation_macro ::= macro_name(column_expression)
-custom_validation_macro_result ::= SQL expression returning nullable string
+custom_validation_macro ::= macro(value, row?, field?, rule?)
+custom_validation_macro_result ::= null | true | false | string
 ```
 
-A custom validation returns no failure when it returns `NULL`. It returns
-failure details when it returns a string. The string should explain the first
-failure detected for the current column value.
+A custom validation returns no failure when it returns `NULL` or `true`. It
+returns a generic failure when it returns `false`, and returns failure details
+when it returns a string. The string should explain the first failure detected
+for the current column value.
+
+Reference dbt implementations call Python validation macros at generation time
+to emit dbt/Jinja SQL validation logic for the transient dbt project. A custom
+validation macro module must expose a SQL-generation hook. Local validation
+tooling may call an optional same-named Python callable directly against parsed
+input values.
+
+Reference implementations must not depend on dbt Jinja importing or calling
+arbitrary project Python modules from a dbt macro. For SQL-model
+materialisation, the Python validation macro is called by the reference
+implementation before DBT-compilation time and must produce, or participate in
+producing, SQL/Jinja artifacts that can be compiled by dbt and executed by the
+target database.
+
+Python validation macro object contract:
+
+```text
+python_macro_reference ::= module_path "." macro_object_name
+module_path ::= Python module path resolved from runtime macro_paths[]
+macro_object_name ::= generated dbt macro name
+```
+
+The referenced object must implement the Type Materialisation macro interface.
+
+```text
+class TypeMaterialisationMacro:
+  supports_python_execution: boolean = false
+  generate_dbt_macro() -> dbt_macro_sql
+  execute(value, row?, field?, rule?) -> null | true | false | string  # optional
+
+dbt_macro_sql ::= complete dbt/Jinja macro definition
+```
+
+`generate_dbt_macro` is required. It must return a dbt/Jinja macro definition
+whose macro name is exactly `macro_object_name`. The generated validation dbt
+macro must accept `column_expression` and return a nullable SQL string
+expression. The SQL expression returns `NULL` when validation passes, and a
+non-null failure message when validation fails.
+
+For local validation, a custom validation may expose a Python callable with the
+`execute` method and set `supports_python_execution` to `true`. The callable
+accepts the current value and may optionally accept context keyword arguments.
+
+```text
+validation_callable ::= execute(value, row?, field?, rule?)
+validation_callable_result ::= null | true | false | string
+```
+
+If the Python callable is absent, `tms validate` should warn that the custom
+validation could not be executed locally and should continue with the other
+local checks.
 
 Sample: common field validation rules.
 
@@ -1061,7 +1225,7 @@ Sample: custom validation rule.
 ```yaml
 validations:
   - type: custom
-    macro: validate_account_id
+    macro: account_macros.validate_account_number
 ```
 
 The JSON Schema validates the shape of validation rules, not the runtime
@@ -1101,6 +1265,7 @@ SCHEMA time ::= YAML parses and conforms to JSON Schema
 PARSE time ::= rules that require the parsed YAML document
 INHERITANCE time ::= parent specifications are loaded and overlaid
 RESOLVE time ::= rules that require variable resolution
+DBT_COMPILATION time ::= dbt artifacts are generated and compiled
 LOAD time ::= rules that require source data or source metadata
 ```
 
@@ -1111,8 +1276,9 @@ specifications are enforced by
 
 Failures before LOAD time are recorded against the `JOB_START` event when a job
 table row can be emitted. Schema-time and parse-time failures use
-`FAILED_TO_PARSE`, inheritance-time failures use `FAILED_TO_INHERIT`, and
-resolve-time failures use `FAILED_TO_RESOLVE`.
+`FAILED_TO_PARSE`, inheritance-time failures use `FAILED_TO_INHERIT`,
+resolve-time failures use `FAILED_TO_RESOLVE`, and DBT-compilation-time
+failures use `FAILED_TO_COMPILE`.
 
 Parse-time rules:
 
@@ -1154,8 +1320,16 @@ Resolve-time rules:
 - Supported variable expressions must resolve to strings.
 - A variable with no value and no default fails resolution.
 - Unsupported Jinja expressions are invalid.
-- Custom transform macros must be available to dbt implementations before the
+- Custom Python transform macros must be available to implementations before the
   materialisation is executed.
+
+DBT-compilation-time rules:
+
+- Resolved specifications must generate valid dbt artifacts.
+- Generated dbt artifacts must compile successfully before source data is
+  loaded or target data is changed.
+- dbt artifacts generated from custom Python transform and validation macros
+  must be available in the generated dbt project before compilation.
 
 Load-time rules:
 
@@ -1170,7 +1344,8 @@ Load-time rules:
 extends ::= parent_specification_id
 parent_specification_id ::= identifier
 
-parent_specification_path ::= same_directory + "/" + parent_specification_id + ".yaml"
+parent_specification_path ::= specification_search_path + "/" + parent_specification_id + ".yaml"
+specification_search_path ::= same_directory | runtime inheritance path
 inheritance_chain ::= oldest_ancestor -> ... -> parent -> child
 resolved_specification ::= overlay(inheritance_chain)
 
@@ -1186,8 +1361,8 @@ attribute.
 
 Abstract specifications are intended for inheritance. They may omit any element
 that would be required in a complete specification, including `source`, target
-id, target database, target schema, target fields, field source, or field data
-type. Omitted attributes must be supplied by descendants before the
+id, target schema, target fields, field source, or field data type. Omitted
+attributes must be supplied by descendants before the
 specification can be materialised. Supplied attributes in an abstract
 specification must still satisfy the same schema-time and parse-time rules as
 the equivalent attributes in a complete specification.
@@ -1250,8 +1425,12 @@ Inheritance rules:
 
 - A child specification references one parent through `extends`.
 - Multiple layers of inheritance are supported through chained `extends`.
-- Parent specifications are expected to be available in the same folder as the
-  child specification and named `<id>.yaml`.
+- Parent specifications are resolved from the child specification directory and
+  any runtime-provided inheritance paths. The path values are supplied by the
+  reference implementation runtime environment, not by the YAML specification.
+- Parent specification files are expected to be named `<id>.yaml`.
+- If a parent id resolves to multiple candidate files, the implementation must
+  fail inheritance resolution rather than silently choosing one.
 - Implementations load the oldest ancestor first, then each descendant in order,
   ending with the child specification.
 - Child scalar attributes override parent scalar attributes.
@@ -1358,6 +1537,65 @@ Python may be used for repository tooling such as YAML parsing, JSON Schema
 validation, inheritance resolution, dbt artifact generation, golden-file tests,
 and test harnesses. Python is not a separate materialisation runtime for this
 specification.
+
+Reference implementations may generate a transient dbt project at runtime from
+resolved specifications. Generated dbt artifacts are an execution detail and are
+not source-of-truth specification files.
+
+The transient dbt project should use a predictable runtime structure:
+
+```text
+runtime_root/
+  python_macros/
+    custom/
+      *.py
+  dbt_project.yml
+  models/
+    generated/
+      <target.id>.sql
+  macros/
+    reference/
+      *.sql
+    generated/
+      *.sql
+  target/
+  logs/
+```
+
+`models/generated/` contains generated dbt model files for resolved concrete
+specifications.
+
+The reference implementation should build the transient dbt project structure,
+compile the generated project, and then run the compiled dbt project. Compilation
+must complete successfully before any source data is loaded or target data is
+changed.
+
+`python_macros/custom/` contains user-supplied Python macro modules required by
+custom transform or validation rules. Custom Python macro files are supplied
+through runtime macro paths, not through YAML specification properties.
+
+`macros/reference/` contains reference implementation dbt/Jinja macros required
+to materialise the specification.
+
+`macros/generated/` contains dbt/Jinja macros emitted by Python macro modules
+during dbt project generation.
+
+The runtime environment may provide:
+
+- `inheritance_paths[]`: additional directories searched when resolving
+  `extends`.
+- `macro_paths[]`: directories containing custom Python macro `.py` files to
+  load during validation and dbt project generation.
+
+Runtime inheritance paths and runtime macro paths are implementation inputs such
+as command-line options, environment configuration, or orchestrator parameters.
+They are not part of the materialisation YAML document.
+
+Before DBT-compilation time, the reference implementation must load custom
+Python macros, generate the required dbt/Jinja macro artifacts, and make those
+generated artifacts available under the transient dbt project's `macros/`
+directory. Duplicate custom Python macro references across runtime macro paths
+are invalid unless the reference is unambiguous.
 
 Reference implementation code should not introduce behavior that is absent from
 this specification without first updating this document.

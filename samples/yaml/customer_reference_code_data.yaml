@@ -1,4 +1,4 @@
-# yaml-language-server: $schema=../schema/type-materialisation-abstract.schema.json
+# yaml-language-server: $schema=../../schema/type-materialisation-abstract.schema.json
 id: customer_reference_code_data
 extends: abstract_reference_code_data
 description: Customer reference code data.

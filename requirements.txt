@@ -1,0 +1,5 @@
+setuptools>=77
+wheel>=0.45
+jsonschema>=4.22
+PyYAML>=6.0
+rich>=13.7
