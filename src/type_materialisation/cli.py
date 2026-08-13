@@ -6,7 +6,8 @@ from pathlib import Path
 from .csv_validate import validate_csv_file
 from .dbt_generate import GenerateDbtOptions, generate_dbt_project
 from .errors import DependencyError, Diagnostic
-from .schema import load_yaml, validate_schema
+from .inheritance import InheritanceError, resolve_spec
+from .schema import validate_schema
 from .spec import validate_parse_semantics
 
 
@@ -37,6 +38,13 @@ def _build_parser() -> argparse.ArgumentParser:
     parse_parser = subparsers.add_parser("parse", help="check a YAML spec against schema and spec rules")
     parse_parser.add_argument("--spec", required=True, type=Path, help="path to a specification YAML file")
     parse_parser.add_argument(
+        "--spec-path",
+        action="append",
+        default=[],
+        type=Path,
+        help="directory searched for inherited parent specifications; may be provided more than once",
+    )
+    parse_parser.add_argument(
         "--abstract",
         action="store_true",
         help="validate as an abstract/partial specification",
@@ -44,6 +52,13 @@ def _build_parser() -> argparse.ArgumentParser:
 
     validate_parser = subparsers.add_parser("validate", help="validate a CSV file according to a concrete spec")
     validate_parser.add_argument("--spec", required=True, type=Path, help="path to a concrete specification YAML file")
+    validate_parser.add_argument(
+        "--spec-path",
+        action="append",
+        default=[],
+        type=Path,
+        help="directory searched for inherited parent specifications; may be provided more than once",
+    )
     validate_parser.add_argument("--input-file", required=True, type=Path, help="path to a CSV file")
     validate_parser.add_argument(
         "--macro-path",
@@ -55,6 +70,13 @@ def _build_parser() -> argparse.ArgumentParser:
 
     generate_parser = subparsers.add_parser("generate-dbt", help="generate a dbt project from a concrete spec")
     generate_parser.add_argument("--spec", required=True, type=Path, help="path to a concrete specification YAML file")
+    generate_parser.add_argument(
+        "--spec-path",
+        action="append",
+        default=[],
+        type=Path,
+        help="directory searched for inherited parent specifications; may be provided more than once",
+    )
     generate_parser.add_argument(
         "--output-dir",
         type=Path,
@@ -80,7 +102,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def _parse(args: argparse.Namespace) -> int:
-    diagnostics = parse_spec(args.spec, abstract=args.abstract)
+    diagnostics = parse_spec(args.spec, abstract=args.abstract, spec_paths=args.spec_path)
     if diagnostics:
         _print_diagnostics("parse failed", diagnostics)
         return 1
@@ -90,11 +112,17 @@ def _parse(args: argparse.Namespace) -> int:
 
 
 def _validate(args: argparse.Namespace) -> int:
-    diagnostics = parse_spec(args.spec, abstract=False)
+    resolved, diagnostics = resolve_and_validate_spec(args.spec, abstract=False, spec_paths=args.spec_path)
     if diagnostics:
         _print_diagnostics("spec parse failed", diagnostics)
         return 1
-    result = validate_csv_file(args.spec, args.input_file, macro_paths=args.macro_path)
+    result = validate_csv_file(
+        args.spec,
+        args.input_file,
+        macro_paths=args.macro_path,
+        spec=resolved,
+        spec_paths=args.spec_path,
+    )
     if result.warnings:
         _print_warnings(result.warnings)
     if result.errors:
@@ -109,7 +137,7 @@ def _validate(args: argparse.Namespace) -> int:
 
 
 def _generate_dbt(args: argparse.Namespace) -> int:
-    diagnostics = parse_spec(args.spec, abstract=False)
+    resolved, diagnostics = resolve_and_validate_spec(args.spec, abstract=False, spec_paths=args.spec_path)
     if diagnostics:
         _print_diagnostics("spec parse failed", diagnostics)
         return 1
@@ -121,6 +149,8 @@ def _generate_dbt(args: argparse.Namespace) -> int:
             csv_stage=args.csv_stage,
             unit_test_csv=args.unit_test_csv,
             macro_paths=args.macro_path,
+            spec=resolved,
+            spec_paths=args.spec_path,
         )
     )
     if result.warnings:
@@ -135,15 +165,27 @@ def _generate_dbt(args: argparse.Namespace) -> int:
     return 0
 
 
-def parse_spec(spec_path: Path, *, abstract: bool) -> list[Diagnostic]:
+def parse_spec(spec_path: Path, *, abstract: bool, spec_paths: list[Path] | None = None) -> list[Diagnostic]:
+    _, diagnostics = resolve_and_validate_spec(spec_path, abstract=abstract, spec_paths=spec_paths)
+    return diagnostics
+
+
+def resolve_and_validate_spec(
+    spec_path: Path,
+    *,
+    abstract: bool,
+    spec_paths: list[Path] | None = None,
+) -> tuple[dict | None, list[Diagnostic]]:
     if not spec_path.exists():
-        return [Diagnostic("spec file does not exist", str(spec_path))]
-    data = load_yaml(spec_path)
-    if not isinstance(data, dict):
-        return [Diagnostic("specification root must be a mapping", "$")]
+        return None, [Diagnostic("spec file does not exist", str(spec_path))]
+    try:
+        resolved = resolve_spec(spec_path, spec_paths=spec_paths)
+    except InheritanceError as exc:
+        return None, [Diagnostic(str(exc), "inheritance")]
+    data = resolved.spec
     diagnostics = validate_schema(data, abstract=abstract)
     diagnostics.extend(validate_parse_semantics(data, abstract=abstract))
-    return diagnostics
+    return data, diagnostics
 
 
 def _print_diagnostics(title: str, diagnostics: list[Diagnostic]) -> None:

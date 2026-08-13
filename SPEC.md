@@ -88,7 +88,7 @@ control_data:
   failure_mode: quarantine_row
 source:
   format: csv
-  separator: ","
+  delimiter: ","
   header: true
 target:
   id: account
@@ -361,6 +361,9 @@ The job event columns are:
 - `audit_last_changed_datetime`: the time the job event row was most recently
   changed in the platform.
 
+Audit metadata columns must use the generated metadata data types defined in
+[section 7.1](#71-target-audit-metadata).
+
 `job_event_type` values:
 
 - `JOB_START`: the materialisation load has started.
@@ -467,13 +470,15 @@ For `scd2`, implementations must preserve historical versions and generate the
 following target metadata columns:
 
 - `is_current_flag`: `Y` when the record is the current valid version, otherwise
-  `N`.
+  `N`. The physical data type is `varchar(1)`.
 - `is_deleted_flag`: `Y` when the business entity has been logically deleted,
-  otherwise `N`.
-- `valid_from_datetime`: the timestamp from which the version is valid.
-- `valid_to_datetime`: the timestamp until which the version is valid.
+  otherwise `N`. The physical data type is `varchar(1)`.
+- `valid_from_datetime`: the timestamp from which the version is valid. The
+  physical data type is `datetime`.
+- `valid_to_datetime`: the timestamp until which the version is valid. The
+  physical data type is `datetime`.
 - `business_data_hash`: a hash of business-relevant values used to detect
-  changes.
+  changes. The physical data type is `varchar(64)`.
 
 Generated SCD metadata columns are not declared in `target.fields`. Target field
 ids must not use generated SCD metadata column names.
@@ -589,9 +594,9 @@ typing, and validation.
 csv_source ::=
   format: csv
   header
-  separator?
-  quote_char?
-  row_terminator?
+  delimiter?
+  quotechar?
+  lineterminator?
   quoting?
   location?
   upload?
@@ -609,10 +614,10 @@ upload ::=
     overwrite
 
 header ::= true | false
-separator ::= one character string
-quote_char ::= one character string
-row_terminator ::= string
-quoting ::= minimal | all | non_numeric | none | notnull | strings
+delimiter ::= one character string
+quotechar ::= one character string
+lineterminator ::= string
+quoting ::= minimal | all
 database ::= templated_string
 schema ::= templated_string
 stage ::= templated_string
@@ -623,14 +628,11 @@ overwrite ::= true | false
 
 CSV dialect options align with Python CSV dialect concepts:
 
-- `separator`: field separator character, equivalent to Python `delimiter`.
-  Defaults to `,`.
-- `quote_char`: field quoting character, equivalent to Python `quotechar`.
+- `delimiter`: field separator character. Defaults to `,`.
+- `quotechar`: field quoting character.
   Defaults to `"`.
-- `row_terminator`: row terminator string, equivalent to Python
-  `lineterminator`. Defaults to `\r\n`.
-- `quoting`: how the reader interprets quoted fields, equivalent to Python
-  `quoting`. Defaults to `minimal`.
+- `lineterminator`: row terminator string. Defaults to `\r\n`.
+- `quoting`: how the reader interprets quoted fields. Defaults to `minimal`.
 
 `location` describes where a CSV file is expected to be available for dbt
 materialisation:
@@ -662,12 +664,6 @@ generation assumes the file is already available in the configured stage.
 - `minimal`: parse quote characters only where needed for fields containing
   special characters.
 - `all`: parse all fields as quoted fields.
-- `non_numeric`: parse quoted fields as non-numeric values and unquoted fields
-  as numeric values where supported.
-- `none`: do not treat quote characters specially while reading.
-- `notnull`: parse quoted fields as non-null values and unquoted empty fields
-  as null where supported.
-- `strings`: parse quoted fields as string values where supported.
 
 Sample: CSV source.
 
@@ -679,9 +675,9 @@ source:
     schema: AD_HOC
     stage: "@csv_stage"
     filename: account.csv
-  separator: ","
-  quote_char: '"'
-  row_terminator: "\r\n"
+  delimiter: ","
+  quotechar: '"'
+  lineterminator: "\r\n"
   quoting: minimal
 ```
 
@@ -750,12 +746,28 @@ The target audit metadata columns are:
 - `audit_data_process_key`: the operational process key for the pipeline
   execution or run that produced the row. This links target rows to centralized
   operational metadata for lineage tracing, reconciliation, and observability.
+  The physical data type is `varchar(64)`.
 - `audit_created_datetime`: the timestamp when the row was first created in the
   platform. This value is immutable for the lifetime of the row and supports
-  data freshness checks and initial load tracking.
+  data freshness checks and initial load tracking. The physical data type is
+  `datetime`.
 - `audit_last_changed_datetime`: the timestamp of the most recent change applied
   to the row. This value is updated on every insert, update, or delete and
-  supports incremental processing and observability.
+  supports incremental processing and observability. The physical data type is
+  `datetime`.
+
+The generated metadata column data type contract is:
+
+| Column | Physical data type | Value domain |
+| --- | --- | --- |
+| `is_current_flag` | `varchar(1)` | `Y` or `N` |
+| `is_deleted_flag` | `varchar(1)` | `Y` or `N` |
+| `valid_from_datetime` | `datetime` | timestamp value |
+| `valid_to_datetime` | `datetime` | timestamp value |
+| `business_data_hash` | `varchar(64)` | hash value |
+| `audit_created_datetime` | `datetime` | timestamp value |
+| `audit_last_changed_datetime` | `datetime` | timestamp value |
+| `audit_data_process_key` | `varchar(64)` | operational process key |
 
 Target field ids must not use the reserved audit metadata column names.
 
@@ -1344,7 +1356,7 @@ Load-time rules:
 extends ::= parent_specification_id
 parent_specification_id ::= identifier
 
-parent_specification_path ::= specification_search_path + "/" + parent_specification_id + ".yaml"
+parent_specification_path ::= specification_search_path + "/" + parent_specification_id + (".yaml" | ".yml")
 specification_search_path ::= same_directory | runtime inheritance path
 inheritance_chain ::= oldest_ancestor -> ... -> parent -> child
 resolved_specification ::= overlay(inheritance_chain)
@@ -1425,12 +1437,14 @@ Inheritance rules:
 
 - A child specification references one parent through `extends`.
 - Multiple layers of inheritance are supported through chained `extends`.
-- Parent specifications are resolved from the child specification directory and
-  any runtime-provided inheritance paths. The path values are supplied by the
-  reference implementation runtime environment, not by the YAML specification.
-- Parent specification files are expected to be named `<id>.yaml`.
-- If a parent id resolves to multiple candidate files, the implementation must
-  fail inheritance resolution rather than silently choosing one.
+- Parent specifications are resolved from the child specification directory
+  first, then from any runtime-provided inheritance paths. The path values are
+  supplied by the reference implementation runtime environment, not by the YAML
+  specification.
+- Parent specification files are expected to be named `<id>.yaml` or `<id>.yml`.
+- If a parent id resolves to multiple candidate files within the same searched
+  directory, the implementation must fail inheritance resolution rather than
+  silently choosing one.
 - Implementations load the oldest ancestor first, then each descendant in order,
   ending with the child specification.
 - Child scalar attributes override parent scalar attributes.

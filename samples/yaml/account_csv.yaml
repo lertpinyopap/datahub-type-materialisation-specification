@@ -15,9 +15,9 @@ source:
     filename: account_csv.csv
   upload:
     enabled: false
-  separator: ","
-  quote_char: '"'
-  row_terminator: "\r\n"
+  delimiter: ","
+  quotechar: '"'
+  lineterminator: "\r\n"
   quoting: minimal
 target:
   id: account

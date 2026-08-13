@@ -54,6 +54,8 @@ implementation, not miscellaneous utility code. The installed CLI command is
 `tms`.
 
 - Target Python 3.13.
+- Local development uses the repository-root `requirements.txt`, which stays on
+  the dbt 1.12 Snowflake adapter line until an upgrade is intentionally planned.
 - Use idiomatic, typed Python with standard-library facilities where practical.
 - Keep dependencies explicit in `requirements.txt`; install package wiring with
   `python -m pip install --no-build-isolation --no-deps -e .` after installing

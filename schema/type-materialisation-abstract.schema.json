@@ -14,7 +14,7 @@
     },
     "extends": {
       "$ref": "type-materialisation.schema.json#/$defs/specificationId",
-      "description": "Parent specification id. The parent file is expected in the same folder as <id>.yaml."
+      "description": "Parent specification id. Parent files are resolved from the child folder and runtime spec paths as <id>.yaml or <id>.yml."
     },
     "control_data": {
       "$ref": "type-materialisation.schema.json#/$defs/controlData"

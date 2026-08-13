@@ -5,23 +5,21 @@ from typing import Any
 
 from .custom_macros import MacroLoadError, PythonMacroResolver
 from .errors import Diagnostic
-from .schema import load_yaml, require_yaml
-from .spec import fields
+from .inheritance import InheritanceError, resolve_spec
+from .schema import require_yaml
+from .spec import GENERATED_METADATA_FIELD_TYPES, fields, parse_sql_type
 
 
 NOT_IMPLEMENTED = [
-    "inheritance resolution for dbt generation",
-    "table source dbt generation",
     "SCD1 and SCD2 materialisation",
-    "job event table writes",
-    "quarantine table writes",
-    "dbt enforcement of validation rules and failure_mode",
     "uniqueness checks in generated dbt SQL",
+    "fail_file validation failure enforcement in generated dbt SQL",
     "generated Snowflake file-format objects for CSV stages",
     "Python upload of local CSV files to Snowflake stages",
     "date/timestamp format translation from Python strptime to Snowflake formats",
     "custom Python execution inside dbt macros",
     "database-native Python UDF generation",
+    "multi-error quarantine output",
 ]
 
 
@@ -44,11 +42,27 @@ class GenerateDbtOptions:
     csv_stage: str | None = None
     unit_test_csv: Path | None = None
     macro_paths: list[Path] = field(default_factory=list)
+    spec: dict[str, Any] | None = None
+    spec_paths: list[Path] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class RelationConfig:
+    database: str | None
+    schema: str
+    table: str
 
 
 def generate_dbt_project(options: GenerateDbtOptions) -> DbtGenerationResult:
-    spec = load_yaml(options.spec_path)
     result = DbtGenerationResult(output_dir=options.output_dir)
+    if options.spec is None:
+        try:
+            spec = resolve_spec(options.spec_path, spec_paths=options.spec_paths).spec
+        except InheritanceError as exc:
+            result.errors.append(Diagnostic(str(exc), "inheritance"))
+            return result
+    else:
+        spec = options.spec
     diagnostics = _unsupported_for_initial_dbt_generation(spec)
     if diagnostics:
         result.errors.extend(diagnostics)
@@ -75,7 +89,7 @@ def generate_dbt_project(options: GenerateDbtOptions) -> DbtGenerationResult:
         return result
 
     _ensure_dirs(options.output_dir)
-    _write_project_file(options.output_dir, result)
+    _write_project_file(options.output_dir, spec, result)
     _write_status_file(options.output_dir, result)
     _write_source_model(spec, options, result)
     try:
@@ -94,8 +108,8 @@ def _unsupported_for_initial_dbt_generation(spec: dict[str, Any]) -> list[Diagno
     diagnostics: list[Diagnostic] = []
     source = spec.get("source", {})
     control_data = spec.get("control_data", {})
-    if not isinstance(source, dict) or source.get("format") != "csv":
-        diagnostics.append(Diagnostic("initial dbt generation supports only source.format = csv", "$.source.format"))
+    if not isinstance(source, dict) or source.get("format") not in {"csv", "table"}:
+        diagnostics.append(Diagnostic("dbt generation supports source.format = csv or table", "$.source.format"))
     if isinstance(control_data, dict) and control_data.get("change_type") in {"scd1", "scd2"}:
         diagnostics.append(Diagnostic("SCD materialisation is not implemented yet", "$.control_data.change_type"))
     return diagnostics
@@ -107,20 +121,27 @@ def _ensure_dirs(output_dir: Path) -> None:
     (output_dir / "macros" / "reference").mkdir(parents=True, exist_ok=True)
 
 
-def _write_project_file(output_dir: Path, result: DbtGenerationResult) -> None:
-    content = """name: type_materialisation_generated
-version: "1.0"
-config-version: 2
-profile: type_materialisation_generated
-
-model-paths: ["models"]
-macro-paths: ["macros"]
-
-models:
-  type_materialisation_generated:
-    generated:
-      +materialized: view
-"""
+def _write_project_file(output_dir: Path, spec: dict[str, Any], result: DbtGenerationResult) -> None:
+    yaml = require_yaml()
+    pre_hooks, post_hooks = _job_hooks(spec)
+    project = {
+        "name": "type_materialisation_generated",
+        "version": "1.0",
+        "config-version": 2,
+        "profile": "type_materialisation_generated",
+        "model-paths": ["models"],
+        "macro-paths": ["macros"],
+        "on-run-start": pre_hooks,
+        "on-run-end": post_hooks,
+        "models": {
+            "type_materialisation_generated": {
+                "generated": {
+                    "+materialized": "view",
+                }
+            }
+        },
+    }
+    content = yaml.safe_dump(project, sort_keys=False, width=10_000)
     _write(output_dir / "dbt_project.yml", content, result)
 
 
@@ -136,6 +157,14 @@ def _write_status_file(output_dir: Path, result: DbtGenerationResult) -> None:
 
 
 def _write_source_model(spec: dict[str, Any], options: GenerateDbtOptions, result: DbtGenerationResult) -> None:
+    source = spec["source"]
+    if source["format"] == "table":
+        _write_table_source_model(spec, options, result)
+    else:
+        _write_csv_source_model(spec, options, result)
+
+
+def _write_csv_source_model(spec: dict[str, Any], options: GenerateDbtOptions, result: DbtGenerationResult) -> None:
     target = spec["target"]
     model_name = _source_model_name(target["id"])
     stage = _stage_reference(options.csv_stage) if options.csv_stage else _csv_stage_location(spec["source"])
@@ -159,11 +188,35 @@ def _write_source_model(spec: dict[str, Any], options: GenerateDbtOptions, resul
     _write(options.output_dir / "models" / "generated" / f"{model_name}.sql", sql, result)
 
 
+def _write_table_source_model(spec: dict[str, Any], options: GenerateDbtOptions, result: DbtGenerationResult) -> None:
+    del options
+    source = spec["source"]
+    target = spec["target"]
+    model_name = _source_model_name(target["id"])
+    select_lines = []
+    for field in fields(spec):
+        column = field.get("source", {}).get("column", field["id"])
+        select_lines.append(f"    {_quote_identifier(column)} as {_quote_identifier(column)}")
+    sql = "\n".join(
+        [
+            f"{{{{ config(materialized='view', alias='{model_name}') }}}}",
+            "",
+            "select",
+            ",\n".join(select_lines),
+            f"from {_table_source_relation(source)}",
+            "",
+        ]
+    )
+    _write(result.output_dir / "models" / "generated" / f"{model_name}.sql", sql, result)
+
+
 def _write_final_model(spec: dict[str, Any], result: DbtGenerationResult) -> None:
     target = spec["target"]
     table_name = target.get("table_name", target["id"])
     materialized = spec.get("control_data", {}).get("materialisation_type", "view")
     source_model = _source_model_name(target["id"])
+    quarantine_enabled = _quarantine_enabled(spec)
+    failure_expression = _failure_details_expression(spec)
     select_lines = []
     for field in fields(spec):
         expression = _field_expression(field)
@@ -171,22 +224,118 @@ def _write_final_model(spec: dict[str, Any], result: DbtGenerationResult) -> Non
         select_lines.append(f"    cast({expression} as {data_type}) as {_quote_identifier(field['id'])}")
     select_lines.extend(
         [
-            "    cast('{{ var(\"audit_data_process_key\", \"manual\") }}' as varchar) as audit_data_process_key",
-            "    current_timestamp() as audit_created_datetime",
-            "    current_timestamp() as audit_last_changed_datetime",
+            "    cast('{{ var(\"audit_data_process_key\", \"manual\") }}' "
+            f"as {GENERATED_METADATA_FIELD_TYPES['audit_data_process_key']}) as audit_data_process_key",
+            f"    cast(current_timestamp() as {GENERATED_METADATA_FIELD_TYPES['audit_created_datetime']}) "
+            "as audit_created_datetime",
+            f"    cast(current_timestamp() as {GENERATED_METADATA_FIELD_TYPES['audit_last_changed_datetime']}) "
+            "as audit_last_changed_datetime",
         ]
     )
+    config_lines = _model_config_lines(
+        materialized=materialized,
+        schema=target["schema"],
+        alias=table_name,
+        database=target.get("database"),
+    )
+    if quarantine_enabled:
+        body_lines = [
+            "with source_rows as (",
+            f"    select * from {{{{ ref('{source_model}') }}}}",
+            "),",
+            "valid_rows as (",
+            "    select *",
+            "    from source_rows",
+            f"    where {failure_expression} is null",
+            ")",
+            "",
+            "select",
+            ",\n".join(select_lines),
+            "from valid_rows",
+            "",
+        ]
+    else:
+        body_lines = [
+            "select",
+            ",\n".join(select_lines),
+            f"from {{{{ ref('{source_model}') }}}}",
+            "",
+        ]
+    sql = "\n".join(["{{", "  config(", *config_lines, "  )", "}}", "", *body_lines])
+    _write(result.output_dir / "models" / "generated" / f"{target['id']}.sql", sql, result)
+    if quarantine_enabled:
+        _write_quarantine_model(spec, result)
+
+
+def _model_config_lines(
+    *,
+    materialized: str,
+    schema: str,
+    alias: str,
+    database: str | None,
+    extra_config_lines: list[str] | None = None,
+) -> list[str]:
     config_lines = [
         f"    materialized='{materialized}',",
-        f"    schema='{target['schema']}',",
-        f"    alias='{table_name}'",
+        f"    schema='{schema}',",
+        f"    alias='{alias}',",
     ]
-    if target.get("database"):
-        config_lines.insert(1, f"    database='{target['database']}',")
-    sql = "\n".join(
-        ["{{", "  config(", *config_lines, "  )", "}}", "", "select", ",\n".join(select_lines), f"from {{{{ ref('{source_model}') }}}}", ""]
+    if database:
+        config_lines.insert(1, f"    database='{database}',")
+    if extra_config_lines:
+        config_lines.extend(extra_config_lines)
+    return config_lines
+
+
+def _write_quarantine_model(spec: dict[str, Any], result: DbtGenerationResult) -> None:
+    target = spec["target"]
+    quarantine = _quarantine_relation_config(spec)
+    model_name = _quarantine_model_name(target["id"])
+    source_model = _source_model_name(target["id"])
+    failure_expression = _failure_details_expression(spec)
+    source_columns = _source_output_columns(spec)
+    select_lines = [
+        "    cast(current_timestamp() as datetime) as loaded_at",
+        "    cast('{{ var(\"job_id\", invocation_id) }}' as varchar(64)) as job_id",
+        "    failure_details",
+    ]
+    select_lines.extend(f"    {_quote_identifier(column)}" for column in source_columns)
+    config_lines = _model_config_lines(
+        materialized="incremental",
+        database=quarantine.database,
+        schema=quarantine.schema,
+        alias=quarantine.table,
+        extra_config_lines=[
+            "    incremental_strategy='append',",
+            "    on_schema_change='append_new_columns',",
+        ],
     )
-    _write(result.output_dir / "models" / "generated" / f"{target['id']}.sql", sql, result)
+    sql = "\n".join(
+        [
+            "{{",
+            "  config(",
+            *config_lines,
+            "  )",
+            "}}",
+            "",
+            "with source_rows as (",
+            f"    select * from {{{{ ref('{source_model}') }}}}",
+            "),",
+            "failed_rows as (",
+            "    select",
+            "        *,",
+            f"        {failure_expression} as failure_details",
+            "    from source_rows",
+            ")",
+            "",
+            "select",
+            ",\n".join(select_lines),
+            "from failed_rows",
+            "where failure_details is not null",
+            "",
+        ]
+    )
+    _write(result.output_dir / "models" / "generated" / f"{model_name}.sql", sql, result)
 
 
 def _write_generated_macros(output_dir: Path, macros: dict[str, str], result: DbtGenerationResult) -> None:
@@ -204,11 +353,26 @@ def _write_unit_tests(
     source_rows, expected_rows, warnings = _unit_test_rows(spec, options.unit_test_csv, macros)
     result.warnings.extend(warnings)
     target = spec["target"]
-    data = {
-        "unit_tests": [
+    unit_tests = [
+        {
+            "name": f"{target['id']}_sample_source",
+            "model": target["id"],
+            "given": [
+                {
+                    "input": f"ref('{_source_model_name(target['id'])}')",
+                    "rows": source_rows,
+                }
+            ],
+            "expect": {
+                "rows": expected_rows,
+            },
+        }
+    ]
+    if _quarantine_enabled(spec):
+        unit_tests.append(
             {
-                "name": f"{target['id']}_sample_csv",
-                "model": target["id"],
+                "name": f"{_quarantine_model_name(target['id'])}_sample_source",
+                "model": _quarantine_model_name(target["id"]),
                 "given": [
                     {
                         "input": f"ref('{_source_model_name(target['id'])}')",
@@ -216,11 +380,11 @@ def _write_unit_tests(
                     }
                 ],
                 "expect": {
-                    "rows": expected_rows,
+                    "rows": [],
                 },
             }
-        ]
-    }
+        )
+    data = {"unit_tests": unit_tests}
     content = yaml.safe_dump(data, sort_keys=False)
     _write(result.output_dir / "models" / "generated" / f"{target['id']}_unit_tests.yml", content, result)
 
@@ -234,7 +398,7 @@ def _unit_test_rows(
     source = spec["source"]
     target_fields = fields(spec)
     with csv_path.open("r", encoding="utf-8", newline="") as handle:
-        reader = csv.reader(handle, delimiter=source.get("separator", ","), quotechar=source.get("quote_char", '"'))
+        reader = csv.reader(handle, delimiter=source.get("delimiter", ","), quotechar=source.get("quotechar", '"'))
         header = next(reader) if source.get("header") else None
         source_rows: list[dict[str, Any]] = []
         expected_rows: list[dict[str, Any]] = []
@@ -326,6 +490,104 @@ def _field_expression(field: dict[str, Any]) -> str:
     return expression
 
 
+def _failure_details_expression(spec: dict[str, Any]) -> str:
+    expressions = []
+    for field in fields(spec):
+        expressions.extend(_field_failure_expressions(field))
+    if not expressions:
+        return "null"
+    return f"coalesce({', '.join(expressions)})"
+
+
+def _field_failure_expressions(field: dict[str, Any]) -> list[str]:
+    field_id = field["id"]
+    expression = _field_expression(field)
+    data_type = field["data_type"]
+    failures: list[str] = []
+    if field.get("nullable") is False:
+        failures.append(
+            f"case when {expression} is null then {_sql_string(f'field `{field_id}` is null but not nullable')} end"
+        )
+
+    sql_type = parse_sql_type(data_type)
+    if sql_type.name in {"char", "varchar", "character", "string"} and sql_type.args:
+        max_length = sql_type.args[0]
+        failures.append(
+            "case "
+            f"when {expression} is not null and length({expression}) > {max_length} "
+            f"then {_sql_string(f'field `{field_id}` exceeds data_type `{data_type}`')} "
+            "end"
+        )
+    elif sql_type.name not in {"text"}:
+        failures.append(
+            "case "
+            f"when {expression} is not null and try_cast({expression} as {data_type}) is null "
+            f"then {_sql_string(f'field `{field_id}` does not match data_type `{data_type}`')} "
+            "end"
+        )
+
+    for rule in field.get("validations", []):
+        if not isinstance(rule, dict):
+            continue
+        rule_type = rule.get("type")
+        if rule_type == "min_length":
+            failures.append(
+                "case "
+                f"when {expression} is not null and length({expression}) < {int(rule['value'])} "
+                f"then {_sql_string(f'field `{field_id}` length is less than {rule['value']}')} "
+                "end"
+            )
+        elif rule_type == "max_length":
+            failures.append(
+                "case "
+                f"when {expression} is not null and length({expression}) > {int(rule['value'])} "
+                f"then {_sql_string(f'field `{field_id}` length is greater than {rule['value']}')} "
+                "end"
+            )
+        elif rule_type == "regex":
+            failures.append(
+                "case "
+                f"when {expression} is not null and not regexp_like({expression}, {_sql_string(str(rule['pattern']))}) "
+                f"then {_sql_string(f'field `{field_id}` does not match regex')} "
+                "end"
+            )
+        elif rule_type == "allowed_values":
+            values = ", ".join(_sql_string(str(value)) for value in rule.get("values", []))
+            failures.append(
+                "case "
+                f"when {expression} is not null and {expression} not in ({values}) "
+                f"then {_sql_string(f'field `{field_id}` is not one of the allowed values')} "
+                "end"
+            )
+        elif rule_type == "min_value":
+            failures.append(
+                "case "
+                f"when {expression} is not null and try_cast({expression} as number) < {rule['value']} "
+                f"then {_sql_string(f'field `{field_id}` is less than {rule['value']}')} "
+                "end"
+            )
+        elif rule_type == "max_value":
+            failures.append(
+                "case "
+                f"when {expression} is not null and try_cast({expression} as number) > {rule['value']} "
+                f"then {_sql_string(f'field `{field_id}` is greater than {rule['value']}')} "
+                "end"
+            )
+        elif rule_type == "precision":
+            precision = int(rule["precision"])
+            scale = int(rule["scale"]) if "scale" in rule else 0
+            failures.append(
+                "case "
+                f"when {expression} is not null and try_cast({expression} as number({precision}, {scale})) is null "
+                f"then {_sql_string(f'field `{field_id}` does not fit validation precision/scale')} "
+                "end"
+            )
+        elif rule_type == "custom":
+            macro_name = _macro_object_name(rule["macro"])
+            failures.append("{{ " + f"{macro_name}('{expression}')" + " }}")
+    return failures
+
+
 def _custom_macro_names(spec: dict[str, Any]) -> list[str]:
     names: list[str] = []
     for field in fields(spec):
@@ -337,7 +599,11 @@ def _custom_macro_names(spec: dict[str, Any]) -> list[str]:
 
 
 def _source_model_name(target_id: str) -> str:
-    return f"{target_id}__csv_stage"
+    return f"{target_id}__source"
+
+
+def _quarantine_model_name(target_id: str) -> str:
+    return f"{target_id}__quarantine"
 
 
 def _csv_stage_location(source: dict[str, Any]) -> str:
@@ -363,6 +629,14 @@ def _csv_stage_location(source: dict[str, Any]) -> str:
     return _stage_reference(relation)
 
 
+def _table_source_relation(source: dict[str, Any]) -> str:
+    parts = []
+    if source.get("database"):
+        parts.append(str(source["database"]))
+    parts.extend([str(source["schema"]), str(source["table"])])
+    return ".".join(parts)
+
+
 def _stage_reference(value: str) -> str:
     return value if value.startswith("@") else f"@{value}"
 
@@ -373,6 +647,114 @@ def _macro_object_name(macro_name: str) -> str:
 
 def _quote_identifier(value: str) -> str:
     return value
+
+
+def _quarantine_enabled(spec: dict[str, Any]) -> bool:
+    control_data = spec.get("control_data", {})
+    return isinstance(control_data, dict) and control_data.get("failure_mode") == "quarantine_row"
+
+
+def _target_relation_config(spec: dict[str, Any]) -> RelationConfig:
+    target = spec["target"]
+    return RelationConfig(
+        database=target.get("database"),
+        schema=target["schema"],
+        table=target.get("table_name", target["id"]),
+    )
+
+
+def _quarantine_relation_config(spec: dict[str, Any]) -> RelationConfig:
+    target = _target_relation_config(spec)
+    quarantine = spec.get("control_data", {}).get("quarantine", {})
+    if not isinstance(quarantine, dict):
+        quarantine = {}
+    return RelationConfig(
+        database=quarantine.get("database", target.database),
+        schema=quarantine.get("schema", target.schema),
+        table=quarantine.get("table", f"{target.table}_QUARANTINE"),
+    )
+
+
+def _job_relation_config(spec: dict[str, Any]) -> RelationConfig:
+    target = _target_relation_config(spec)
+    job = spec.get("control_data", {}).get("job", {})
+    if not isinstance(job, dict):
+        job = {}
+    return RelationConfig(
+        database=job.get("database", target.database),
+        schema=job.get("schema", "BUSINESS"),
+        table=job.get("table", "TYPE_MATERIALISATION_JOBS"),
+    )
+
+
+def _relation_name(relation: RelationConfig) -> str:
+    parts = []
+    if relation.database:
+        parts.append(relation.database)
+    parts.extend([relation.schema, relation.table])
+    return ".".join(parts)
+
+
+def _source_output_columns(spec: dict[str, Any]) -> list[str]:
+    target_fields = fields(spec)
+    if spec["source"]["format"] == "csv":
+        target_fields = sorted(
+            target_fields,
+            key=lambda field: field.get("source", {}).get("pos", 999999),
+        )
+    return [field.get("source", {}).get("column", field["id"]) for field in target_fields]
+
+
+def _job_hooks(spec: dict[str, Any]) -> tuple[list[str], list[str]]:
+    relation = _relation_name(_job_relation_config(spec))
+    result_expression = (
+        "{% set failed_result_count = "
+        "(results | selectattr('status', 'equalto', 'error') | list | length) + "
+        "(results | selectattr('status', 'equalto', 'fail') | list | length) %}"
+        "{% if failed_result_count > 0 %}'FAILED'{% else %}'{{ var(\"job_result\", \"COMPLETED\") }}'{% endif %}"
+    )
+    create_sql = (
+        f"create table if not exists {relation} ("
+        "job_id varchar(64), "
+        "event_type varchar(32), "
+        "event_timestamp datetime, "
+        "result varchar(64), "
+        f"audit_data_process_key {GENERATED_METADATA_FIELD_TYPES['audit_data_process_key']}, "
+        f"audit_created_datetime {GENERATED_METADATA_FIELD_TYPES['audit_created_datetime']}, "
+        f"audit_last_changed_datetime {GENERATED_METADATA_FIELD_TYPES['audit_last_changed_datetime']}"
+        ")"
+    )
+    start_sql = (
+        f"insert into {relation} "
+        "(job_id, event_type, event_timestamp, result, audit_data_process_key, "
+        "audit_created_datetime, audit_last_changed_datetime) select "
+        "cast('{{ var(\"job_id\", invocation_id) }}' as varchar(64)), "
+        "'JOB_START', "
+        "cast(current_timestamp() as datetime), "
+        "null, "
+        f"cast('{{{{ var(\"audit_data_process_key\", \"manual\") }}}}' as "
+        f"{GENERATED_METADATA_FIELD_TYPES['audit_data_process_key']}), "
+        "cast(current_timestamp() as datetime), "
+        "cast(current_timestamp() as datetime)"
+    )
+    end_sql = (
+        f"insert into {relation} "
+        "(job_id, event_type, event_timestamp, result, audit_data_process_key, "
+        "audit_created_datetime, audit_last_changed_datetime) select "
+        "cast('{{ var(\"job_id\", invocation_id) }}' as varchar(64)), "
+        "'JOB_END', "
+        "cast(current_timestamp() as datetime), "
+        f"{result_expression}, "
+        f"cast('{{{{ var(\"audit_data_process_key\", \"manual\") }}}}' as "
+        f"{GENERATED_METADATA_FIELD_TYPES['audit_data_process_key']}), "
+        "cast(current_timestamp() as datetime), "
+        "cast(current_timestamp() as datetime)"
+    )
+    return [create_sql, start_sql], [end_sql]
+
+
+def _sql_string(value: str) -> str:
+    return "'" + value.replace("'", "''") + "'"
 
 
 def _write(path: Path, content: str, result: DbtGenerationResult) -> None:

@@ -1,5 +1,11 @@
+# Stay on the dbt 1.12 line until we intentionally plan an upgrade.
+dbt-snowflake>=1.12.0,<1.13
+dbt-core>=1.12.0,<1.13
+
 setuptools>=77
 wheel>=0.45
 jsonschema>=4.22
+referencing>=0.37
 PyYAML>=6.0
 rich>=13.7
+pytest>=8.0

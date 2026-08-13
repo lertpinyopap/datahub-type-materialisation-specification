@@ -46,21 +46,31 @@ def load_json(path: Path) -> dict[str, Any]:
 
 def _validator(schema_path: Path):
     jsonschema = require_jsonschema()
+    try:
+        from referencing import Registry, Resource
+        from referencing.jsonschema import DRAFT202012
+    except ModuleNotFoundError as exc:
+        raise DependencyError(
+            "referencing is required. Install dependencies with `pip install -r requirements.txt` "
+            "or install the package with `pip install -e .`."
+        ) from exc
+
     schema = load_json(schema_path)
     concrete_schema = load_json(CONCRETE_SCHEMA_PATH)
-    store = {
-        CONCRETE_SCHEMA_PATH.as_uri(): concrete_schema,
-        concrete_schema.get("$id", ""): concrete_schema,
-        "type-materialisation.schema.json": concrete_schema,
-    }
-    resolver = jsonschema.RefResolver(
-        base_uri=schema_path.as_uri(),
-        referrer=schema,
-        store=store,
+    schema_resource = Resource.from_contents(schema, default_specification=DRAFT202012)
+    concrete_resource = Resource.from_contents(concrete_schema, default_specification=DRAFT202012)
+    registry = Registry().with_resources(
+        [
+            (schema_path.as_uri(), schema_resource),
+            (schema["$id"], schema_resource),
+            (CONCRETE_SCHEMA_PATH.as_uri(), concrete_resource),
+            (concrete_schema["$id"], concrete_resource),
+            ("type-materialisation.schema.json", concrete_resource),
+        ]
     )
     validator_cls = jsonschema.validators.validator_for(schema)
     validator_cls.check_schema(schema)
-    return validator_cls(schema, resolver=resolver)
+    return validator_cls(schema, registry=registry)
 
 
 def validate_schema(data: Any, *, abstract: bool) -> list[Diagnostic]:

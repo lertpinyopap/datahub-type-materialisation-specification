@@ -14,7 +14,7 @@
     },
     "extends": {
       "$ref": "#/$defs/specificationId",
-      "description": "Parent specification id. The parent file is expected in the same folder as <id>.yaml."
+      "description": "Parent specification id. Parent files are resolved from the child folder and runtime spec paths as <id>.yaml or <id>.yml."
     },
     "control_data": {
       "$ref": "#/$defs/controlData"
@@ -383,23 +383,23 @@
           "type": "string",
           "enum": ["csv", "table"]
         },
-        "separator": {
+        "delimiter": {
           "type": "string",
           "minLength": 1,
           "maxLength": 1
         },
-        "quote_char": {
+        "quotechar": {
           "type": "string",
           "minLength": 1,
           "maxLength": 1
         },
-        "row_terminator": {
+        "lineterminator": {
           "type": "string",
           "minLength": 1
         },
         "quoting": {
           "type": "string",
-          "enum": ["minimal", "all", "non_numeric", "none", "notnull", "strings"]
+          "enum": ["minimal", "all"]
         },
         "header": {
           "type": "boolean"
@@ -429,23 +429,23 @@
         "format": {
           "const": "csv"
         },
-        "separator": {
+        "delimiter": {
           "type": "string",
           "minLength": 1,
           "maxLength": 1
         },
-        "quote_char": {
+        "quotechar": {
           "type": "string",
           "minLength": 1,
           "maxLength": 1
         },
-        "row_terminator": {
+        "lineterminator": {
           "type": "string",
           "minLength": 1
         },
         "quoting": {
           "type": "string",
-          "enum": ["minimal", "all", "non_numeric", "none", "notnull", "strings"]
+          "enum": ["minimal", "all"]
         },
         "header": {
           "type": "boolean"

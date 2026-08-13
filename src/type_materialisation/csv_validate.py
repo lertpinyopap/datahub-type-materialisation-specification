@@ -9,7 +9,7 @@ from typing import Any
 
 from .custom_macros import MacroLoadError, PythonMacroResolver
 from .errors import Diagnostic
-from .schema import load_yaml
+from .inheritance import InheritanceError, resolve_spec
 from .spec import SqlType, decimal_fits, fields, parse_sql_type, to_decimal
 
 
@@ -29,16 +29,27 @@ def validate_csv_file(
     csv_path: Path,
     *,
     macro_paths: list[Path] | None = None,
+    spec: dict[str, Any] | None = None,
+    spec_paths: list[Path] | None = None,
 ) -> CsvValidationResult:
-    spec = load_yaml(spec_path)
     result = CsvValidationResult()
+    if spec is None:
+        try:
+            spec = resolve_spec(spec_path, spec_paths=spec_paths).spec
+        except InheritanceError as exc:
+            result.errors.append(Diagnostic(str(exc), "inheritance"))
+            return result
     source = spec.get("source", {})
     if not isinstance(source, dict) or source.get("format") != "csv":
         result.errors.append(Diagnostic("validate currently supports only CSV source specifications"))
         return result
 
     target_fields = fields(spec)
-    dialect = _csv_dialect(source)
+    try:
+        dialect = _csv_dialect(source)
+    except ValueError as exc:
+        result.errors.append(Diagnostic(str(exc), "$.source.quoting"))
+        return result
     header_enabled = source.get("header")
     macros = PythonMacroResolver(spec_path=spec_path, macro_paths=macro_paths)
     executable_macros = _preflight_custom_macros(target_fields, macros, result)
@@ -126,20 +137,18 @@ def _csv_dialect(source: dict[str, Any]) -> type[csv.Dialect]:
     quoting_map = {
         "minimal": csv.QUOTE_MINIMAL,
         "all": csv.QUOTE_ALL,
-        "non_numeric": csv.QUOTE_NONNUMERIC,
-        "none": csv.QUOTE_NONE,
-        "notnull": getattr(csv, "QUOTE_NOTNULL", csv.QUOTE_MINIMAL),
-        "strings": getattr(csv, "QUOTE_STRINGS", csv.QUOTE_MINIMAL),
     }
+    if quoting_name not in quoting_map:
+        raise ValueError("quoting must be one of: minimal, all")
 
     class SpecDialect(csv.Dialect):
-        delimiter = source.get("separator", ",")
-        quotechar = source.get("quote_char", '"')
+        delimiter = source.get("delimiter", ",")
+        quotechar = source.get("quotechar", '"')
         escapechar = None
         doublequote = True
         skipinitialspace = False
-        lineterminator = source.get("row_terminator", "\r\n")
-        quoting = quoting_map.get(quoting_name, csv.QUOTE_MINIMAL)
+        lineterminator = source.get("lineterminator", "\r\n")
+        quoting = quoting_map[quoting_name]
         strict = False
 
     return SpecDialect

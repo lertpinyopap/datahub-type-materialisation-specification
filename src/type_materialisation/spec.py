@@ -5,16 +5,17 @@ from typing import Any, Iterable
 
 from .errors import Diagnostic
 
-RESERVED_GENERATED_FIELDS = {
-    "audit_data_process_key",
-    "audit_created_datetime",
-    "audit_last_changed_datetime",
-    "is_current_flag",
-    "is_deleted_flag",
-    "valid_from_datetime",
-    "valid_to_datetime",
-    "business_data_hash",
+GENERATED_METADATA_FIELD_TYPES = {
+    "is_current_flag": "varchar(1)",
+    "is_deleted_flag": "varchar(1)",
+    "valid_from_datetime": "datetime",
+    "valid_to_datetime": "datetime",
+    "business_data_hash": "varchar(64)",
+    "audit_created_datetime": "datetime",
+    "audit_last_changed_datetime": "datetime",
+    "audit_data_process_key": "varchar(64)",
 }
+RESERVED_GENERATED_FIELDS = set(GENERATED_METADATA_FIELD_TYPES)
 
 SUPPORTED_TYPE_RE = re.compile(r"^\s*([A-Za-z][A-Za-z0-9_]*)(?:\(([^)]*)\))?\s*$")
 JINJA_EXPR_RE = re.compile(r"{{.*?}}")
