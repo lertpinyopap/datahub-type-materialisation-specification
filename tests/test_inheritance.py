@@ -569,11 +569,11 @@ def test_dbt_generation_resolves_inheritance_before_generating(tmp_path: Path) -
 
     assert result.errors == []
     model_sql = (output_dir / "models" / "generated" / "child_account.sql").read_text(encoding="utf-8")
-    assert "alias='child_account_table'" in model_sql
-    assert "cast(account_id as varchar(20)) as account_id" in model_sql
+    assert "alias='CHILD_ACCOUNT_TABLE'" in model_sql
+    assert "cast(ACCOUNT_ID as varchar(20)) as ACCOUNT_ID" in model_sql
     assert (
-        "cast('{{ var(\"audit_data_process_key\", \"manual\") }}' as varchar(64)) as audit_data_process_key"
+        "cast('{{ var(\"audit_data_process_key\", \"manual\") }}' as varchar(64)) as AUDIT_DATA_PROCESS_KEY"
         in model_sql
     )
-    assert "cast(current_timestamp() as datetime) as audit_created_datetime" in model_sql
-    assert "cast(current_timestamp() as datetime) as audit_last_changed_datetime" in model_sql
+    assert "cast(current_timestamp() as datetime) as AUDIT_CREATED_DATETIME" in model_sql
+    assert "cast(current_timestamp() as datetime) as AUDIT_LAST_CHANGED_DATETIME" in model_sql

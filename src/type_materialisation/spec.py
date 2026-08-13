@@ -167,18 +167,30 @@ def _validate_csv_seed_source(spec: dict[str, Any]) -> list[Diagnostic]:
     if source.get("format") != "csv" or source.get("load_method", "stage") != "dbt_seed":
         return diagnostics
 
-    if source.get("header") is not True:
-        diagnostics.append(Diagnostic("dbt_seed CSV sources require header: true", "$.source.header"))
-
     for index, field in enumerate(fields(spec)):
         if not isinstance(field, dict):
             continue
         field_source = field.get("source")
-        if not isinstance(field_source, dict) or not isinstance(field_source.get("column"), str):
+        if not isinstance(field_source, dict):
             diagnostics.append(
                 Diagnostic(
-                    "dbt_seed CSV sources require field.source.column",
+                    "dbt_seed CSV sources require field.source",
+                    f"$.target.fields[{index}].source",
+                )
+            )
+            continue
+        if source.get("header") is True and not isinstance(field_source.get("column"), str):
+            diagnostics.append(
+                Diagnostic(
+                    "dbt_seed CSV sources with a header require field.source.column",
                     f"$.target.fields[{index}].source.column",
+                )
+            )
+        if source.get("header") is False and not isinstance(field_source.get("pos"), int):
+            diagnostics.append(
+                Diagnostic(
+                    "dbt_seed CSV sources without a header require field.source.pos",
+                    f"$.target.fields[{index}].source.pos",
                 )
             )
     return diagnostics

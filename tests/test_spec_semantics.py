@@ -166,7 +166,7 @@ def test_csv_source_rejects_unsupported_quoting_values(tmp_path: Path) -> None:
     assert any("'none' is not one of ['minimal', 'all']" in message for message in diagnostic_messages(diagnostics))
 
 
-def test_csv_dbt_seed_requires_header_and_source_columns(tmp_path: Path) -> None:
+def test_csv_dbt_seed_without_header_accepts_position_only_fields(tmp_path: Path) -> None:
     _, diagnostics = parse_yaml(
         tmp_path,
         """
@@ -188,9 +188,33 @@ def test_csv_dbt_seed_requires_header_and_source_columns(tmp_path: Path) -> None
         """,
     )
 
+    assert diagnostics == []
+
+
+def test_csv_dbt_seed_with_header_requires_source_columns(tmp_path: Path) -> None:
+    _, diagnostics = parse_yaml(
+        tmp_path,
+        """
+        id: account_spec
+        source:
+          format: csv
+          header: true
+          load_method: dbt_seed
+          seed:
+            file: account.csv
+        target:
+          id: account
+          schema: business
+          fields:
+            - id: account_id
+              source:
+                pos: 0
+              data_type: varchar(20)
+        """,
+    )
+
     assert diagnostic_messages(diagnostics) == [
-        "dbt_seed CSV sources require header: true",
-        "dbt_seed CSV sources require field.source.column",
+        "dbt_seed CSV sources with a header require field.source.column",
     ]
 
 

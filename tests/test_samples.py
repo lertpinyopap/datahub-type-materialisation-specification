@@ -50,6 +50,17 @@ def test_quarantine_sample_csv_has_five_good_rows_and_two_reject_rows() -> None:
     ]
 
 
+def test_positional_quarantine_sample_has_two_good_rows_and_one_reject_row() -> None:
+    result = validate_csv_file(
+        SAMPLE_YAML_DIR / "account_quarantine_sample_positional.yaml",
+        SAMPLE_CSV_DIR / "broken" / "account_quarantine_sample_positional.csv",
+    )
+
+    assert result.rows_checked == 3
+    assert len(result.errors) == 1
+    assert result.errors[0].location == "row 3, field `account_id`"
+
+
 @pytest.mark.parametrize("spec_path", sorted(SAMPLE_YAML_DIR.glob("*.yaml")))
 def test_samples_do_not_define_target_database_and_only_reference_tmp_schema(spec_path: Path) -> None:
     data = yaml.safe_load(spec_path.read_text(encoding="utf-8"))

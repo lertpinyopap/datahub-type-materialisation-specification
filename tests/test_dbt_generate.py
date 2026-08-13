@@ -71,7 +71,7 @@ def test_csv_stage_location_omits_database_when_not_supplied(tmp_path: Path) -> 
 
     assert result.errors == []
     source_sql = (output_dir / "models" / "generated" / "account__source.sql").read_text(encoding="utf-8")
-    assert "from @AD_HOC.csv_stage/account.csv" in source_sql
+    assert "from @AD_HOC.CSV_STAGE/account.csv" in source_sql
 
 
 def test_csv_stage_location_includes_database_when_supplied(tmp_path: Path) -> None:
@@ -79,7 +79,7 @@ def test_csv_stage_location_includes_database_when_supplied(tmp_path: Path) -> N
 
     assert result.errors == []
     source_sql = (output_dir / "models" / "generated" / "account__source.sql").read_text(encoding="utf-8")
-    assert "from @raw.AD_HOC.csv_stage/account.csv" in source_sql
+    assert "from @RAW.AD_HOC.CSV_STAGE/account.csv" in source_sql
 
 
 def test_csv_stage_override_wins_over_spec_location(tmp_path: Path) -> None:
@@ -87,7 +87,7 @@ def test_csv_stage_override_wins_over_spec_location(tmp_path: Path) -> None:
 
     assert result.errors == []
     source_sql = (output_dir / "models" / "generated" / "account__source.sql").read_text(encoding="utf-8")
-    assert "from @raw.override_stage/override.csv" in source_sql
+    assert "from @RAW.OVERRIDE_STAGE/override.csv" in source_sql
     assert "csv_stage/account.csv" not in source_sql
 
 
@@ -129,11 +129,60 @@ def test_csv_dbt_seed_generation_copies_seed_and_reads_from_ref(tmp_path: Path) 
     seed_config = project["seeds"]["type_materialisation_generated"]["account_seed"]
     assert seed_config["+schema"] == "TMP"
     assert seed_config["+quote_columns"] is False
-    assert seed_config["+column_types"] == {"account_id": "varchar", "account_name": "varchar"}
+    assert seed_config["+alias"] == "ACCOUNT_SEED"
+    assert seed_config["+column_types"] == {"ACCOUNT_ID": "varchar", "ACCOUNT_NAME": "varchar"}
     source_sql = (output_dir / "models" / "generated" / "account__source.sql").read_text(encoding="utf-8")
     assert "from {{ ref('account_seed') }}" in source_sql
-    assert "cast(account_id as string) as account_id" in source_sql
+    assert "cast(ACCOUNT_ID as string) as ACCOUNT_ID" in source_sql
     assert "@csv_stage" not in source_sql
+
+
+def test_csv_dbt_seed_without_header_synthesizes_position_column_names(tmp_path: Path) -> None:
+    seed_file = tmp_path / "account_seed_input.csv"
+    seed_file.write_text("ACCT000000000001,Acme Trading,ACTIVE\n", encoding="utf-8")
+    result, output_dir = generate(
+        tmp_path,
+        f"""
+        id: account_csv
+        source:
+          format: csv
+          header: false
+          load_method: dbt_seed
+          lineterminator: "\\n"
+          seed:
+            file: {seed_file.name}
+            name: account_seed
+            schema: TMP
+        target:
+          id: account
+          schema: business
+          fields:
+            - id: account_id
+              source:
+                pos: 0
+              data_type: varchar(20)
+            - id: account_name
+              source:
+                pos: 1
+              data_type: varchar(255)
+            - id: account_status
+              source:
+                pos: 2
+              data_type: varchar(20)
+        """,
+    )
+
+    assert result.errors == []
+    assert (output_dir / "seeds" / "account_seed.csv").read_text(encoding="utf-8") == (
+        "COL_0,COL_1,COL_2\n"
+        "ACCT000000000001,Acme Trading,ACTIVE\n"
+    )
+    project = load_yaml(output_dir / "dbt_project.yml")
+    seed_config = project["seeds"]["type_materialisation_generated"]["account_seed"]
+    assert seed_config["+column_types"] == {"COL_0": "varchar", "COL_1": "varchar", "COL_2": "varchar"}
+    source_sql = (output_dir / "models" / "generated" / "account__source.sql").read_text(encoding="utf-8")
+    assert "cast(COL_0 as string) as COL_0" in source_sql
+    assert "cast(COL_2 as string) as COL_2" in source_sql
 
 
 def test_csv_dbt_seed_generation_reports_missing_seed_file(tmp_path: Path) -> None:
@@ -186,8 +235,51 @@ def test_generated_source_model_uses_csv_positions(tmp_path: Path) -> None:
 
     assert result.errors == []
     source_sql = (output_dir / "models" / "generated" / "account__source.sql").read_text(encoding="utf-8")
-    assert "$1::string as account_id" in source_sql
-    assert "$3::string as account_status" in source_sql
+    assert "$1::string as ACCOUNT_ID" in source_sql
+    assert "$3::string as ACCOUNT_STATUS" in source_sql
+
+
+def test_headerless_csv_stage_generation_aliases_positions_to_col_names(tmp_path: Path) -> None:
+    result, output_dir = generate(
+        tmp_path,
+        """
+        id: account_csv
+        control_data:
+          failure_mode: quarantine_row
+        source:
+          format: csv
+          header: false
+          location:
+            schema: TMP
+            stage: "@csv_stage"
+            filename: account.csv
+        target:
+          id: account
+          schema: business
+          fields:
+            - id: account_id
+              source:
+                pos: 0
+              data_type: varchar(20)
+              transforms:
+                - type: trim
+              nullable: false
+            - id: account_status
+              source:
+                pos: 2
+              data_type: varchar(20)
+        """,
+    )
+
+    assert result.errors == []
+    source_sql = (output_dir / "models" / "generated" / "account__source.sql").read_text(encoding="utf-8")
+    model_sql = (output_dir / "models" / "generated" / "account.sql").read_text(encoding="utf-8")
+    quarantine_sql = (output_dir / "models" / "generated" / "account__quarantine.sql").read_text(encoding="utf-8")
+    assert "$1::string as COL_0" in source_sql
+    assert "$3::string as COL_2" in source_sql
+    assert "cast(trim(COL_0) as varchar(20)) as ACCOUNT_ID" in model_sql
+    assert "COL_0" in quarantine_sql
+    assert "COL_2" in quarantine_sql
 
 
 def test_generated_final_model_uses_audit_metadata_types(tmp_path: Path) -> None:
@@ -196,8 +288,8 @@ def test_generated_final_model_uses_audit_metadata_types(tmp_path: Path) -> None
     assert result.errors == []
     model_sql = (output_dir / "models" / "generated" / "account.sql").read_text(encoding="utf-8")
     assert "cast('{{ var(\"audit_data_process_key\", \"manual\") }}' as varchar(64))" in model_sql
-    assert "cast(current_timestamp() as datetime) as audit_created_datetime" in model_sql
-    assert "cast(current_timestamp() as datetime) as audit_last_changed_datetime" in model_sql
+    assert "cast(current_timestamp() as datetime) as AUDIT_CREATED_DATETIME" in model_sql
+    assert "cast(current_timestamp() as datetime) as AUDIT_LAST_CHANGED_DATETIME" in model_sql
 
 
 def test_generated_project_uses_named_local_user_profile(tmp_path: Path) -> None:
@@ -255,7 +347,7 @@ def test_fail_file_generates_validation_guard_model(tmp_path: Path) -> None:
     assert "validation_rows as (" in guard_sql
     assert "field `account_id` is null but not nullable" in guard_sql
     assert "cast('TYPE_MATERIALISATION_VALIDATION_FAILED' as number)" in guard_sql
-    assert "where failure_details is not null" in guard_sql
+    assert "where FAILURE_DETAILS is not null" in guard_sql
     assert "fail_file validation failure enforcement" not in not_implemented
 
 
@@ -277,7 +369,7 @@ def test_unique_fields_generate_dbt_validation_sql(tmp_path: Path) -> None:
     assert result.errors == []
     guard_sql = (output_dir / "models" / "generated" / "account__validation_guard.sql").read_text(encoding="utf-8")
     not_implemented = (output_dir / "NOT_IMPLEMENTED.md").read_text(encoding="utf-8")
-    assert "count(*) over (partition by try_cast(account_id as varchar(20))) > 1" in guard_sql
+    assert "count(*) over (partition by try_cast(ACCOUNT_ID as varchar(20))) > 1" in guard_sql
     assert "field `account_id` duplicates a value for a unique field" in guard_sql
     assert "uniqueness checks in generated dbt SQL" not in not_implemented
 
@@ -305,8 +397,8 @@ def test_table_source_generation_reads_from_configured_relation(tmp_path: Path) 
 
     assert result.errors == []
     source_sql = (output_dir / "models" / "generated" / "account__source.sql").read_text(encoding="utf-8")
-    assert "account_id as account_id" in source_sql
-    assert "from raw.landing.account_source" in source_sql
+    assert "ACCOUNT_ID as ACCOUNT_ID" in source_sql
+    assert "from RAW.LANDING.ACCOUNT_SOURCE" in source_sql
 
 
 def test_job_event_hooks_are_generated_at_project_run_level(tmp_path: Path) -> None:
@@ -317,34 +409,38 @@ def test_job_event_hooks_are_generated_at_project_run_level(tmp_path: Path) -> N
     model_sql = (output_dir / "models" / "generated" / "account.sql").read_text(encoding="utf-8")
     assert len(project["on-run-start"]) == 2
     assert "var('tms_enable_job_hooks', true)" in project["on-run-start"][0]
-    assert "create table if not exists {{ var('tms_job_schema', 'BUSINESS') }}.TYPE_MATERIALISATION_JOBS" in project["on-run-start"][0]
-    assert "details varchar(16777216)" in project["on-run-start"][0]
-    assert "spec_file_name varchar(1024)" in project["on-run-start"][0]
-    assert "generated_table varchar(1024)" in project["on-run-start"][0]
-    assert "quarantine_table varchar(1024)" in project["on-run-start"][0]
-    assert "loaded_count number(38, 0)" in project["on-run-start"][0]
-    assert "quarantine_count number(38, 0)" in project["on-run-start"][0]
+    assert "create table if not exists {{ var('tms_job_schema', 'BUSINESS') | upper }}.TYPE_MATERIALISATION_JOBS" in project["on-run-start"][0]
+    assert "DETAILS varchar(16777216)" in project["on-run-start"][0]
+    assert "SPEC_FILE_NAME varchar(1024)" in project["on-run-start"][0]
+    assert "GENERATED_TABLE varchar(1024)" in project["on-run-start"][0]
+    assert "QUARANTINE_TABLE varchar(1024)" in project["on-run-start"][0]
+    assert "LOADED_COUNT number(38, 0)" in project["on-run-start"][0]
+    assert "QUARANTINE_COUNT number(38, 0)" in project["on-run-start"][0]
     assert "'JOB_START'" in project["on-run-start"][1]
-    assert "details, spec_file_name, generated_table, quarantine_table, loaded_count, quarantine_count" in project["on-run-start"][1]
+    assert "cast('{{ invocation_id }}' as varchar(64))" in project["on-run-start"][1]
+    assert 'var("job_id"' not in project["on-run-start"][1]
+    assert "DETAILS, SPEC_FILE_NAME, GENERATED_TABLE, QUARANTINE_TABLE, LOADED_COUNT, QUARANTINE_COUNT" in project["on-run-start"][1]
     assert "cast('spec.yaml' as varchar(1024))" in project["on-run-start"][1]
-    assert "cast('{{ target.database }}.{{ var(\"target_schema\", \"business\") }}.account' as varchar(1024))" in project["on-run-start"][1]
+    assert "cast('{{ target.database | upper }}.{{ var(\"target_schema\", \"BUSINESS\") | upper }}.ACCOUNT' as varchar(1024))" in project["on-run-start"][1]
     assert "cast(null as varchar(1024))" in project["on-run-start"][1]
     assert "cast(null as number(38, 0))" in project["on-run-start"][1]
     assert len(project["on-run-end"]) == 2
-    assert "create table if not exists {{ var('tms_job_schema', 'BUSINESS') }}.TYPE_MATERIALISATION_JOBS" in project["on-run-end"][0]
+    assert "create table if not exists {{ var('tms_job_schema', 'BUSINESS') | upper }}.TYPE_MATERIALISATION_JOBS" in project["on-run-end"][0]
     assert "var('tms_enable_job_hooks', true)" in project["on-run-end"][1]
     assert "'JOB_END'" in project["on-run-end"][1]
+    assert "cast('{{ invocation_id }}' as varchar(64))" in project["on-run-end"][1]
+    assert 'var("job_id"' not in project["on-run-end"][1]
     assert 'var("job_result", "COMPLETED")' not in project["on-run-end"][1]
     assert 'var("job_details", none)' in project["on-run-end"][1]
-    assert "case when quarantine_counts.quarantine_count > 0 then 'COMPLETED_WITH_QUARANTINE' else 'COMPLETED' end" in project["on-run-end"][1]
+    assert "case when quarantine_counts.QUARANTINE_COUNT > 0 then 'COMPLETED_WITH_QUARANTINE' else 'COMPLETED' end" in project["on-run-end"][1]
     assert "'COMPLETED_WITH_QUARANTINE'" in project["on-run-end"][1]
-    assert "case when quarantine_counts.quarantine_count > 0 then 'validation errors written to quarantine output' else null end" in project["on-run-end"][1]
-    assert 'adapter.get_relation(database=target.database, schema=var("target_schema", "business"), identifier=\'account\')' in project["on-run-end"][1]
-    assert "loaded_counts as (select {% if tms_generated_relation is not none %}(select count(*) from {{ tms_generated_relation }}){% else %}null{% endif %} as loaded_count)" in project["on-run-end"][1]
+    assert "case when quarantine_counts.QUARANTINE_COUNT > 0 then 'validation errors written to quarantine output' else null end" in project["on-run-end"][1]
+    assert 'adapter.get_relation(database=(target.database | upper), schema=(var("target_schema", "BUSINESS") | upper), identifier=\'ACCOUNT\')' in project["on-run-end"][1]
+    assert "loaded_counts as (select {% if tms_generated_relation is not none %}(select count(*) from {{ tms_generated_relation }}){% else %}null{% endif %} as LOADED_COUNT)" in project["on-run-end"][1]
     assert "{% set tms_quarantine_relation = none %}" in project["on-run-end"][1]
-    assert "quarantine_counts as (select {% if tms_quarantine_relation is not none %}(select count(*) from {{ tms_quarantine_relation }}){% else %}null{% endif %} as quarantine_count)" in project["on-run-end"][1]
-    assert "loaded_counts.loaded_count" in project["on-run-end"][1]
-    assert "quarantine_counts.quarantine_count" in project["on-run-end"][1]
+    assert "quarantine_counts as (select {% if tms_quarantine_relation is not none %}(select count(*) from {{ tms_quarantine_relation }}){% else %}null{% endif %} as QUARANTINE_COUNT)" in project["on-run-end"][1]
+    assert "loaded_counts.LOADED_COUNT" in project["on-run-end"][1]
+    assert "quarantine_counts.QUARANTINE_COUNT" in project["on-run-end"][1]
     assert "from loaded_counts cross join quarantine_counts" in project["on-run-end"][1]
     assert "results | selectattr('status', 'equalto', 'error')" in project["on-run-end"][1]
     assert "results | selectattr('status', 'equalto', 'fail')" in project["on-run-end"][1]
@@ -359,7 +455,7 @@ def test_generated_schema_name_macro_supports_runtime_schema_override(tmp_path: 
     assert result.errors == []
     macro_sql = (output_dir / "macros" / "generated" / "generate_schema_name.sql").read_text(encoding="utf-8")
     assert "var('target_schema', none)" in macro_sql
-    assert "{{ override_schema | trim }}" in macro_sql
+    assert "{{ override_schema | trim | upper }}" in macro_sql
 
 
 def test_job_event_hooks_include_quarantine_relation_when_enabled(tmp_path: Path) -> None:
@@ -375,10 +471,10 @@ def test_job_event_hooks_include_quarantine_relation_when_enabled(tmp_path: Path
 
     assert result.errors == []
     project = load_yaml(output_dir / "dbt_project.yml")
-    expected_quarantine = "cast('{{ target.database }}.{{ var(\"target_schema\", \"business\") }}.account_QUARANTINE' as varchar(1024))"
+    expected_quarantine = "cast('{{ target.database | upper }}.{{ var(\"target_schema\", \"BUSINESS\") | upper }}.ACCOUNT_QUARANTINE' as varchar(1024))"
     assert expected_quarantine in project["on-run-start"][1]
     assert expected_quarantine in project["on-run-end"][1]
-    assert 'adapter.get_relation(database=target.database, schema=var("target_schema", "business"), identifier=\'account_QUARANTINE\')' in project["on-run-end"][1]
+    assert 'adapter.get_relation(database=(target.database | upper), schema=(var("target_schema", "BUSINESS") | upper), identifier=\'ACCOUNT_QUARANTINE\')' in project["on-run-end"][1]
 
 
 def test_quarantine_model_is_incremental_and_append_only(tmp_path: Path) -> None:
@@ -398,8 +494,10 @@ def test_quarantine_model_is_incremental_and_append_only(tmp_path: Path) -> None
     assert "materialized='incremental'" in quarantine_sql
     assert "incremental_strategy='append'" in quarantine_sql
     assert "on_schema_change='append_new_columns'" in quarantine_sql
-    assert "alias='account_QUARANTINE'" in quarantine_sql
-    assert "failure_details" in quarantine_sql
+    assert "alias='ACCOUNT_QUARANTINE'" in quarantine_sql
+    assert "cast('{{ invocation_id }}' as varchar(64)) as JOB_ID" in quarantine_sql
+    assert 'var("job_id"' not in quarantine_sql
+    assert "FAILURE_DETAILS" in quarantine_sql
 
 
 def test_quarantine_model_uses_generated_uniqueness_validation(tmp_path: Path) -> None:
@@ -423,7 +521,7 @@ def test_quarantine_model_uses_generated_uniqueness_validation(tmp_path: Path) -
 
     assert result.errors == []
     quarantine_sql = (output_dir / "models" / "generated" / "account__quarantine.sql").read_text(encoding="utf-8")
-    assert "count(*) over (partition by try_cast(account_id as varchar(20))) > 1" in quarantine_sql
+    assert "count(*) over (partition by try_cast(ACCOUNT_ID as varchar(20))) > 1" in quarantine_sql
     assert "from validation_rows" in quarantine_sql
 
 
@@ -444,9 +542,9 @@ def test_quarantine_config_defaults_can_be_overridden(tmp_path: Path) -> None:
 
     assert result.errors == []
     quarantine_sql = (output_dir / "models" / "generated" / "account__quarantine.sql").read_text(encoding="utf-8")
-    assert "database='ops'" in quarantine_sql
-    assert "schema='data_quality'" in quarantine_sql
-    assert "alias='account_bad_rows'" in quarantine_sql
+    assert "database='OPS'" in quarantine_sql
+    assert "schema='DATA_QUALITY'" in quarantine_sql
+    assert "alias='ACCOUNT_BAD_ROWS'" in quarantine_sql
 
 
 def test_generated_unit_tests_include_final_and_quarantine_models(tmp_path: Path) -> None:
@@ -468,7 +566,7 @@ def test_generated_unit_tests_include_final_and_quarantine_models(tmp_path: Path
     assert [unit_test["model"] for unit_test in unit_test_yaml["unit_tests"]] == ["account", "account__quarantine"]
     assert unit_test_yaml["unit_tests"][0]["given"][0]["input"] == "ref('account__source')"
     assert unit_test_yaml["unit_tests"][0]["given"][0]["format"] == "sql"
-    assert "cast('ACCT000000000001' as varchar) as account_id" in unit_test_yaml["unit_tests"][0]["given"][0]["rows"]
+    assert "cast('ACCT000000000001' as varchar) as ACCOUNT_ID" in unit_test_yaml["unit_tests"][0]["given"][0]["rows"]
     assert unit_test_yaml["unit_tests"][1]["given"][0]["format"] == "sql"
     assert unit_test_yaml["unit_tests"][1]["expect"]["rows"] == []
 
