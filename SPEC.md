@@ -57,6 +57,12 @@ context for the job resolve it. Implementations must not silently substitute a
 different configured database. Production specifications should provide
 database values explicitly unless they intentionally rely on runtime context.
 
+All timestamp and datetime values in this specification must be timezone-aware.
+Reference implementations must reject timestamp values without timezone
+information unless a specific rule, such as a `parse_timestamp`
+`timezone_if_missing` policy, explicitly states how the missing timezone is to
+be interpreted.
+
 ## 3. Overall Document
 
 ```text
@@ -358,7 +364,8 @@ The job event columns are:
   quarantine rows for failures from the same load. It must not be supplied or
   overridden by the caller.
 - `event_type`: the lifecycle event type.
-- `event_timestamp`: the time the event occurred.
+- `event_timestamp`: the timezone-aware time the event occurred. The physical
+  data type is `timestamp_tz`.
 - `result`: the load result. `JOB_START` events should leave this value null
   unless the materialisation fails before load time. `JOB_END` events must set
   it to `COMPLETED`, `COMPLETED_WITH_QUARANTINE`, or `FAILED`.
@@ -377,10 +384,10 @@ The job event columns are:
   set it when a quarantine table is configured and exists.
 - `audit_data_process_key`: the operational process key for the pipeline
   execution or run that produced the job event.
-- `audit_created_datetime`: the time the job event row was first created in the
-  platform.
-- `audit_last_changed_datetime`: the time the job event row was most recently
-  changed in the platform.
+- `audit_created_datetime`: the timezone-aware time the job event row was first
+  created in the platform.
+- `audit_last_changed_datetime`: the timezone-aware time the job event row was
+  most recently changed in the platform.
 
 The context columns `details`, `spec_file_name`, `generated_table`, and
 `quarantine_table` and the count columns `loaded_count` and `quarantine_count`
@@ -479,7 +486,7 @@ business_data_hash_mode ::= include | exclude
 field ::= target field id
 value ::= scalar
 truncate_to_day ::= true | false
-end_of_time ::= timestamp value
+end_of_time ::= timezone-aware timestamp value
 ```
 
 SCD configuration is used when `change_type` is `scd1` or `scd2`.
@@ -498,10 +505,10 @@ following target metadata columns:
   `N`. The physical data type is `varchar(1)`.
 - `is_deleted_flag`: `Y` when the business entity has been logically deleted,
   otherwise `N`. The physical data type is `varchar(1)`.
-- `valid_from_datetime`: the timestamp from which the version is valid. The
-  physical data type is `datetime`.
-- `valid_to_datetime`: the timestamp until which the version is valid. The
-  physical data type is `datetime`.
+- `valid_from_datetime`: the timezone-aware timestamp from which the version is
+  valid. The physical data type is `timestamp_tz`.
+- `valid_to_datetime`: the timezone-aware timestamp until which the version is
+  valid. The physical data type is `timestamp_tz`.
 - `business_data_hash`: a hash of business-relevant values used to detect
   changes. The physical data type is `varchar(64)`.
 
@@ -528,19 +535,22 @@ previous current version is expired.
 - `start_of_time`: use the platform-defined start-of-time timestamp, with time
   set to `00:00:00`.
 - `load_datetime`: use the load timestamp.
-- `field`: use the timestamp value from the configured target field id.
+- `field`: use the timezone-aware timestamp value from the configured target
+  field id.
 - `explicit`: use the configured scalar or templated `value`, often a dbt
   variable.
 
 If `effective_from.truncate_to_day` is `true`, implementations must preserve the
-value as a timestamp while setting the time component to `00:00:00`.
+value as a timezone-aware timestamp while setting the time component to
+`00:00:00`.
 
 `effective_to.mode` values:
 
 - `next_effective_from`: set `valid_to_datetime` to the next newer version's
   `valid_from_datetime`. If no newer version exists, set `valid_to_datetime` to
   the configured `end_of_time` value or the platform maximum timestamp.
-- `field`: use the timestamp value from the configured target field id.
+- `field`: use the timezone-aware timestamp value from the configured target
+  field id.
 - `explicit`: use the configured scalar or templated `value`.
 
 If `effective_to` is omitted for SCD2, implementations should default to
@@ -828,14 +838,14 @@ The target audit metadata columns are:
   execution or run that produced the row. This links target rows to centralized
   operational metadata for lineage tracing, reconciliation, and observability.
   The physical data type is `varchar(64)`.
-- `audit_created_datetime`: the timestamp when the row was first created in the
+- `audit_created_datetime`: the timezone-aware timestamp when the row was first created in the
   platform. This value is immutable for the lifetime of the row and supports
   data freshness checks and initial load tracking. The physical data type is
-  `datetime`.
-- `audit_last_changed_datetime`: the timestamp of the most recent change applied
-  to the row. This value is updated on every insert, update, or delete and
-  supports incremental processing and observability. The physical data type is
-  `datetime`.
+  `timestamp_tz`.
+- `audit_last_changed_datetime`: the timezone-aware timestamp of the most recent
+  change applied to the row. This value is updated on every insert, update, or
+  delete and supports incremental processing and observability. The physical
+  data type is `timestamp_tz`.
 
 The generated metadata column data type contract is:
 
@@ -843,11 +853,11 @@ The generated metadata column data type contract is:
 | --- | --- | --- |
 | `is_current_flag` | `varchar(1)` | `Y` or `N` |
 | `is_deleted_flag` | `varchar(1)` | `Y` or `N` |
-| `valid_from_datetime` | `datetime` | timestamp value |
-| `valid_to_datetime` | `datetime` | timestamp value |
+| `valid_from_datetime` | `timestamp_tz` | timezone-aware timestamp value |
+| `valid_to_datetime` | `timestamp_tz` | timezone-aware timestamp value |
 | `business_data_hash` | `varchar(64)` | hash value |
-| `audit_created_datetime` | `datetime` | timestamp value |
-| `audit_last_changed_datetime` | `datetime` | timestamp value |
+| `audit_created_datetime` | `timestamp_tz` | timezone-aware timestamp value |
+| `audit_last_changed_datetime` | `timestamp_tz` | timezone-aware timestamp value |
 | `audit_data_process_key` | `varchar(64)` | operational process key |
 
 Target field ids must not use the reserved audit metadata column names.
@@ -1010,8 +1020,10 @@ parse_date ::=
 parse_timestamp ::=
   type: parse_timestamp
   format
+  timezone_if_missing?
 
 format ::= Python datetime format string
+timezone_if_missing ::= Z | UTC | local
 
 round ::=
   type: round
@@ -1039,7 +1051,9 @@ compatible with the field's `data_type`.
 
 - `trim`: remove whitespace from a string value.
 - `parse_date`: parse a string value into a date using `format`.
-- `parse_timestamp`: parse a string value into a timestamp using `format`.
+- `parse_timestamp`: parse a string value into a timezone-aware timestamp using
+  `format`. If the parsed value does not include timezone information, the
+  value must be rejected unless `timezone_if_missing` is supplied.
 - `round`: round a numeric value to a decimal `scale`.
 - `custom`: apply a named Python macro to the column.
 
@@ -1060,16 +1074,29 @@ If `side` is omitted, implementations should default to `both`.
 
 If `mode` is omitted, implementations should default to `half_up`.
 
+`timezone_if_missing` values:
+
+- `Z`: treat a timestamp without timezone information as UTC with a `Z`
+  timezone designator.
+- `UTC`: treat a timestamp without timezone information as UTC.
+- `local`: treat a timestamp without timezone information as local to the
+  runtime environment.
+
 Date and timestamp `format` values use Python `datetime` `strptime` /
-`strftime`-style format codes. dbt reference implementations should map these
-format strings to database-native parsing functions where required.
+`strftime`-style format codes. Timestamp formats must include a timezone offset
+or timezone-bearing value unless `timezone_if_missing` is supplied. Reference
+implementations must reject parsed timestamps that do not include timezone
+information unless an explicit missing-timezone policy is configured. dbt
+reference implementations should map these format strings to database-native
+parsing functions where required.
 
 Common date and timestamp format examples:
 
 - `%Y-%m-%d`: `2026-08-13`
 - `%d/%m/%Y`: `13/08/2026`
-- `%Y-%m-%d %H:%M:%S`: `2026-08-13 14:30:00`
+- `%Y-%m-%d %H:%M:%S` with `timezone_if_missing: UTC`: `2026-08-13 14:30:00`
 - `%Y-%m-%dT%H:%M:%S%z`: `2026-08-13T14:30:00+1000`
+- `%Y-%m-%dT%H:%M:%S%z`: `2026-08-13T14:30:00Z`
 
 Custom transforms are a constrained Python extension point. `macro` names a
 Python macro object using dotted module syntax, for example

@@ -440,7 +440,7 @@ def _write_quarantine_model(spec: dict[str, Any], result: DbtGenerationResult) -
     source_model = _source_model_name(target["id"])
     source_columns = _source_output_columns(spec)
     select_lines = [
-        "    cast(current_timestamp() as datetime) as LOADED_AT",
+        "    cast(current_timestamp() as timestamp_tz) as LOADED_AT",
         f"    {_job_id_expression()} as JOB_ID",
         "    FAILURE_DETAILS",
     ]
@@ -1117,7 +1117,7 @@ def _job_hooks(spec: dict[str, Any], spec_file_name: str) -> tuple[list[str], li
         f"create table if not exists {relation} ("
         "JOB_ID varchar(64), "
         "EVENT_TYPE varchar(32), "
-        "EVENT_TIMESTAMP datetime, "
+        "EVENT_TIMESTAMP timestamp_tz, "
         "RESULT varchar(64), "
         "DETAILS varchar(16777216), "
         "SPEC_FILE_NAME varchar(1024), "
@@ -1137,7 +1137,7 @@ def _job_hooks(spec: dict[str, Any], spec_file_name: str) -> tuple[list[str], li
         "AUDIT_CREATED_DATETIME, AUDIT_LAST_CHANGED_DATETIME) select "
         f"{_job_id_expression()}, "
         "'JOB_START', "
-        "cast(current_timestamp() as datetime), "
+        "cast(current_timestamp() as timestamp_tz), "
         "null, "
         "null, "
         f"cast({_sql_string(spec_file_name)} as varchar(1024)), "
@@ -1147,8 +1147,8 @@ def _job_hooks(spec: dict[str, Any], spec_file_name: str) -> tuple[list[str], li
         "cast(null as number(38, 0)), "
         f"cast('{{{{ var(\"audit_data_process_key\", \"manual\") }}}}' as "
         f"{GENERATED_METADATA_FIELD_TYPES['audit_data_process_key']}), "
-        "cast(current_timestamp() as datetime), "
-        "cast(current_timestamp() as datetime)"
+        "cast(current_timestamp() as timestamp_tz), "
+        "cast(current_timestamp() as timestamp_tz)"
     )
     end_sql = (
         f"{generated_relation_lookup}{quarantine_relation_lookup}insert into {relation} "
@@ -1161,7 +1161,7 @@ def _job_hooks(spec: dict[str, Any], spec_file_name: str) -> tuple[list[str], li
         "select "
         f"{_job_id_expression()}, "
         "'JOB_END', "
-        "cast(current_timestamp() as datetime), "
+        "cast(current_timestamp() as timestamp_tz), "
         f"{result_expression}, "
         f"{details_expression}, "
         f"cast({_sql_string(spec_file_name)} as varchar(1024)), "
@@ -1171,8 +1171,8 @@ def _job_hooks(spec: dict[str, Any], spec_file_name: str) -> tuple[list[str], li
         "quarantine_counts.QUARANTINE_COUNT, "
         f"cast('{{{{ var(\"audit_data_process_key\", \"manual\") }}}}' as "
         f"{GENERATED_METADATA_FIELD_TYPES['audit_data_process_key']}), "
-        "cast(current_timestamp() as datetime), "
-        "cast(current_timestamp() as datetime) "
+        "cast(current_timestamp() as timestamp_tz), "
+        "cast(current_timestamp() as timestamp_tz) "
         "from loaded_counts cross join quarantine_counts"
     )
     return (

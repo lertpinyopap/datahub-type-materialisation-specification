@@ -575,5 +575,5 @@ def test_dbt_generation_resolves_inheritance_before_generating(tmp_path: Path) -
         "cast('{{ var(\"audit_data_process_key\", \"manual\") }}' as varchar(64)) as AUDIT_DATA_PROCESS_KEY"
         in model_sql
     )
-    assert "cast(current_timestamp() as datetime) as AUDIT_CREATED_DATETIME" in model_sql
-    assert "cast(current_timestamp() as datetime) as AUDIT_LAST_CHANGED_DATETIME" in model_sql
+    assert "cast(current_timestamp() as timestamp_tz) as AUDIT_CREATED_DATETIME" in model_sql
+    assert "cast(current_timestamp() as timestamp_tz) as AUDIT_LAST_CHANGED_DATETIME" in model_sql

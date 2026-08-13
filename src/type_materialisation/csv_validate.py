@@ -2,7 +2,7 @@ import csv
 import re
 from collections import defaultdict
 from dataclasses import dataclass, field
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from decimal import Decimal, ROUND_DOWN, ROUND_HALF_EVEN, ROUND_HALF_UP, ROUND_UP
 from pathlib import Path
 from typing import Any
@@ -227,7 +227,11 @@ def _apply_transforms(
         elif transform_type == "parse_date":
             current = datetime.strptime(str(current), str(transform["format"])).date()
         elif transform_type == "parse_timestamp":
-            current = datetime.strptime(str(current), str(transform["format"]))
+            current = _timezone_aware_timestamp(
+                datetime.strptime(str(current), str(transform["format"])),
+                "timestamp transform result must include a timezone",
+                transform.get("timezone_if_missing"),
+            )
         elif transform_type == "round":
             scale = int(transform["scale"])
             mode = transform.get("mode", "half_up")
@@ -270,10 +274,13 @@ def _coerce_type(value: Any, sql_type: SqlType) -> Any:
         if isinstance(value, date) and not isinstance(value, datetime):
             return value
         return datetime.fromisoformat(str(value)).date()
-    if name in {"timestamp", "datetime"}:
+    if name in {"timestamp", "datetime", "timestamp_tz", "timestamptz"}:
         if isinstance(value, datetime):
-            return value
-        return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+            return _require_timezone(value, "must include a timezone")
+        return _require_timezone(
+            datetime.fromisoformat(str(value).replace("Z", "+00:00")),
+            "must include a timezone",
+        )
     if name in {"integer", "int", "bigint", "smallint"}:
         text = str(value)
         if re.fullmatch(r"[+-]?\d+", text) is None:
@@ -296,6 +303,26 @@ def _coerce_type(value: Any, sql_type: SqlType) -> Any:
             return False
         raise ValueError("must be boolean")
     raise ValueError("unsupported type")
+
+
+def _require_timezone(value: datetime, message: str) -> datetime:
+    if value.tzinfo is None or value.tzinfo.utcoffset(value) is None:
+        raise ValueError(message)
+    return value
+
+
+def _timezone_aware_timestamp(
+    value: datetime,
+    message: str,
+    timezone_if_missing: Any,
+) -> datetime:
+    if value.tzinfo is not None and value.tzinfo.utcoffset(value) is not None:
+        return value
+    if timezone_if_missing in {"Z", "UTC"}:
+        return value.replace(tzinfo=timezone.utc)
+    if timezone_if_missing == "local":
+        return value.astimezone()
+    raise ValueError(message)
 
 
 def _validate_nullable(value: Any, field: dict[str, Any], location: str) -> None:

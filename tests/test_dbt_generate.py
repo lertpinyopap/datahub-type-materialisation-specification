@@ -288,8 +288,8 @@ def test_generated_final_model_uses_audit_metadata_types(tmp_path: Path) -> None
     assert result.errors == []
     model_sql = (output_dir / "models" / "generated" / "account.sql").read_text(encoding="utf-8")
     assert "cast('{{ var(\"audit_data_process_key\", \"manual\") }}' as varchar(64))" in model_sql
-    assert "cast(current_timestamp() as datetime) as AUDIT_CREATED_DATETIME" in model_sql
-    assert "cast(current_timestamp() as datetime) as AUDIT_LAST_CHANGED_DATETIME" in model_sql
+    assert "cast(current_timestamp() as timestamp_tz) as AUDIT_CREATED_DATETIME" in model_sql
+    assert "cast(current_timestamp() as timestamp_tz) as AUDIT_LAST_CHANGED_DATETIME" in model_sql
 
 
 def test_generated_project_uses_named_local_user_profile(tmp_path: Path) -> None:
@@ -410,6 +410,7 @@ def test_job_event_hooks_are_generated_at_project_run_level(tmp_path: Path) -> N
     assert len(project["on-run-start"]) == 2
     assert "var('tms_enable_job_hooks', true)" in project["on-run-start"][0]
     assert "create table if not exists {{ var('tms_job_schema', 'BUSINESS') | upper }}.TYPE_MATERIALISATION_JOBS" in project["on-run-start"][0]
+    assert "EVENT_TIMESTAMP timestamp_tz" in project["on-run-start"][0]
     assert "DETAILS varchar(16777216)" in project["on-run-start"][0]
     assert "SPEC_FILE_NAME varchar(1024)" in project["on-run-start"][0]
     assert "GENERATED_TABLE varchar(1024)" in project["on-run-start"][0]
@@ -418,6 +419,7 @@ def test_job_event_hooks_are_generated_at_project_run_level(tmp_path: Path) -> N
     assert "QUARANTINE_COUNT number(38, 0)" in project["on-run-start"][0]
     assert "'JOB_START'" in project["on-run-start"][1]
     assert "cast('{{ invocation_id }}' as varchar(64))" in project["on-run-start"][1]
+    assert "cast(current_timestamp() as timestamp_tz)" in project["on-run-start"][1]
     assert 'var("job_id"' not in project["on-run-start"][1]
     assert "DETAILS, SPEC_FILE_NAME, GENERATED_TABLE, QUARANTINE_TABLE, LOADED_COUNT, QUARANTINE_COUNT" in project["on-run-start"][1]
     assert "cast('spec.yaml' as varchar(1024))" in project["on-run-start"][1]
@@ -429,6 +431,7 @@ def test_job_event_hooks_are_generated_at_project_run_level(tmp_path: Path) -> N
     assert "var('tms_enable_job_hooks', true)" in project["on-run-end"][1]
     assert "'JOB_END'" in project["on-run-end"][1]
     assert "cast('{{ invocation_id }}' as varchar(64))" in project["on-run-end"][1]
+    assert "cast(current_timestamp() as timestamp_tz)" in project["on-run-end"][1]
     assert 'var("job_id"' not in project["on-run-end"][1]
     assert 'var("job_result", "COMPLETED")' not in project["on-run-end"][1]
     assert 'var("job_details", none)' in project["on-run-end"][1]

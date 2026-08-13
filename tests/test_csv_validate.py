@@ -131,6 +131,74 @@ def test_supported_types_reject_invalid_values(
     assert message in result.errors[0].message
 
 
+def test_timestamp_data_type_rejects_values_without_timezone(tmp_path: Path) -> None:
+    # Raw timestamp values must already carry timezone information.
+    spec = csv_spec(fields=[field("event_at", "timestamp_tz")])
+
+    result = validate(tmp_path, spec, "event_at\n2026-08-13T14:30:00")
+
+    assert result.rows_checked == 1
+    assert "must include a timezone" in result.errors[0].message
+
+
+def test_timestamp_data_type_accepts_values_with_timezone(tmp_path: Path) -> None:
+    spec = csv_spec(fields=[field("event_at", "timestamp_tz")])
+
+    result = validate(tmp_path, spec, "event_at\n2026-08-13T14:30:00+10:00")
+
+    assert result.errors == []
+    assert result.rows_checked == 1
+
+
+def test_parse_timestamp_rejects_missing_timezone_by_default(tmp_path: Path) -> None:
+    spec = csv_spec(
+        fields=[
+            field(
+                "event_at",
+                "timestamp_tz",
+                transforms=[
+                    {
+                        "type": "parse_timestamp",
+                        "format": "%Y-%m-%d %H:%M:%S",
+                    }
+                ],
+            )
+        ]
+    )
+
+    result = validate(tmp_path, spec, "event_at\n2026-08-13 14:30:00")
+
+    assert result.rows_checked == 1
+    assert diagnostic_messages(result.errors) == ["timestamp transform result must include a timezone"]
+
+
+@pytest.mark.parametrize("timezone_if_missing", ["Z", "UTC", "local"])
+def test_parse_timestamp_can_apply_configured_timezone_when_missing(
+    tmp_path: Path,
+    timezone_if_missing: str,
+) -> None:
+    spec = csv_spec(
+        fields=[
+            field(
+                "event_at",
+                "timestamp_tz",
+                transforms=[
+                    {
+                        "type": "parse_timestamp",
+                        "format": "%Y-%m-%d %H:%M:%S",
+                        "timezone_if_missing": timezone_if_missing,
+                    }
+                ],
+            )
+        ]
+    )
+
+    result = validate(tmp_path, spec, "event_at\n2026-08-13 14:30:00")
+
+    assert result.errors == []
+    assert result.rows_checked == 1
+
+
 def test_custom_python_validator_failure_is_reported_on_the_row(tmp_path: Path) -> None:
     spec = csv_spec(
         fields=[

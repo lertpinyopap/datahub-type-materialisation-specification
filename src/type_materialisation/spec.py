@@ -8,11 +8,11 @@ from .errors import Diagnostic
 GENERATED_METADATA_FIELD_TYPES = {
     "is_current_flag": "varchar(1)",
     "is_deleted_flag": "varchar(1)",
-    "valid_from_datetime": "datetime",
-    "valid_to_datetime": "datetime",
+    "valid_from_datetime": "timestamp_tz",
+    "valid_to_datetime": "timestamp_tz",
     "business_data_hash": "varchar(64)",
-    "audit_created_datetime": "datetime",
-    "audit_last_changed_datetime": "datetime",
+    "audit_created_datetime": "timestamp_tz",
+    "audit_last_changed_datetime": "timestamp_tz",
     "audit_data_process_key": "varchar(64)",
 }
 RESERVED_GENERATED_FIELDS = set(GENERATED_METADATA_FIELD_TYPES)
@@ -61,6 +61,8 @@ def parse_sql_type(value: str) -> SqlType:
         "text",
         "date",
         "timestamp",
+        "timestamp_tz",
+        "timestamptz",
         "datetime",
         "boolean",
         "bool",

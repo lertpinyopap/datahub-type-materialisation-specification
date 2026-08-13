@@ -824,6 +824,10 @@
         },
         "format": {
           "$ref": "#/$defs/templatedString"
+        },
+        "timezone_if_missing": {
+          "type": "string",
+          "enum": ["Z", "UTC", "local"]
         }
       }
     },
