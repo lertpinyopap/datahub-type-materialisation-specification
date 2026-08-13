@@ -1,0 +1,16 @@
+[0m15:48:01.710486 [debug] [MainThread]: Sending event: {'category': 'dbt', 'action': 'invocation', 'label': 'start', 'context': [<snowplow_tracker.self_describing_json.SelfDescribingJson object at 0x10ab4dd30>, <snowplow_tracker.self_describing_json.SelfDescribingJson object at 0x10bfbf9d0>, <snowplow_tracker.self_describing_json.SelfDescribingJson object at 0x10bfbf610>]}
+
+
+============================== 15:48:01.713193 | 44d03114-d8ee-482d-951d-93a3d7c3e8cf ==============================
+[0m15:48:01.713193 [info ] [MainThread]: Running with dbt=1.12.2
+[0m15:48:01.713443 [debug] [MainThread]: running dbt with arguments {'use_colors': 'True', 'target_path': 'None', 'warn_error_options': 'WarnErrorOptionsV2(error=[], warn=[], silence=[])', 'warn_error': 'None', 'profiles_dir': '/Users/700009440/.dbt', 'introspect': 'True', 'debug': 'False', 'hints_enabled': 'True', 'send_anonymous_usage_stats': 'True', 'static_parser': 'True', 'log_path': 'logs', 'quiet': 'False', 'use_experimental_parser': 'False', 'write_json': 'True', 'version_check': 'True', 'empty': 'False', 'partial_parse': 'True', 'cache_selected_only': 'False', 'fail_fast': 'False', 'printer_width': '80', 'invocation_command': 'dbt build --select account_quarantine_sample_source+ --target lfsprod --vars {tms_job_schema: TMP, target_schema: TMP, job_id: quarantine_sample_001, audit_data_process_key: quarantine_sample_001}', 'log_cache_events': 'False', 'maximum_seed_size_mib': '1', 'log_format': 'default', 'indirect_selection': 'eager', 'no_print': 'None'}
+[0m15:48:01.713706 [error] [MainThread]: [[31mERROR[0m]: Encountered an error:
+Runtime Error
+  No dbt_project.yml found at expected path /Users/700009440/repos/datahub-type-materialisation-specification/dbt_project.yml
+  Verify that each entry within packages.yml (and their transitive dependencies) contains a file named dbt_project.yml
+  
+[0m15:48:01.715116 [debug] [MainThread]: Resource report: {"command_name": "build", "command_success": false, "command_wall_clock_time": 0.06573525, "process_in_blocks": "0", "process_kernel_time": 0.129907, "process_mem_max_rss": "121716736", "process_out_blocks": "0", "process_user_time": 0.480828}
+[0m15:48:01.715314 [debug] [MainThread]: Command `dbt build` failed at 15:48:01.715276 after 0.07 seconds
+[0m15:48:01.715445 [debug] [MainThread]: Sending event: {'category': 'dbt', 'action': 'invocation', 'label': 'end', 'context': [<snowplow_tracker.self_describing_json.SelfDescribingJson object at 0x10c009940>, <snowplow_tracker.self_describing_json.SelfDescribingJson object at 0x10bf86d50>, <snowplow_tracker.self_describing_json.SelfDescribingJson object at 0x10c090490>]}
+[0m15:48:01.715565 [debug] [MainThread]: Flushing usage events
+[0m15:48:01.809028 [debug] [MainThread]: An error was encountered while trying to flush usage events

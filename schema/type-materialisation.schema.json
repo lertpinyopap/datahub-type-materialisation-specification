@@ -131,6 +131,58 @@
           }
         }
       }
+    },
+    {
+      "if": {
+        "properties": {
+          "source": {
+            "properties": {
+              "format": {
+                "const": "csv"
+              },
+              "load_method": {
+                "const": "dbt_seed"
+              }
+            },
+            "required": ["format", "load_method"]
+          }
+        },
+        "required": ["source"]
+      },
+      "then": {
+        "properties": {
+          "source": {
+            "required": ["seed"]
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "source": {
+            "properties": {
+              "format": {
+                "const": "csv"
+              }
+            },
+            "required": ["format", "seed"]
+          }
+        },
+        "required": ["source"]
+      },
+      "then": {
+        "properties": {
+          "source": {
+            "properties": {
+              "load_method": {
+                "const": "dbt_seed"
+              }
+            },
+            "required": ["load_method"]
+          }
+        }
+      }
     }
   ],
   "$defs": {
@@ -401,11 +453,18 @@
           "type": "string",
           "enum": ["minimal", "all"]
         },
+        "load_method": {
+          "type": "string",
+          "enum": ["stage", "dbt_seed"]
+        },
         "header": {
           "type": "boolean"
         },
         "location": {
           "$ref": "#/$defs/csvSourceLocation"
+        },
+        "seed": {
+          "$ref": "#/$defs/csvSourceSeed"
         },
         "upload": {
           "$ref": "#/$defs/csvSourceUpload"
@@ -447,11 +506,18 @@
           "type": "string",
           "enum": ["minimal", "all"]
         },
+        "load_method": {
+          "type": "string",
+          "enum": ["stage", "dbt_seed"]
+        },
         "header": {
           "type": "boolean"
         },
         "location": {
           "$ref": "#/$defs/csvSourceLocation"
+        },
+        "seed": {
+          "$ref": "#/$defs/csvSourceSeed"
         },
         "upload": {
           "$ref": "#/$defs/csvSourceUpload"
@@ -472,6 +538,25 @@
           "$ref": "#/$defs/templatedString"
         },
         "filename": {
+          "$ref": "#/$defs/templatedString"
+        }
+      }
+    },
+    "csvSourceSeed": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["file"],
+      "properties": {
+        "file": {
+          "$ref": "#/$defs/templatedString"
+        },
+        "name": {
+          "$ref": "#/$defs/specificationId"
+        },
+        "database": {
+          "$ref": "#/$defs/templatedString"
+        },
+        "schema": {
           "$ref": "#/$defs/templatedString"
         }
       }

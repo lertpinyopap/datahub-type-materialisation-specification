@@ -7,6 +7,7 @@ while intentionally broken samples still fail for the expected reasons.
 from pathlib import Path
 
 import pytest
+import yaml
 
 from type_materialisation.cli import resolve_and_validate_spec
 from type_materialisation.csv_validate import validate_csv_file
@@ -33,6 +34,55 @@ def test_valid_account_csv_sample_validates() -> None:
 
     assert result.errors == []
     assert result.rows_checked == 2
+
+
+def test_quarantine_sample_csv_has_five_good_rows_and_two_reject_rows() -> None:
+    result = validate_csv_file(
+        SAMPLE_YAML_DIR / "account_csv_quarantine_sample.yaml",
+        SAMPLE_CSV_DIR / "broken" / "account_csv_quarantine_mix.csv",
+    )
+
+    assert result.rows_checked == 7
+    assert len(result.errors) == 2
+    assert [error.location for error in result.errors] == [
+        "row 7, field `account_id`",
+        "row 8, field `account_id`",
+    ]
+
+
+@pytest.mark.parametrize("spec_path", sorted(SAMPLE_YAML_DIR.glob("*.yaml")))
+def test_samples_do_not_define_target_database_and_only_reference_tmp_schema(spec_path: Path) -> None:
+    data = yaml.safe_load(spec_path.read_text(encoding="utf-8"))
+    assert _database_paths(data) == []
+    assert _schema_values(data) <= {"TMP"}
+
+
+def _database_paths(value, path: str = "$") -> list[str]:
+    if isinstance(value, dict):
+        paths = [f"{path}.database" for key in value if key == "database"]
+        for key, child in value.items():
+            paths.extend(_database_paths(child, f"{path}.{key}"))
+        return paths
+    if isinstance(value, list):
+        paths: list[str] = []
+        for index, child in enumerate(value):
+            paths.extend(_database_paths(child, f"{path}[{index}]"))
+        return paths
+    return []
+
+
+def _schema_values(value) -> set[str]:
+    if isinstance(value, dict):
+        values = {schema for key, schema in value.items() if key == "schema" and isinstance(schema, str)}
+        for child in value.values():
+            values.update(_schema_values(child))
+        return values
+    if isinstance(value, list):
+        values: set[str] = set()
+        for child in value:
+            values.update(_schema_values(child))
+        return values
+    return set()
 
 
 def test_broken_yaml_sample_fails_for_expected_reasons() -> None:

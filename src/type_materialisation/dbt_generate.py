@@ -1,4 +1,5 @@
 import csv
+import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -10,15 +11,14 @@ from .schema import require_yaml
 from .spec import GENERATED_METADATA_FIELD_TYPES, fields, parse_sql_type
 
 
+DBT_PROJECT_NAME = "type_materialisation_generated"
+DBT_PROFILE_NAME = "datahub_type_materialisation"
+
 NOT_IMPLEMENTED = [
     "SCD1 and SCD2 materialisation",
-    "uniqueness checks in generated dbt SQL",
-    "fail_file validation failure enforcement in generated dbt SQL",
     "generated Snowflake file-format objects for CSV stages",
     "Python upload of local CSV files to Snowflake stages",
     "date/timestamp format translation from Python strptime to Snowflake formats",
-    "custom Python execution inside dbt macros",
-    "database-native Python UDF generation",
     "multi-error quarantine output",
 ]
 
@@ -55,6 +55,14 @@ class RelationConfig:
 
 def generate_dbt_project(options: GenerateDbtOptions) -> DbtGenerationResult:
     result = DbtGenerationResult(output_dir=options.output_dir)
+    if options.output_dir.exists() and any(options.output_dir.iterdir()):
+        result.errors.append(
+            Diagnostic(
+                "output directory already exists and is not empty; choose an empty directory for dbt generation",
+                str(options.output_dir),
+            )
+        )
+        return result
     if options.spec is None:
         try:
             spec = resolve_spec(options.spec_path, spec_paths=options.spec_paths).spec
@@ -89,14 +97,18 @@ def generate_dbt_project(options: GenerateDbtOptions) -> DbtGenerationResult:
         return result
 
     _ensure_dirs(options.output_dir)
-    _write_project_file(options.output_dir, spec, result)
+    _write_project_file(options.output_dir, spec, options.spec_path.name, result)
     _write_status_file(options.output_dir, result)
     _write_source_model(spec, options, result)
+    if result.errors:
+        return result
     try:
         _write_final_model(spec, result)
     except ValueError as exc:
         result.errors.append(Diagnostic(str(exc), "$.target.fields"))
         return result
+    if _failure_mode(spec) == "fail_file":
+        _write_validation_guard_model(spec, result)
     _write_generated_macros(options.output_dir, generated_macros, result)
     if options.unit_test_csv is not None:
         _write_unit_tests(spec, options, macros, result)
@@ -119,28 +131,33 @@ def _ensure_dirs(output_dir: Path) -> None:
     (output_dir / "models" / "generated").mkdir(parents=True, exist_ok=True)
     (output_dir / "macros" / "generated").mkdir(parents=True, exist_ok=True)
     (output_dir / "macros" / "reference").mkdir(parents=True, exist_ok=True)
+    (output_dir / "seeds").mkdir(parents=True, exist_ok=True)
 
 
-def _write_project_file(output_dir: Path, spec: dict[str, Any], result: DbtGenerationResult) -> None:
+def _write_project_file(output_dir: Path, spec: dict[str, Any], spec_file_name: str, result: DbtGenerationResult) -> None:
     yaml = require_yaml()
-    pre_hooks, post_hooks = _job_hooks(spec)
+    pre_hooks, post_hooks = _job_hooks(spec, spec_file_name)
     project = {
-        "name": "type_materialisation_generated",
+        "name": DBT_PROJECT_NAME,
         "version": "1.0",
         "config-version": 2,
-        "profile": "type_materialisation_generated",
+        "profile": DBT_PROFILE_NAME,
         "model-paths": ["models"],
+        "seed-paths": ["seeds"],
         "macro-paths": ["macros"],
         "on-run-start": pre_hooks,
         "on-run-end": post_hooks,
         "models": {
-            "type_materialisation_generated": {
+            DBT_PROJECT_NAME: {
                 "generated": {
                     "+materialized": "view",
                 }
             }
         },
     }
+    seed_config = _seed_project_config(spec)
+    if seed_config is not None:
+        project["seeds"] = seed_config
     content = yaml.safe_dump(project, sort_keys=False, width=10_000)
     _write(output_dir / "dbt_project.yml", content, result)
 
@@ -165,6 +182,10 @@ def _write_source_model(spec: dict[str, Any], options: GenerateDbtOptions, resul
 
 
 def _write_csv_source_model(spec: dict[str, Any], options: GenerateDbtOptions, result: DbtGenerationResult) -> None:
+    if _csv_load_method(spec["source"]) == "dbt_seed":
+        _write_csv_seed_source_model(spec, options, result)
+        return
+
     target = spec["target"]
     model_name = _source_model_name(target["id"])
     stage = _stage_reference(options.csv_stage) if options.csv_stage else _csv_stage_location(spec["source"])
@@ -186,6 +207,42 @@ def _write_csv_source_model(spec: dict[str, Any], options: GenerateDbtOptions, r
         ]
     )
     _write(options.output_dir / "models" / "generated" / f"{model_name}.sql", sql, result)
+
+
+def _write_csv_seed_source_model(spec: dict[str, Any], options: GenerateDbtOptions, result: DbtGenerationResult) -> None:
+    target = spec["target"]
+    model_name = _source_model_name(target["id"])
+    seed_name = _csv_seed_name(spec)
+    try:
+        seed_path = _write_csv_seed_file(spec, options, result)
+    except OSError as exc:
+        result.errors.append(Diagnostic(str(exc), "$.source.seed.file"))
+        return
+
+    select_lines = []
+    for field in fields(spec):
+        column = field.get("source", {}).get("column", field["id"])
+        select_lines.append(f"    cast({_quote_identifier(column)} as string) as {_quote_identifier(column)}")
+    sql = "\n".join(
+        [
+            f"{{{{ config(materialized='view', alias='{model_name}') }}}}",
+            "",
+            "select",
+            ",\n".join(select_lines),
+            f"from {{{{ ref('{seed_name}') }}}}",
+            "",
+        ]
+    )
+    _write(result.output_dir / "models" / "generated" / f"{model_name}.sql", sql, result)
+    result.files.append(seed_path)
+
+
+def _write_csv_seed_file(spec: dict[str, Any], options: GenerateDbtOptions, result: DbtGenerationResult) -> Path:
+    seed_file = _csv_seed_file_path(spec, options.spec_path)
+    seed_name = _csv_seed_name(spec)
+    target_path = result.output_dir / "seeds" / f"{seed_name}.csv"
+    shutil.copyfile(seed_file, target_path)
+    return target_path
 
 
 def _write_table_source_model(spec: dict[str, Any], options: GenerateDbtOptions, result: DbtGenerationResult) -> None:
@@ -216,7 +273,7 @@ def _write_final_model(spec: dict[str, Any], result: DbtGenerationResult) -> Non
     materialized = spec.get("control_data", {}).get("materialisation_type", "view")
     source_model = _source_model_name(target["id"])
     quarantine_enabled = _quarantine_enabled(spec)
-    failure_expression = _failure_details_expression(spec)
+    fail_file_enabled = _failure_mode(spec) == "fail_file"
     select_lines = []
     for field in fields(spec):
         expression = _field_expression(field)
@@ -243,10 +300,27 @@ def _write_final_model(spec: dict[str, Any], result: DbtGenerationResult) -> Non
             "with source_rows as (",
             f"    select * from {{{{ ref('{source_model}') }}}}",
             "),",
+            *_validation_rows_cte(spec, trailing_comma=True),
+            *_valid_rows_cte(),
+            "",
+            "select",
+            ",\n".join(select_lines),
+            "from valid_rows",
+            "",
+        ]
+    elif fail_file_enabled:
+        validation_guard_model = _validation_guard_model_name(target["id"])
+        body_lines = [
+            "with source_rows as (",
+            f"    select * from {{{{ ref('{source_model}') }}}}",
+            "),",
+            *_validation_rows_cte(spec, trailing_comma=True),
             "valid_rows as (",
-            "    select *",
-            "    from source_rows",
-            f"    where {failure_expression} is null",
+            "    select validation_rows.*",
+            "    from validation_rows",
+            f"    cross join {{{{ ref('{validation_guard_model}') }}}} as validation_guard",
+            "    where validation_rows.failure_details is null",
+            "      and validation_guard.validation_failure_guard = 0",
             ")",
             "",
             "select",
@@ -265,6 +339,44 @@ def _write_final_model(spec: dict[str, Any], result: DbtGenerationResult) -> Non
     _write(result.output_dir / "models" / "generated" / f"{target['id']}.sql", sql, result)
     if quarantine_enabled:
         _write_quarantine_model(spec, result)
+
+
+def _write_validation_guard_model(spec: dict[str, Any], result: DbtGenerationResult) -> None:
+    target = spec["target"]
+    relation = _target_relation_config(spec)
+    source_model = _source_model_name(target["id"])
+    model_name = _validation_guard_model_name(target["id"])
+    alias = f"{relation.table}__VALIDATION_GUARD"
+    config_lines = _model_config_lines(
+        materialized="table",
+        database=relation.database,
+        schema=relation.schema,
+        alias=alias,
+    )
+    sql = "\n".join(
+        [
+            "{{",
+            "  config(",
+            *config_lines,
+            "  )",
+            "}}",
+            "",
+            "with source_rows as (",
+            f"    select * from {{{{ ref('{source_model}') }}}}",
+            "),",
+            *_validation_rows_cte(spec, trailing_comma=False),
+            "",
+            "select",
+            "    case",
+            "        when count(*) = 0 then 0",
+            "        else cast('TYPE_MATERIALISATION_VALIDATION_FAILED' as number)",
+            "    end as validation_failure_guard",
+            "from validation_rows",
+            "where failure_details is not null",
+            "",
+        ]
+    )
+    _write(result.output_dir / "models" / "generated" / f"{model_name}.sql", sql, result)
 
 
 def _model_config_lines(
@@ -292,7 +404,6 @@ def _write_quarantine_model(spec: dict[str, Any], result: DbtGenerationResult) -
     quarantine = _quarantine_relation_config(spec)
     model_name = _quarantine_model_name(target["id"])
     source_model = _source_model_name(target["id"])
-    failure_expression = _failure_details_expression(spec)
     source_columns = _source_output_columns(spec)
     select_lines = [
         "    cast(current_timestamp() as datetime) as loaded_at",
@@ -321,16 +432,11 @@ def _write_quarantine_model(spec: dict[str, Any], result: DbtGenerationResult) -
             "with source_rows as (",
             f"    select * from {{{{ ref('{source_model}') }}}}",
             "),",
-            "failed_rows as (",
-            "    select",
-            "        *,",
-            f"        {failure_expression} as failure_details",
-            "    from source_rows",
-            ")",
+            *_validation_rows_cte(spec, trailing_comma=False),
             "",
             "select",
             ",\n".join(select_lines),
-            "from failed_rows",
+            "from validation_rows",
             "where failure_details is not null",
             "",
         ]
@@ -339,8 +445,27 @@ def _write_quarantine_model(spec: dict[str, Any], result: DbtGenerationResult) -
 
 
 def _write_generated_macros(output_dir: Path, macros: dict[str, str], result: DbtGenerationResult) -> None:
+    _write(output_dir / "macros" / "generated" / "generate_schema_name.sql", _generate_schema_name_macro(), result)
     for macro_name, macro_sql in sorted(macros.items()):
         _write(output_dir / "macros" / "generated" / f"{macro_name}.sql", macro_sql + "\n", result)
+
+
+def _generate_schema_name_macro() -> str:
+    return "\n".join(
+        [
+            "{% macro generate_schema_name(custom_schema_name, node) -%}",
+            "    {%- set override_schema = var('target_schema', none) -%}",
+            "    {%- if override_schema is not none -%}",
+            "        {{ override_schema | trim }}",
+            "    {%- elif custom_schema_name is none -%}",
+            "        {{ target.schema }}",
+            "    {%- else -%}",
+            "        {{ custom_schema_name | trim }}",
+            "    {%- endif -%}",
+            "{%- endmacro %}",
+            "",
+        ]
+    )
 
 
 def _write_unit_tests(
@@ -353,6 +478,7 @@ def _write_unit_tests(
     source_rows, expected_rows, warnings = _unit_test_rows(spec, options.unit_test_csv, macros)
     result.warnings.extend(warnings)
     target = spec["target"]
+    source_fixture_sql = _unit_test_fixture_sql(source_rows, _source_fixture_column_types(spec))
     unit_tests = [
         {
             "name": f"{target['id']}_sample_source",
@@ -360,7 +486,8 @@ def _write_unit_tests(
             "given": [
                 {
                     "input": f"ref('{_source_model_name(target['id'])}')",
-                    "rows": source_rows,
+                    "format": "sql",
+                    "rows": source_fixture_sql,
                 }
             ],
             "expect": {
@@ -376,7 +503,8 @@ def _write_unit_tests(
                 "given": [
                     {
                         "input": f"ref('{_source_model_name(target['id'])}')",
-                        "rows": source_rows,
+                        "format": "sql",
+                        "rows": source_fixture_sql,
                     }
                 ],
                 "expect": {
@@ -387,6 +515,31 @@ def _write_unit_tests(
     data = {"unit_tests": unit_tests}
     content = yaml.safe_dump(data, sort_keys=False)
     _write(result.output_dir / "models" / "generated" / f"{target['id']}_unit_tests.yml", content, result)
+
+
+def _unit_test_fixture_sql(rows: list[dict[str, Any]], column_types: dict[str, str]) -> str:
+    if not rows:
+        select_lines = [
+            f"    cast(null as {data_type}) as {_quote_identifier(column)}"
+            for column, data_type in column_types.items()
+        ]
+        return "\n".join(["select", ",\n".join(select_lines), "where 1 = 0"])
+
+    selects = []
+    for row in rows:
+        select_lines = []
+        for column, data_type in column_types.items():
+            value = row.get(column)
+            select_lines.append(f"    {_sql_literal(value, data_type)} as {_quote_identifier(column)}")
+        selects.append("\n".join(["select", ",\n".join(select_lines)]))
+    return "\nunion all\n".join(selects)
+
+
+def _source_fixture_column_types(spec: dict[str, Any]) -> dict[str, str]:
+    return {
+        column: "varchar"
+        for column in _source_output_columns(spec)
+    }
 
 
 def _unit_test_rows(
@@ -494,6 +647,7 @@ def _failure_details_expression(spec: dict[str, Any]) -> str:
     expressions = []
     for field in fields(spec):
         expressions.extend(_field_failure_expressions(field))
+        expressions.extend(_field_uniqueness_failure_expressions(field))
     if not expressions:
         return "null"
     return f"coalesce({', '.join(expressions)})"
@@ -588,6 +742,43 @@ def _field_failure_expressions(field: dict[str, Any]) -> list[str]:
     return failures
 
 
+def _field_uniqueness_failure_expressions(field: dict[str, Any]) -> list[str]:
+    if field.get("unique") is not True:
+        return []
+    field_id = field["id"]
+    expression = _field_expression(field)
+    typed_expression = f"try_cast({expression} as {field['data_type']})"
+    return [
+        "case "
+        f"when {typed_expression} is not null "
+        f"and count(*) over (partition by {typed_expression}) > 1 "
+        f"then {_sql_string(f'field `{field_id}` duplicates a value for a unique field')} "
+        "end"
+    ]
+
+
+def _validation_rows_cte(spec: dict[str, Any], *, trailing_comma: bool) -> list[str]:
+    suffix = "," if trailing_comma else ""
+    return [
+        "validation_rows as (",
+        "    select",
+        "        *,",
+        f"        {_failure_details_expression(spec)} as failure_details",
+        "    from source_rows",
+        f"){suffix}",
+    ]
+
+
+def _valid_rows_cte() -> list[str]:
+    return [
+        "valid_rows as (",
+        "    select *",
+        "    from validation_rows",
+        "    where failure_details is null",
+        ")",
+    ]
+
+
 def _custom_macro_names(spec: dict[str, Any]) -> list[str]:
     names: list[str] = []
     for field in fields(spec):
@@ -604,6 +795,61 @@ def _source_model_name(target_id: str) -> str:
 
 def _quarantine_model_name(target_id: str) -> str:
     return f"{target_id}__quarantine"
+
+
+def _validation_guard_model_name(target_id: str) -> str:
+    return f"{target_id}__validation_guard"
+
+
+def _csv_load_method(source: dict[str, Any]) -> str:
+    return str(source.get("load_method", "stage"))
+
+
+def _csv_seed_name(spec: dict[str, Any]) -> str:
+    seed = spec["source"].get("seed", {})
+    if not isinstance(seed, dict):
+        seed = {}
+    return str(seed.get("name", f"{spec['target']['id']}__seed"))
+
+
+def _csv_seed_file_path(spec: dict[str, Any], spec_path: Path) -> Path:
+    seed = spec["source"].get("seed", {})
+    if not isinstance(seed, dict):
+        seed = {}
+    raw_path = seed.get("file")
+    if not isinstance(raw_path, str):
+        raise OSError("source.seed.file is required when source.load_method is dbt_seed")
+    path = Path(raw_path)
+    if not path.is_absolute():
+        path = spec_path.parent / path
+    if not path.exists():
+        raise OSError(f"seed CSV file does not exist: {path}")
+    return path
+
+
+def _seed_project_config(spec: dict[str, Any]) -> dict[str, Any] | None:
+    source = spec.get("source", {})
+    if not isinstance(source, dict) or source.get("format") != "csv" or _csv_load_method(source) != "dbt_seed":
+        return None
+
+    target = spec["target"]
+    seed = source.get("seed", {})
+    if not isinstance(seed, dict):
+        seed = {}
+    seed_name = _csv_seed_name(spec)
+    config: dict[str, Any] = {
+        "+quote_columns": False,
+        "+schema": seed.get("schema", target["schema"]),
+        "+column_types": {
+            column: "varchar"
+            for column in _source_output_columns(spec)
+        },
+    }
+    if seed.get("database"):
+        config["+database"] = seed["database"]
+    if source.get("delimiter", ",") != ",":
+        config["+delimiter"] = source["delimiter"]
+    return {DBT_PROJECT_NAME: {seed_name: config}}
 
 
 def _csv_stage_location(source: dict[str, Any]) -> str:
@@ -654,6 +900,13 @@ def _quarantine_enabled(spec: dict[str, Any]) -> bool:
     return isinstance(control_data, dict) and control_data.get("failure_mode") == "quarantine_row"
 
 
+def _failure_mode(spec: dict[str, Any]) -> str:
+    control_data = spec.get("control_data", {})
+    if not isinstance(control_data, dict):
+        return "fail_file"
+    return str(control_data.get("failure_mode", "fail_file"))
+
+
 def _target_relation_config(spec: dict[str, Any]) -> RelationConfig:
     target = spec["target"]
     return RelationConfig(
@@ -680,9 +933,10 @@ def _job_relation_config(spec: dict[str, Any]) -> RelationConfig:
     job = spec.get("control_data", {}).get("job", {})
     if not isinstance(job, dict):
         job = {}
+    job_schema = str(job.get("schema", "BUSINESS"))
     return RelationConfig(
         database=job.get("database", target.database),
-        schema=job.get("schema", "BUSINESS"),
+        schema=f"{{{{ var('tms_job_schema', '{job_schema}') }}}}",
         table=job.get("table", "TYPE_MATERIALISATION_JOBS"),
     )
 
@@ -695,6 +949,55 @@ def _relation_name(relation: RelationConfig) -> str:
     return ".".join(parts)
 
 
+def _runtime_relation_label(relation: RelationConfig, *, schema_var: str | None = None) -> str:
+    database = relation.database or "{{ target.database }}"
+    if schema_var is None:
+        schema = relation.schema
+    else:
+        schema = '{{ var("' + schema_var + '", "' + relation.schema + '") }}'
+    return ".".join([database, schema, relation.table])
+
+
+def _dbt_relation_lookup(relation: RelationConfig, variable_name: str, *, schema_var: str | None = None) -> str:
+    database = _sql_string(relation.database) if relation.database else "target.database"
+    if schema_var is None:
+        schema = _sql_string(relation.schema)
+    else:
+        schema = f'var("{schema_var}", "{relation.schema}")'
+    return (
+        "{% set "
+        + variable_name
+        + " = adapter.get_relation(database="
+        + database
+        + ", schema="
+        + schema
+        + ", identifier="
+        + _sql_string(relation.table)
+        + ") %}"
+    )
+
+
+def _count_expression(relation_variable_name: str) -> str:
+    return (
+        "{% if "
+        + relation_variable_name
+        + " is not none %}(select count(*) from {{ "
+        + relation_variable_name
+        + " }}){% else %}null{% endif %}"
+    )
+
+
+def _count_cte(relation_variable_name: str, cte_name: str, column_name: str) -> str:
+    return (
+        cte_name
+        + " as (select "
+        + _count_expression(relation_variable_name)
+        + " as "
+        + column_name
+        + ")"
+    )
+
+
 def _source_output_columns(spec: dict[str, Any]) -> list[str]:
     target_fields = fields(spec)
     if spec["source"]["format"] == "csv":
@@ -705,13 +1008,45 @@ def _source_output_columns(spec: dict[str, Any]) -> list[str]:
     return [field.get("source", {}).get("column", field["id"]) for field in target_fields]
 
 
-def _job_hooks(spec: dict[str, Any]) -> tuple[list[str], list[str]]:
+def _job_hooks(spec: dict[str, Any], spec_file_name: str) -> tuple[list[str], list[str]]:
     relation = _relation_name(_job_relation_config(spec))
+    target_relation = _target_relation_config(spec)
+    generated_table = _runtime_relation_label(target_relation, schema_var="target_schema")
+    quarantine_table = (
+        _runtime_relation_label(_quarantine_relation_config(spec), schema_var="target_schema")
+        if _quarantine_enabled(spec)
+        else None
+    )
+    generated_relation_lookup = _dbt_relation_lookup(
+        target_relation,
+        "tms_generated_relation",
+        schema_var="target_schema",
+    )
+    quarantine_relation_lookup = (
+        _dbt_relation_lookup(
+            _quarantine_relation_config(spec),
+            "tms_quarantine_relation",
+            schema_var="target_schema",
+        )
+        if _quarantine_enabled(spec)
+        else "{% set tms_quarantine_relation = none %}"
+    )
     result_expression = (
         "{% set failed_result_count = "
         "(results | selectattr('status', 'equalto', 'error') | list | length) + "
         "(results | selectattr('status', 'equalto', 'fail') | list | length) %}"
-        "{% if failed_result_count > 0 %}'FAILED'{% else %}'{{ var(\"job_result\", \"COMPLETED\") }}'{% endif %}"
+        "{% if failed_result_count > 0 %}'FAILED'{% else %}"
+        "case when quarantine_counts.quarantine_count > 0 "
+        "then 'COMPLETED_WITH_QUARANTINE' else 'COMPLETED' end{% endif %}"
+    )
+    details_expression = (
+        "{% set explicit_job_details = var(\"job_details\", none) %}"
+        "{% if explicit_job_details is not none %}"
+        "'{{ explicit_job_details | replace(\"'\", \"''\") }}'"
+        "{% elif failed_result_count > 0 %}"
+        "'dbt run failed; inspect dbt artifacts and quarantine output for validation details'"
+        "{% else %}case when quarantine_counts.quarantine_count > 0 "
+        "then 'validation errors written to quarantine output' else null end{% endif %}"
     )
     create_sql = (
         f"create table if not exists {relation} ("
@@ -719,6 +1054,12 @@ def _job_hooks(spec: dict[str, Any]) -> tuple[list[str], list[str]]:
         "event_type varchar(32), "
         "event_timestamp datetime, "
         "result varchar(64), "
+        "details varchar(16777216), "
+        "spec_file_name varchar(1024), "
+        "generated_table varchar(1024), "
+        "quarantine_table varchar(1024), "
+        "loaded_count number(38, 0), "
+        "quarantine_count number(38, 0), "
         f"audit_data_process_key {GENERATED_METADATA_FIELD_TYPES['audit_data_process_key']}, "
         f"audit_created_datetime {GENERATED_METADATA_FIELD_TYPES['audit_created_datetime']}, "
         f"audit_last_changed_datetime {GENERATED_METADATA_FIELD_TYPES['audit_last_changed_datetime']}"
@@ -726,35 +1067,73 @@ def _job_hooks(spec: dict[str, Any]) -> tuple[list[str], list[str]]:
     )
     start_sql = (
         f"insert into {relation} "
-        "(job_id, event_type, event_timestamp, result, audit_data_process_key, "
+        "(job_id, event_type, event_timestamp, result, details, spec_file_name, generated_table, "
+        "quarantine_table, loaded_count, quarantine_count, audit_data_process_key, "
         "audit_created_datetime, audit_last_changed_datetime) select "
         "cast('{{ var(\"job_id\", invocation_id) }}' as varchar(64)), "
         "'JOB_START', "
         "cast(current_timestamp() as datetime), "
         "null, "
+        "null, "
+        f"cast({_sql_string(spec_file_name)} as varchar(1024)), "
+        f"cast({_sql_string(generated_table)} as varchar(1024)), "
+        f"{_nullable_sql_string(quarantine_table)}, "
+        "cast(null as number(38, 0)), "
+        "cast(null as number(38, 0)), "
         f"cast('{{{{ var(\"audit_data_process_key\", \"manual\") }}}}' as "
         f"{GENERATED_METADATA_FIELD_TYPES['audit_data_process_key']}), "
         "cast(current_timestamp() as datetime), "
         "cast(current_timestamp() as datetime)"
     )
     end_sql = (
-        f"insert into {relation} "
-        "(job_id, event_type, event_timestamp, result, audit_data_process_key, "
-        "audit_created_datetime, audit_last_changed_datetime) select "
+        f"{generated_relation_lookup}{quarantine_relation_lookup}insert into {relation} "
+        "(job_id, event_type, event_timestamp, result, details, spec_file_name, generated_table, "
+        "quarantine_table, loaded_count, quarantine_count, audit_data_process_key, "
+        "audit_created_datetime, audit_last_changed_datetime) "
+        "with "
+        f"{_count_cte('tms_generated_relation', 'loaded_counts', 'loaded_count')}, "
+        f"{_count_cte('tms_quarantine_relation', 'quarantine_counts', 'quarantine_count')} "
+        "select "
         "cast('{{ var(\"job_id\", invocation_id) }}' as varchar(64)), "
         "'JOB_END', "
         "cast(current_timestamp() as datetime), "
         f"{result_expression}, "
+        f"{details_expression}, "
+        f"cast({_sql_string(spec_file_name)} as varchar(1024)), "
+        f"cast({_sql_string(generated_table)} as varchar(1024)), "
+        f"{_nullable_sql_string(quarantine_table)}, "
+        "loaded_counts.loaded_count, "
+        "quarantine_counts.quarantine_count, "
         f"cast('{{{{ var(\"audit_data_process_key\", \"manual\") }}}}' as "
         f"{GENERATED_METADATA_FIELD_TYPES['audit_data_process_key']}), "
         "cast(current_timestamp() as datetime), "
-        "cast(current_timestamp() as datetime)"
+        "cast(current_timestamp() as datetime) "
+        "from loaded_counts cross join quarantine_counts"
     )
-    return [create_sql, start_sql], [end_sql]
+    return (
+        [_optional_job_hook(create_sql), _optional_job_hook(start_sql)],
+        [_optional_job_hook(create_sql), _optional_job_hook(end_sql)],
+    )
+
+
+def _optional_job_hook(sql: str) -> str:
+    return "{% if var('tms_enable_job_hooks', true) %}" + sql + "{% endif %}"
 
 
 def _sql_string(value: str) -> str:
     return "'" + value.replace("'", "''") + "'"
+
+
+def _nullable_sql_string(value: str | None) -> str:
+    if value is None:
+        return "cast(null as varchar(1024))"
+    return f"cast({_sql_string(value)} as varchar(1024))"
+
+
+def _sql_literal(value: Any, data_type: str) -> str:
+    if value is None:
+        return f"cast(null as {data_type})"
+    return f"cast({_sql_string(str(value))} as {data_type})"
 
 
 def _write(path: Path, content: str, result: DbtGenerationResult) -> None:

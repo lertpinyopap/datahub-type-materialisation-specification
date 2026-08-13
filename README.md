@@ -83,6 +83,7 @@ Run CSV validation:
 
 ```bash
 tms validate --spec samples/yaml/account_csv.yaml --input-file samples/csv/account_csv.csv
+tms validate --spec samples/yaml/account_csv_seed.yaml --input-file samples/csv/account_csv.csv
 tms validate --spec samples/yaml/account_csv.yaml --input-file samples/csv/broken/account_csv_bad_account_number.csv
 tms validate --spec samples/yaml/account_csv.yaml --input-file samples/csv/broken/account_csv_header_mismatch.csv
 tms validate --spec path/to/child.yaml --spec-path path/to/parents --input-file path/to/input.csv
@@ -91,19 +92,43 @@ tms validate --spec path/to/child.yaml --spec-path path/to/parents --input-file 
 Generate a dbt project:
 
 ```bash
-tms generate-dbt --spec samples/yaml/account_csv.yaml --unit-test-csv samples/csv/account_csv.csv
-tms generate-dbt --spec samples/yaml/account_csv.yaml --output-dir /tmp/tms-dbt-account --csv-stage RAW.PUBLIC.ACCOUNT_STAGE
+tms generate-dbt --spec samples/yaml/account_csv.yaml --unit-test-csv samples/csv/account_csv.csv --output-dir tmp/dbt-account
+tms generate-dbt --spec samples/yaml/account_csv.yaml --output-dir tmp/dbt-account --csv-stage RAW.PUBLIC.ACCOUNT_STAGE
+tms generate-dbt --spec samples/yaml/account_csv_seed.yaml --output-dir tmp/dbt-account-seed
 tms generate-dbt --spec path/to/child.yaml --spec-path path/to/parents
 ```
 
 If `--output-dir` is omitted, `tms generate-dbt` writes to a fresh temporary
-directory. CSV stage details come from `source.location` in the spec unless
+directory. If `--output-dir` is supplied, it must either not exist or be empty;
+generation fails rather than mixing stale dbt artifacts with newly generated
+ones. CSV stage details come from `source.location` in the spec unless
 `--csv-stage` is supplied. Any omitted database is resolved by the active dbt
 adapter/session context. CSV upload is planned as a Python `tms` step outside
-dbt generation, but is not implemented yet. The generated project currently
-covers CSV-stage and table-source materialisation slices, including generated
-job run hooks and append-only quarantine models; see
+dbt generation, but is not implemented yet. CSV sources may alternatively use
+`source.load_method: dbt_seed`, which copies `source.seed.file` into the
+generated dbt project's `seeds/` directory and generates a source model that
+reads from the seed relation. The generated project currently covers CSV-stage,
+CSV-seed, and table-source materialisation slices, including generated job run
+hooks and append-only quarantine models; see
 [IMPLEMENTATION_STATUS.md](./IMPLEMENTATION_STATUS.md) for unsupported features.
+
+Generated dbt projects refer to a local user-managed dbt profile named
+`datahub_type_materialisation`. The reference implementation does not generate
+`profiles.yml`, because connection details must come from the operator's normal
+dbt environment.
+
+```bash
+cd tmp/dbt-account
+dbt test --select "test_type:unit" --vars '{tms_job_schema: TMP}'
+```
+
+For a dbt-seed-backed CSV sample, run the seed and dependent models in one dbt
+invocation:
+
+```bash
+cd tmp/dbt-account-seed
+dbt build --select account_seed_source+ --vars '{tms_job_schema: TMP, target_schema: TMP}'
+```
 
 Custom macros are Python objects referenced by dotted path from YAML. They must
 generate dbt/Jinja SQL and may optionally support local Python execution for
@@ -130,8 +155,7 @@ source:
   quoting: minimal
 target:
   id: account
-  database: analytics
-  schema: business
+  schema: TMP
   fields:
     - id: account_id
       source:

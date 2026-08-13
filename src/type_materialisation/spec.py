@@ -94,6 +94,7 @@ def validate_semantics(spec: dict[str, Any], *, abstract: bool) -> list[Diagnost
     diagnostics: list[Diagnostic] = []
     diagnostics.extend(_validate_jinja(spec))
     diagnostics.extend(_validate_target_fields(spec))
+    diagnostics.extend(_validate_csv_seed_source(spec))
     diagnostics.extend(_validate_scd(spec, abstract=abstract))
     return diagnostics
 
@@ -101,6 +102,7 @@ def validate_semantics(spec: dict[str, Any], *, abstract: bool) -> list[Diagnost
 def _validate_target_fields(spec: dict[str, Any]) -> list[Diagnostic]:
     diagnostics: list[Diagnostic] = []
     seen: dict[str, str] = {}
+    seen_source_columns: dict[str, str] = {}
     for index, field in enumerate(fields(spec)):
         if not isinstance(field, dict):
             continue
@@ -116,6 +118,23 @@ def _validate_target_fields(spec: dict[str, Any]) -> list[Diagnostic]:
                 Diagnostic(f"duplicates field id `{seen[key]}` case-insensitively", location)
             )
         seen[key] = field_id
+
+        source = field.get("source", {})
+        if not isinstance(source, dict):
+            continue
+        column = source.get("column")
+        if not isinstance(column, str):
+            continue
+        column_key = case_key(column)
+        column_location = f"$.target.fields[{index}].source.column"
+        if column_key in seen_source_columns:
+            diagnostics.append(
+                Diagnostic(
+                    f"duplicates source column `{seen_source_columns[column_key]}` case-insensitively",
+                    column_location,
+                )
+            )
+        seen_source_columns[column_key] = column
     return diagnostics
 
 
@@ -137,6 +156,31 @@ def _validate_jinja(spec: dict[str, Any]) -> list[Diagnostic]:
         for expression in JINJA_EXPR_RE.findall(value):
             if not SUPPORTED_JINJA_EXPR_RE.match(expression):
                 diagnostics.append(Diagnostic(f"unsupported Jinja expression `{expression}`", path))
+    return diagnostics
+
+
+def _validate_csv_seed_source(spec: dict[str, Any]) -> list[Diagnostic]:
+    diagnostics: list[Diagnostic] = []
+    source = spec.get("source")
+    if not isinstance(source, dict):
+        return diagnostics
+    if source.get("format") != "csv" or source.get("load_method", "stage") != "dbt_seed":
+        return diagnostics
+
+    if source.get("header") is not True:
+        diagnostics.append(Diagnostic("dbt_seed CSV sources require header: true", "$.source.header"))
+
+    for index, field in enumerate(fields(spec)):
+        if not isinstance(field, dict):
+            continue
+        field_source = field.get("source")
+        if not isinstance(field_source, dict) or not isinstance(field_source.get("column"), str):
+            diagnostics.append(
+                Diagnostic(
+                    "dbt_seed CSV sources require field.source.column",
+                    f"$.target.fields[{index}].source.column",
+                )
+            )
     return diagnostics
 
 

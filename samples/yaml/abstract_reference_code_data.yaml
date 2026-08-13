@@ -5,17 +5,15 @@ control_data:
   materialisation_type: table
   failure_mode: quarantine_row
   quarantine:
-    schema: data_quality
+    schema: TMP
     table: reference_code_QUARANTINE
 source:
   format: table
-  database: raw
-  schema: reference_data
+  schema: TMP
   table: abstract_reference_code_data
 target:
   id: abstract_reference_code_data
-  database: analytics
-  schema: business
+  schema: TMP
   fields:
     - id: code
       source:

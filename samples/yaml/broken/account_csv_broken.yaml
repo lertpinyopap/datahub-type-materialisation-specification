@@ -9,8 +9,7 @@ source:
   header: true
 target:
   id: account
-  database: analytics
-  schema: business
+  schema: TMP
   fields:
     - id: account_id
       source:

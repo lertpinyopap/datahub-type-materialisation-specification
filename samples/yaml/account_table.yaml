@@ -6,13 +6,11 @@ control_data:
   failure_mode: fail_file
 source:
   format: table
-  database: "{{ env_var('RAW_DATABASE') }}"
-  schema: "{{ var('raw_schema', 'landing') }}"
+  schema: TMP
   table: "{{ env_var('ENV') }}_account_file_landed"
 target:
   id: account
-  database: analytics
-  schema: business
+  schema: TMP
   fields:
     - id: account_id
       source:

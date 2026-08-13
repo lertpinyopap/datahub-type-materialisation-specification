@@ -59,6 +59,35 @@ def test_reserved_generated_field_names_are_rejected_case_insensitively(tmp_path
     assert any("reserved generated metadata field id" in message for message in diagnostic_messages(diagnostics))
 
 
+def test_source_column_names_are_rejected_case_insensitively(tmp_path: Path) -> None:
+    _, diagnostics = parse_yaml(
+        tmp_path,
+        """
+        id: account_spec
+        source:
+          format: csv
+          header: true
+        target:
+          id: account
+          schema: business
+          fields:
+            - id: account_id
+              source:
+                pos: 0
+                column: account_id
+              data_type: varchar(20)
+            - id: account_number
+              source:
+                pos: 1
+                column: ACCOUNT_ID
+              data_type: varchar(20)
+        """,
+    )
+
+    assert diagnostic_messages(diagnostics) == ["duplicates source column `account_id` case-insensitively"]
+    assert diagnostics[0].location == "$.target.fields[1].source.column"
+
+
 def test_csv_source_uses_python_dialect_names(tmp_path: Path) -> None:
     _, diagnostics = parse_yaml(
         tmp_path,
@@ -135,6 +164,59 @@ def test_csv_source_rejects_unsupported_quoting_values(tmp_path: Path) -> None:
     )
 
     assert any("'none' is not one of ['minimal', 'all']" in message for message in diagnostic_messages(diagnostics))
+
+
+def test_csv_dbt_seed_requires_header_and_source_columns(tmp_path: Path) -> None:
+    _, diagnostics = parse_yaml(
+        tmp_path,
+        """
+        id: account_spec
+        source:
+          format: csv
+          header: false
+          load_method: dbt_seed
+          seed:
+            file: account.csv
+        target:
+          id: account
+          schema: business
+          fields:
+            - id: account_id
+              source:
+                pos: 0
+              data_type: varchar(20)
+        """,
+    )
+
+    assert diagnostic_messages(diagnostics) == [
+        "dbt_seed CSV sources require header: true",
+        "dbt_seed CSV sources require field.source.column",
+    ]
+
+
+def test_csv_seed_block_requires_dbt_seed_load_method(tmp_path: Path) -> None:
+    _, diagnostics = parse_yaml(
+        tmp_path,
+        """
+        id: account_spec
+        source:
+          format: csv
+          header: true
+          seed:
+            file: account.csv
+        target:
+          id: account
+          schema: business
+          fields:
+            - id: account_id
+              source:
+                pos: 0
+                column: account_id
+              data_type: varchar(20)
+        """,
+    )
+
+    assert any("'load_method' is a required property" in message for message in diagnostic_messages(diagnostics))
 
 
 def test_scd_business_key_must_reference_a_target_field(tmp_path: Path) -> None:

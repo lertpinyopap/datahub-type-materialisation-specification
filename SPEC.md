@@ -323,7 +323,7 @@ schema ::= string
 table ::= string
 
 job_event_type ::= JOB_START | JOB_END
-job_result ::= COMPLETED | COMPLETED_WITH_ERRORS | FAILED
+job_result ::= COMPLETED | COMPLETED_WITH_QUARANTINE | FAILED
   | FAILED_TO_PARSE | FAILED_TO_INHERIT | FAILED_TO_RESOLVE
   | FAILED_TO_COMPILE
 ```
@@ -341,8 +341,7 @@ supplied, otherwise the active dbt adapter and database session context.
 If `job.schema` is omitted, implementations should default it to `BUSINESS`.
 
 The job table must be created if it does not exist. If it already exists, it
-must be expanded to cover the required job event columns, but it must never be
-shrunk automatically.
+must not be altered automatically.
 
 The job event columns are:
 
@@ -353,7 +352,20 @@ The job event columns are:
 - `event_timestamp`: the time the event occurred.
 - `result`: the load result. `JOB_START` events should leave this value null
   unless the materialisation fails before load time. `JOB_END` events must set
-  it to `COMPLETED`, `COMPLETED_WITH_ERRORS`, or `FAILED`.
+  it to `COMPLETED`, `COMPLETED_WITH_QUARANTINE`, or `FAILED`.
+- `details`: nullable free-form detail text for validation failures, runtime
+  failures, or other diagnostic context.
+- `spec_file_name`: nullable specification file name used to generate the dbt
+  artifacts for the load.
+- `generated_table`: nullable fully qualified generated output table name.
+- `quarantine_table`: nullable fully qualified quarantine table name, when a
+  quarantine table is configured.
+- `loaded_count`: nullable count of records written to the generated output
+  table. `JOB_START` events must leave this value null. `JOB_END` events should
+  set it when the generated output table exists.
+- `quarantine_count`: nullable count of records written to the quarantine
+  table. `JOB_START` events must leave this value null. `JOB_END` events should
+  set it when a quarantine table is configured and exists.
 - `audit_data_process_key`: the operational process key for the pipeline
   execution or run that produced the job event.
 - `audit_created_datetime`: the time the job event row was first created in the
@@ -361,8 +373,11 @@ The job event columns are:
 - `audit_last_changed_datetime`: the time the job event row was most recently
   changed in the platform.
 
-Audit metadata columns must use the generated metadata data types defined in
-[section 7.1](#71-target-audit-metadata).
+The context columns `details`, `spec_file_name`, `generated_table`, and
+`quarantine_table` and the count columns `loaded_count` and `quarantine_count`
+must be nullable so existing job history remains valid when the job table
+structure evolves. Audit metadata columns must use the generated metadata data
+types defined in [section 7.1](#71-target-audit-metadata).
 
 `job_event_type` values:
 
@@ -373,8 +388,8 @@ Audit metadata columns must use the generated metadata data types defined in
 
 - `COMPLETED`: the materialisation load completed without validation,
   conversion, or runtime failures.
-- `COMPLETED_WITH_ERRORS`: the materialisation load completed after writing one
-  or more failed records to quarantine output.
+- `COMPLETED_WITH_QUARANTINE`: the materialisation load completed after writing
+  one or more failed records to quarantine output.
 - `FAILED`: the materialisation load did not complete successfully.
 - `FAILED_TO_PARSE`: the materialisation failed during schema-time or
   parse-time validation.
@@ -598,14 +613,24 @@ csv_source ::=
   quotechar?
   lineterminator?
   quoting?
+  load_method?
   location?
+  seed?
   upload?
+
+load_method ::= stage | dbt_seed
 
 location ::=
   database?
   schema?
   stage?
   filename?
+
+seed ::=
+  file
+  name?
+  database?
+  schema?
 
 upload ::=
   enabled: false
@@ -623,6 +648,7 @@ schema ::= templated_string
 stage ::= templated_string
 filename ::= templated_string
 file ::= templated_string
+name ::= identifier
 overwrite ::= true | false
 ```
 
@@ -634,8 +660,16 @@ CSV dialect options align with Python CSV dialect concepts:
 - `lineterminator`: row terminator string. Defaults to `\r\n`.
 - `quoting`: how the reader interprets quoted fields. Defaults to `minimal`.
 
-`location` describes where a CSV file is expected to be available for dbt
-materialisation:
+`load_method` describes how dbt reads the CSV source:
+
+- `stage`: dbt reads from a Snowflake stage using `location`. This is the
+  default.
+- `dbt_seed`: the reference implementation copies a local CSV file into the
+  generated dbt project's `seeds` directory and generated models read from the
+  loaded seed relation.
+
+`location` describes where a CSV file is expected to be available for staged
+dbt materialisation:
 
 - `database`: database containing the stage. If omitted, the active dbt adapter
   and database session context resolves it.
@@ -645,6 +679,21 @@ materialisation:
 
 When `location.stage` includes a leading `@`, implementations should not add a
 second `@`.
+
+`seed` describes how a CSV file is loaded using dbt's native seed mechanism:
+
+- `file`: local CSV file copied into the generated dbt project's `seeds`
+  directory.
+- `name`: dbt seed resource name. Defaults to `<target.id>__seed`.
+- `database`: database for the seed relation. If omitted, the active dbt
+  adapter and database session context resolves it.
+- `schema`: schema for the seed relation. Defaults to `target.schema`.
+
+For `load_method: dbt_seed`, `seed.file` is required, `header` must be `true`,
+and each target field must specify `field.source.column`. dbt seed loading is
+intended for small local CSV files and development or reference-data workflows;
+stage-based loading remains the preferred path for large operational source
+files.
 
 `upload` describes whether the reference implementation should upload the local
 CSV file before dbt generation:
@@ -658,6 +707,8 @@ CSV file before dbt generation:
 If `upload` is omitted, implementations should default to `enabled: false`.
 CSV upload is handled by Python reference tooling outside dbt generation. dbt
 generation assumes the file is already available in the configured stage.
+`upload` is separate from `load_method: dbt_seed`; it is only used for
+stage-based loading.
 
 `quoting` values:
 
@@ -671,10 +722,28 @@ Sample: CSV source.
 source:
   format: csv
   header: true
+  load_method: stage
   location:
     schema: AD_HOC
     stage: "@csv_stage"
     filename: account.csv
+  delimiter: ","
+  quotechar: '"'
+  lineterminator: "\r\n"
+  quoting: minimal
+```
+
+Sample: CSV source loaded through dbt seed.
+
+```yaml
+source:
+  format: csv
+  header: true
+  load_method: dbt_seed
+  seed:
+    file: ../csv/account_csv.csv
+    name: account_seed
+    schema: TMP
   delimiter: ","
   quotechar: '"'
   lineterminator: "\r\n"
@@ -805,7 +874,13 @@ unique ::= true | false
 
 `target.fields` is an ordered list of fields to materialise in the target.
 Each field `id` is an identifier and must be unique within the resolved target
-field list.
+field list. Field id comparison is case-free, so `account_id` and `ACCOUNT_ID`
+are the same field id.
+
+If `unique` is `true`, the loaded target values for that field must be unique
+within the materialised source set. Null values are not considered duplicates.
+Uniqueness is an automatically applied load-time validation for that field and
+is handled according to `failure_mode`.
 
 Sample: target field.
 
@@ -844,6 +919,10 @@ error.
 
 For table sources, a field must be selected by column name. `pos` is invalid for
 table sources.
+
+Any `field.source.column` value specified in `target.fields` must be unique
+within the resolved target field list. Column comparison is case-free, so
+`account_id` and `ACCOUNT_ID` are the same source column name.
 
 Sample: CSV field source using both position and column.
 
@@ -1299,8 +1378,15 @@ Parse-time rules:
   `pos` or `column`.
 - For `source.format = csv` and `source.header = false`, `field.source.column`
   is invalid.
+- For `source.format = csv` and `source.load_method = dbt_seed`, `header` must
+  be `true`.
+- For `source.format = csv` and `source.load_method = dbt_seed`, each field
+  source must specify `column`.
 - For `source.format = table`, `field.source.column` is required.
 - For `source.format = table`, `field.source.pos` is invalid.
+- Target field ids must be unique within the resolved target field list.
+- Specified `field.source.column` values must be unique within the resolved
+  target field list.
 - Target field ids must not use reserved audit metadata column names:
   `audit_data_process_key`, `audit_created_datetime`, or
   `audit_last_changed_datetime`.
@@ -1349,6 +1435,8 @@ Load-time rules:
   are both specified, the source header at `pos` must equal `column`.
 - For `source.format = table`, `field.source.column` must exist in the source
   table.
+- For any field with `unique: true`, non-null materialised values for that field
+  must be unique within the loaded source set.
 
 ## 15. Inheritance
 
@@ -1555,6 +1643,12 @@ specification.
 Reference implementations may generate a transient dbt project at runtime from
 resolved specifications. Generated dbt artifacts are an execution detail and are
 not source-of-truth specification files.
+
+If a runtime allows the generated dbt project directory to be supplied
+explicitly, generation must fail when that directory already exists and contains
+any files or directories. Implementations may create a missing directory, or use
+an already existing empty directory, but must not merge newly generated artifacts
+with previous generated content.
 
 The transient dbt project should use a predictable runtime structure:
 

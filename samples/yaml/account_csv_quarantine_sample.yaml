@@ -1,26 +1,25 @@
 # yaml-language-server: $schema=../../schema/type-materialisation.schema.json
-id: account_csv
-description: Maps raw account CSV data into a typed account table.
+id: account_csv_quarantine_sample
+description: Demonstrates five accepted CSV rows and two rows written to quarantine.
 control_data:
   materialisation_type: table
   failure_mode: quarantine_row
   quarantine:
-    table: account_QUARANTINE
+    table: account_quarantine_sample_QUARANTINE
 source:
   format: csv
   header: true
-  location:
+  load_method: dbt_seed
+  seed:
+    file: ../csv/broken/account_csv_quarantine_mix.csv
+    name: account_quarantine_sample_source
     schema: TMP
-    stage: "@csv_stage"
-    filename: account_csv.csv
-  upload:
-    enabled: false
   delimiter: ","
   quotechar: '"'
   lineterminator: "\r\n"
   quoting: minimal
 target:
-  id: account
+  id: account_quarantine_sample
   schema: TMP
   fields:
     - id: account_id
@@ -48,7 +47,5 @@ target:
       data_type: varchar(255)
       transforms:
         - type: trim
-        - type: custom
-          macro: account_macros.normalise_account_name
       nullable: true
       unique: false
