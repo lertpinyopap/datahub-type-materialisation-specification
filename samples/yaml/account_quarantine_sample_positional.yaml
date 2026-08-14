@@ -1,12 +1,12 @@
 # yaml-language-server: $schema=../../schema/type-materialisation.schema.json
-id: account_quarantine_sample_positional
+id: account
 description: Demonstrates a headerless positional CSV that evolves the quarantine table shape.
 control_data:
   materialisation_type: table
   change_type: scd1
   failure_mode: quarantine_row
   quarantine:
-    table: account_QUARANTINE_SAMPLE__QUARANTINE
+    table: account__QUARANTINE
 source:
   format: csv
   header: false
@@ -20,8 +20,7 @@ source:
   lineterminator: "\n"
   quoting: minimal
 target:
-  id: account_quarantine_sample_positional
-  table_name: account_QUARANTINE_SAMPLE
+  id: account
   schema: TMP
   fields:
     - id: account_id

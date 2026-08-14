@@ -1,4 +1,4 @@
-"""Tests for the Python macro contract used by the reference implementation.
+"""Tests for the Python macro contract used by the implementation.
 
 These checks make sure custom macros can be discovered, must provide SQL
 generation, and optionally participate in local CSV validation through Python.

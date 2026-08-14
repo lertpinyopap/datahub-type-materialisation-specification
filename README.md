@@ -1,12 +1,12 @@
 # DataHub Type Materialisation
 
 This repository contains both the Type Materialisation Specification and its
-Python reference implementation.
+Python implementation.
 
 The specification defines a generic YAML format for describing how flat or
 schema-on-read data is transformed into typed relational structures such as
-views, materialised views, and tables. The reference implementation provides the
-`tms` command-line tool for parsing specifications and validating CSV inputs.
+views, materialised views, and tables. The implementation provides the `tms`
+command-line tool for parsing specifications and validating CSV inputs.
 
 The specification is intended to support both:
 
@@ -19,9 +19,9 @@ single specification should describe the source format, target fields, typing
 rules, validation rules, error handling, and any shared inheritance pattern used
 across related tables.
 
-The reference implementation is expected to generate and validate dbt artifacts.
-Python is used for parsing, validation, macro handling, and generation support;
-dbt remains the materialisation runtime.
+The implementation is expected to generate and validate dbt artifacts. Python is
+used for parsing, validation, macro handling, and generation support; dbt
+remains the materialisation runtime.
 
 ## Documentation
 
@@ -37,12 +37,12 @@ dbt remains the materialisation runtime.
   specifications, with intentionally invalid examples in
   [samples/csv/broken/](./samples/csv/broken).
 - [src/type_materialisation/](./src/type_materialisation) contains the Python
-  reference implementation.
+  implementation.
 - [macros/](./macros) contains sample Python macro objects used by the samples.
 - [AGENTS.md](./AGENTS.md) contains working instructions for Codex and other
   repository agents.
 
-## Reference Implementation
+## Implementation
 
 The Python package is installed as an editable local package and exposes the
 `tms` command.
@@ -190,7 +190,7 @@ hooks and append-only quarantine models; see
 [IMPLEMENTATION_STATUS.md](./IMPLEMENTATION_STATUS.md) for unsupported features.
 
 Generated dbt projects refer to a local user-managed dbt profile named
-`datahub_type_materialisation`. The reference implementation does not generate
+`datahub_type_materialisation`. The implementation does not generate
 `profiles.yml`, because connection details must come from the operator's normal
 dbt environment. Before running `tms dbt-build` or dbt directly, make sure this
 profile exists in your local dbt profiles directory and contains the target
@@ -228,7 +228,7 @@ generate dbt/Jinja SQL and may optionally support local Python execution for
 Sample: CSV account file materialisation.
 
 ```yaml
-id: account_file_format
+id: account
 description: Account file mapping.
 control_data:
   materialisation_type: table

@@ -1,1 +1,1 @@
-"""Reference implementation for the Type Materialisation Specification."""
+"""Implementation for the Type Materialisation Specification."""

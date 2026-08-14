@@ -1,8 +1,8 @@
 # Agent Instructions
 
 This repository defines the Type Materialisation Specification and its Python
-reference implementation. Treat the specification as the product:
-documentation changes can alter downstream implementation behavior.
+implementation. Treat the specification as the product: documentation changes
+can alter downstream implementation behavior.
 
 ## Working Principles
 
@@ -37,21 +37,21 @@ materialised into typed relational data. It should cover:
 
 ## Implementation Guidance
 
-The reference implementation should target dbt as the materialisation runtime.
-Python may be used for parsing, validation, generation, and test tooling. When
-adding implementation notes:
+The implementation should target dbt as the materialisation runtime. Python may
+be used for parsing, validation, generation, and test tooling. When adding
+implementation notes:
 
 - Keep them subordinate to the specification.
 - Do not introduce Python as a separate materialisation runtime unless
   explicitly agreed.
-- Prefer simple reference behavior over production-specific assumptions.
+- Prefer simple implementation behavior over production-specific assumptions.
 - Add conformance-oriented examples where useful.
 
-## Python Reference Implementation
+## Python Implementation
 
-The Python implementation in `src/type_materialisation/` is the reference
-implementation, not miscellaneous utility code. The installed CLI command is
-`tms`.
+The Python implementation in `src/type_materialisation/` is product
+implementation code, not miscellaneous utility code. The installed CLI command
+is `tms`.
 
 - Target Python 3.13.
 - Local development uses the repository-root `requirements.txt`, which stays on

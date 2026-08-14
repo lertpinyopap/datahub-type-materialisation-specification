@@ -36,6 +36,19 @@ def test_valid_account_csv_sample_validates() -> None:
     assert result.rows_checked == 2
 
 
+def test_valid_account_samples_share_logical_account_id() -> None:
+    account_samples = sorted(SAMPLE_YAML_DIR.glob("account*.yaml"))
+
+    for spec_path in account_samples:
+        data = yaml.safe_load(spec_path.read_text(encoding="utf-8"))
+        assert data["id"] == "account", spec_path.name
+        assert data["target"]["id"] == "account", spec_path.name
+        assert data["target"].get("table_name", "account") == "account", spec_path.name
+        quarantine = data.get("control_data", {}).get("quarantine")
+        if isinstance(quarantine, dict):
+            assert quarantine.get("table") == "account__QUARANTINE", spec_path.name
+
+
 def test_quarantine_sample_csv_has_five_good_rows_and_two_reject_rows() -> None:
     result = validate_csv_file(
         SAMPLE_YAML_DIR / "account_csv_quarantine_sample.yaml",

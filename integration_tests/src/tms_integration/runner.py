@@ -24,7 +24,7 @@ from .database import (
     replace_source_table_from_csv,
     snowflake_connection,
 )
-from .dbt_runner import run_tms_dbt_project
+from .dbt_runner import run_tms_dbt_project, validate_dbt_build_environment
 from .reporting import IntegrationReporter
 from .scenario import Scenario
 
@@ -95,6 +95,10 @@ def _run_live_scenario(
     target_schema = _target_schema_name()
     table_prefix = _table_prefix()
     reporter.scenario_start(scenario, schema=target_schema, prefix=table_prefix)
+
+    reporter.step("Checking local dbt command environment")
+    validate_dbt_build_environment()
+    reporter.ok("Local dbt command environment ready")
 
     project_dir = work_dir / "dbt_project"
     reporter.step("Generating dbt project", str(project_dir))

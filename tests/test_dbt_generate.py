@@ -424,6 +424,77 @@ def test_numeric_transform_validation_casts_via_varchar_for_snowflake(tmp_path: 
     assert "try_cast(cast(round(ROUNDED_AMOUNT, 2) as varchar) as number(10,2)) is null" in guard_sql
 
 
+def test_parse_date_and_timestamp_transforms_generate_snowflake_sql(tmp_path: Path) -> None:
+    result, output_dir = generate(
+        tmp_path,
+        csv_generation_spec(
+            extra_control="""
+            control_data:
+              change_type: scd1
+              failure_mode: fail_load
+            """,
+            fields="""
+        - id: opened_on
+          source:
+            pos: 0
+            column: opened_on
+          data_type: date
+          transforms:
+            - type: parse_date
+              format: "%d/%m/%Y"
+        - id: opened_at
+          source:
+            pos: 1
+            column: opened_at
+          data_type: timestamp_tz
+          transforms:
+            - type: parse_timestamp
+              format: "%Y-%m-%dT%H:%M:%S%z"
+        - id: reviewed_at
+          source:
+            pos: 2
+            column: reviewed_at
+          data_type: timestamp_tz
+          transforms:
+            - type: parse_timestamp
+              format: "%Y-%m-%d %H:%M:%S"
+              timezone_if_missing: UTC
+            """
+        ),
+    )
+
+    assert result.errors == []
+    model_sql = (output_dir / "models" / "generated" / "account.sql").read_text(encoding="utf-8")
+    guard_sql = (output_dir / "models" / "generated" / "account__validation_guard.sql").read_text(encoding="utf-8")
+    assert "try_to_date(cast(OPENED_ON as varchar), 'DD/MM/YYYY')" in model_sql
+    assert "try_to_timestamp_tz(cast(OPENED_AT as varchar), 'YYYY-MM-DD\"T\"HH24:MI:SSTZHTZM')" in model_sql
+    assert "try_to_timestamp_tz(concat(cast(REVIEWED_AT as varchar), ' +0000'), 'YYYY-MM-DD HH24:MI:SS TZHTZM')" in model_sql
+    assert "field `opened_on` does not match parse_date format `%d/%m/%Y`" in guard_sql
+    assert "field `opened_at` does not match parse_timestamp format `%Y-%m-%dT%H:%M:%S%z`" in guard_sql
+
+
+def test_parse_timestamp_generation_rejects_missing_timezone_policy(tmp_path: Path) -> None:
+    result, _ = generate(
+        tmp_path,
+        csv_generation_spec(
+            fields="""
+        - id: opened_at
+          source:
+            pos: 0
+            column: opened_at
+          data_type: timestamp_tz
+          transforms:
+            - type: parse_timestamp
+              format: "%Y-%m-%d %H:%M:%S"
+            """
+        ),
+    )
+
+    assert diagnostic_messages(result.errors) == [
+        "`parse_timestamp` dbt generation requires a timezone directive in `format` or `timezone_if_missing`"
+    ]
+
+
 def test_table_source_generation_reads_from_configured_relation(tmp_path: Path) -> None:
     result, output_dir = generate(
         tmp_path,

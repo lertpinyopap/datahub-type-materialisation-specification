@@ -196,7 +196,7 @@ def _write_status_file(output_dir: Path, result: DbtGenerationResult) -> None:
     lines = [
         "# Not Yet Implemented",
         "",
-        "This generated dbt project covers the first reference implementation slice only.",
+        "This generated dbt project covers the first implementation slice only.",
         "",
     ]
     lines.extend(f"- {item}" for item in NOT_IMPLEMENTED)
@@ -1146,15 +1146,24 @@ def _write_validation_guard_model(spec: dict[str, Any], result: DbtGenerationRes
             "with source_rows as (",
             f"    select * from {{{{ ref('{source_model}') }}}}",
             "),",
-            *_validation_rows_cte(spec, trailing_comma=False),
+            *_validation_rows_cte(spec, trailing_comma=True),
+            "failed_validation_rows as (",
+            "    select *",
+            "    from validation_rows",
+            "    where FAILURE_DETAILS is not null",
+            "),",
+            "failure_count as (",
+            "    select count(*) as FAILURE_COUNT",
+            "    from failed_validation_rows",
+            ")",
             "",
-            "select",
-            "    case",
-            "        when count(*) = 0 then 0",
-            "        else cast('TYPE_MATERIALISATION_VALIDATION_FAILED' as number)",
-            "    end as VALIDATION_FAILURE_GUARD",
-            "from validation_rows",
-            "where FAILURE_DETAILS is not null",
+            "select 0 as VALIDATION_FAILURE_GUARD",
+            "from failure_count",
+            "where FAILURE_COUNT = 0",
+            "union all",
+            "select cast('TYPE_MATERIALISATION_VALIDATION_FAILED' as number) as VALIDATION_FAILURE_GUARD",
+            "from failure_count",
+            "where FAILURE_COUNT > 0",
             "",
         ]
     )
@@ -1623,7 +1632,13 @@ def _format_unit_test_datetime(value: datetime | object) -> str:
 
 
 def _field_expression(field: dict[str, Any]) -> str:
+    expression, _ = _field_expression_and_parse_failures(field)
+    return expression
+
+
+def _field_expression_and_parse_failures(field: dict[str, Any]) -> tuple[str, list[str]]:
     expression = _quote_identifier(_source_column_name(field))
+    failures: list[str] = []
     for transform in field.get("transforms", []):
         transform_type = transform.get("type")
         if transform_type == "trim":
@@ -1639,9 +1654,110 @@ def _field_expression(field: dict[str, Any]) -> str:
         elif transform_type == "custom":
             macro_name = _macro_object_name(transform["macro"])
             expression = "{{ " + f"{macro_name}('{expression}')" + " }}"
-        elif transform_type in {"parse_date", "parse_timestamp"}:
-            raise ValueError(f"`{transform_type}` is not implemented in dbt generation yet")
-    return expression
+        elif transform_type == "parse_date":
+            parsed_expression = _parse_date_expression(expression, transform)
+            failures.append(_parse_transform_failure_expression(field["id"], transform, expression, parsed_expression))
+            expression = parsed_expression
+        elif transform_type == "parse_timestamp":
+            parsed_expression = _parse_timestamp_expression(expression, transform)
+            failures.append(_parse_transform_failure_expression(field["id"], transform, expression, parsed_expression))
+            expression = parsed_expression
+    return expression, failures
+
+
+def _parse_transform_failure_expression(
+    field_id: str,
+    transform: dict[str, Any],
+    input_expression: str,
+    parsed_expression: str,
+) -> str:
+    transform_type = transform["type"]
+    return (
+        "case "
+        f"when {input_expression} is not null and {parsed_expression} is null "
+        f"then {_sql_string(f'field `{field_id}` does not match {transform_type} format `{transform['format']}`')} "
+        "end"
+    )
+
+
+def _parse_date_expression(expression: str, transform: dict[str, Any]) -> str:
+    snowflake_format = _snowflake_datetime_format(str(transform["format"]))
+    return f"try_to_date(cast({expression} as varchar), {_sql_string(snowflake_format)})"
+
+
+def _parse_timestamp_expression(expression: str, transform: dict[str, Any]) -> str:
+    python_format = str(transform["format"])
+    snowflake_format = _snowflake_datetime_format(python_format)
+    timezone_if_missing = transform.get("timezone_if_missing")
+    if timezone_if_missing in {"Z", "UTC"}:
+        return (
+            f"try_to_timestamp_tz(concat(cast({expression} as varchar), ' +0000'), "
+            f"{_sql_string(snowflake_format + ' TZHTZM')})"
+        )
+    if timezone_if_missing == "local":
+        return f"to_timestamp_tz(try_to_timestamp_ntz(cast({expression} as varchar), {_sql_string(snowflake_format)}))"
+    if not _python_datetime_format_has_timezone(python_format):
+        raise ValueError(
+            "`parse_timestamp` dbt generation requires a timezone directive in `format` "
+            "or `timezone_if_missing`"
+        )
+    return f"try_to_timestamp_tz(cast({expression} as varchar), {_sql_string(snowflake_format)})"
+
+
+def _python_datetime_format_has_timezone(python_format: str) -> bool:
+    index = 0
+    while index < len(python_format):
+        if python_format[index] != "%":
+            index += 1
+            continue
+        if index + 1 >= len(python_format):
+            raise ValueError("datetime format contains a trailing `%`")
+        directive = python_format[index + 1]
+        if directive in {"z", "Z"}:
+            return True
+        index += 2
+    return False
+
+
+def _snowflake_datetime_format(python_format: str) -> str:
+    tokens = {
+        "Y": "YYYY",
+        "y": "YY",
+        "m": "MM",
+        "d": "DD",
+        "H": "HH24",
+        "I": "HH12",
+        "M": "MI",
+        "S": "SS",
+        "f": "FF6",
+        "z": "TZHTZM",
+        "b": "MON",
+        "B": "MONTH",
+        "a": "DY",
+        "A": "DAY",
+        "j": "DDD",
+        "p": "AM",
+        "%": "%",
+    }
+    parts: list[str] = []
+    index = 0
+    while index < len(python_format):
+        char = python_format[index]
+        if char == "%":
+            if index + 1 >= len(python_format):
+                raise ValueError("datetime format contains a trailing `%`")
+            directive = python_format[index + 1]
+            if directive not in tokens:
+                raise ValueError(f"datetime format directive `%{directive}` is not supported by dbt generation")
+            parts.append(tokens[directive])
+            index += 2
+            continue
+        if char.isalpha():
+            parts.append(f'"{char}"')
+        else:
+            parts.append(char)
+        index += 1
+    return "".join(parts)
 
 
 def _failure_details_expression(spec: dict[str, Any]) -> str:
@@ -1656,9 +1772,9 @@ def _failure_details_expression(spec: dict[str, Any]) -> str:
 
 def _field_failure_expressions(field: dict[str, Any]) -> list[str]:
     field_id = field["id"]
-    expression = _field_expression(field)
+    expression, parse_failures = _field_expression_and_parse_failures(field)
     data_type = field["data_type"]
-    failures: list[str] = []
+    failures: list[str] = [*parse_failures]
     if field.get("nullable") is False:
         failures.append(
             f"case when {expression} is null then {_sql_string(f'field `{field_id}` is null but not nullable')} end"

@@ -1,5 +1,5 @@
 # yaml-language-server: $schema=../../schema/type-materialisation.schema.json
-id: account_csv
+id: account
 description: Maps raw account CSV data into a typed account table.
 control_data:
   materialisation_type: table

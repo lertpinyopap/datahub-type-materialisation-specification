@@ -2,22 +2,21 @@ from __future__ import annotations
 
 import json
 import subprocess
-import sys
 from io import StringIO
 from pathlib import Path
 
+import pytest
 from rich.console import Console
 
 from type_materialisation.schema import load_yaml
 
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT / "integration_tests" / "src"))
 
-from tms_integration.assertions import normalise_rows, read_csv_rows  # noqa: E402
-from tms_integration import dbt_runner  # noqa: E402
-from tms_integration import database as integration_database  # noqa: E402
-from tms_integration import reporting as integration_reporting  # noqa: E402
-from tms_integration.database import (  # noqa: E402
+from tms_integration.assertions import normalise_rows, read_csv_rows
+from tms_integration import dbt_runner
+from tms_integration import database as integration_database
+from tms_integration import reporting as integration_reporting
+from tms_integration.database import (
     DEFAULT_SNOWFLAKE_CONNECTION,
     IntegrationConfigError,
     drop_relations,
@@ -28,7 +27,7 @@ from tms_integration.database import (  # noqa: E402
     replace_csv_stage_from_file,
     replace_source_table_from_csv,
 )
-from tms_integration.runner import (  # noqa: E402
+from tms_integration.runner import (
     CustomAssertionContext,
     _force_runtime_failure_model,
     _generated_relation_names,
@@ -88,6 +87,7 @@ def test_integration_scenarios_are_discoverable_and_self_contained() -> None:
 
     assert [path.name for path in scenario_roots] == [
         "job_details_failure_modes",
+        "scd1_csv_date_timestamp_formats",
         "scd1_csv_stage_load",
         "scd1_csv_transforms",
         "scd1_quarantine_regex_validation",
@@ -367,7 +367,11 @@ def test_integration_dbt_runner_uses_tms_dbt_build(monkeypatch, tmp_path: Path) 
     project_dir = tmp_path / "project"
     spec_path.write_text("id: account\n", encoding="utf-8")
 
-    monkeypatch.setattr(dbt_runner.shutil, "which", lambda executable: "/venv/bin/tms" if executable == "tms" else None)
+    monkeypatch.setattr(
+        dbt_runner.shutil,
+        "which",
+        lambda executable: f"/venv/bin/{executable}" if executable in {"tms", "dbt"} else None,
+    )
 
     def fake_run(command, *, check, capture_output, text):
         commands.append(command)
@@ -412,7 +416,11 @@ def test_integration_dbt_runner_can_return_expected_failure(monkeypatch, tmp_pat
     project_dir = tmp_path / "project"
     spec_path.write_text("id: account\n", encoding="utf-8")
 
-    monkeypatch.setattr(dbt_runner.shutil, "which", lambda executable: "/venv/bin/tms" if executable == "tms" else None)
+    monkeypatch.setattr(
+        dbt_runner.shutil,
+        "which",
+        lambda executable: f"/venv/bin/{executable}" if executable in {"tms", "dbt"} else None,
+    )
     monkeypatch.setattr(
         dbt_runner.subprocess,
         "run",
@@ -433,6 +441,26 @@ def test_integration_dbt_runner_can_return_expected_failure(monkeypatch, tmp_pat
 
     assert result.returncode == 1
     assert result.stdout == "dbt failed"
+
+
+def test_integration_dbt_runner_reports_missing_dbt_before_running_tms(monkeypatch, tmp_path: Path) -> None:
+    spec_path = tmp_path / "spec.yaml"
+    project_dir = tmp_path / "project"
+    spec_path.write_text("id: account\n", encoding="utf-8")
+
+    monkeypatch.setattr(dbt_runner.shutil, "which", lambda executable: "/venv/bin/tms" if executable == "tms" else None)
+
+    def fail_run(*args, **kwargs):
+        raise AssertionError("subprocess.run should not be called when dbt is missing")
+
+    monkeypatch.setattr(dbt_runner.subprocess, "run", fail_run)
+
+    with pytest.raises(dbt_runner.TmsCommandError, match="dbt executable was not found on PATH"):
+        dbt_runner.run_tms_dbt_project(
+            spec_path=spec_path,
+            project_dir=project_dir,
+            target_schema="TMP",
+        )
 
 
 def test_snowflake_connection_config_defaults_to_tms_int(tmp_path: Path) -> None:
@@ -681,6 +709,20 @@ def test_csv_transform_scenario_generates_transform_sql(tmp_path: Path) -> None:
     assert "cast(ltrim(LEFT_TRIM_CODE) as varchar(50)) as LEFT_TRIM_CODE" in model_sql
     assert "cast(rtrim(RIGHT_TRIM_CODE) as varchar(50)) as RIGHT_TRIM_CODE" in model_sql
     assert "cast(round(ROUNDED_AMOUNT, 2) as number(10,2)) as ROUNDED_AMOUNT" in model_sql
+
+
+def test_csv_date_timestamp_scenario_generates_snowflake_parse_sql(tmp_path: Path) -> None:
+    scenario = load_scenario(INTEGRATION_ROOT / "scd1_csv_date_timestamp_formats")
+    output_dir = tmp_path / scenario.name
+
+    generate_project_for_scenario(scenario, output_dir)
+
+    model_sql = (output_dir / "models" / "generated" / "tms_int__account.sql").read_text(encoding="utf-8")
+    assert "try_to_date(cast(OPENED_ON_ISO as varchar), 'YYYY-MM-DD')" in model_sql
+    assert "try_to_date(cast(OPENED_ON_AU as varchar), 'DD/MM/YYYY')" in model_sql
+    assert "try_to_date(cast(OPENED_ON_NAMED as varchar), 'DD-MON-YYYY')" in model_sql
+    assert "try_to_timestamp_tz(cast(OPENED_AT_OFFSET as varchar), 'YYYY-MM-DD\"T\"HH24:MI:SSTZHTZM')" in model_sql
+    assert "try_to_timestamp_tz(concat(cast(REVIEWED_AT_UTC as varchar), ' +0000'), 'YYYY-MM-DD HH24:MI:SS TZHTZM')" in model_sql
 
 
 def test_quarantine_scenario_generates_regex_validation_and_quarantine_alias(tmp_path: Path) -> None:

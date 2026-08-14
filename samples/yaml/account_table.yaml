@@ -1,5 +1,5 @@
 # yaml-language-server: $schema=../../schema/type-materialisation.schema.json
-id: account_table
+id: account
 description: Maps landed account table data into a typed account table.
 control_data:
   materialisation_type: table

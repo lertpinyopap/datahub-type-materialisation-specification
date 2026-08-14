@@ -30,6 +30,7 @@ def run_tms_dbt_project(
     dbt_vars: dict[str, Any] | None = None,
     require_success: bool = True,
 ) -> TmsResult:
+    validate_dbt_build_environment()
     executable = _tms_executable()
     merged_vars = {"target_schema": target_schema, "tms_job_schema": target_schema}
     if dbt_vars:
@@ -59,6 +60,15 @@ def run_tms_dbt_project(
             )
         )
     return result
+
+
+def validate_dbt_build_environment() -> None:
+    _tms_executable()
+    if shutil.which("dbt") is None:
+        raise TmsCommandError(
+            "dbt executable was not found on PATH. Activate the project virtual environment "
+            "or prepend `.venv/bin` to PATH before running live integration tests."
+        )
 
 
 def _tms_executable() -> str:

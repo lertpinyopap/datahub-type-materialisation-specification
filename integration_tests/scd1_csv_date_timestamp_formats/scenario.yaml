@@ -1,0 +1,23 @@
+name: scd1_csv_date_timestamp_formats
+description: SCD1 CSV load parsing dates and timestamps from several source formats.
+spec: spec/account.yaml
+target:
+  expected_columns:
+    - ACCOUNT_ID
+    - OPENED_ON_ISO
+    - OPENED_ON_AU
+    - OPENED_ON_NAMED
+    - OPENED_AT_OFFSET
+    - REVIEWED_AT_UTC
+  order_by:
+    - ACCOUNT_ID
+checks:
+  - ISO date strings are parsed to date values.
+  - Australian day/month/year date strings are parsed to date values.
+  - Abbreviated month-name date strings are parsed to date values.
+  - Timestamp strings with timezone offsets are parsed to timestamp_tz values.
+  - Timestamp strings without timezone offsets use timezone_if_missing UTC.
+loads:
+  - name: load_001
+    source_csv: data/load_001_source.csv
+    expected_target: data/expected_after_load_001.csv

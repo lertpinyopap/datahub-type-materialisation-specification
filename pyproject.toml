@@ -20,4 +20,5 @@ dependencies = {file = ["requirements.txt"]}
 
 [tool.pytest.ini_options]
 filterwarnings = ["error"]
+pythonpath = ["src", "integration_tests/src"]
 testpaths = ["tests"]

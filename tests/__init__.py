@@ -1,1 +1,1 @@
-"""Test helpers and unit tests for the reference implementation."""
+"""Test helpers and unit tests for the implementation."""

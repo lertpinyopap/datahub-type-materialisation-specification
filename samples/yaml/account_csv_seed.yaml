@@ -1,12 +1,12 @@
 # yaml-language-server: $schema=../../schema/type-materialisation.schema.json
-id: account_csv_seed
+id: account
 description: Maps a local account CSV through dbt seed loading into a typed account table.
 control_data:
   materialisation_type: table
   change_type: scd1
   failure_mode: quarantine_row
   quarantine:
-    table: account_seed__QUARANTINE
+    table: account__QUARANTINE
 source:
   format: csv
   header: true
@@ -20,7 +20,7 @@ source:
   lineterminator: "\r\n"
   quoting: minimal
 target:
-  id: account_seed
+  id: account
   schema: TMP
   fields:
     - id: account_id
