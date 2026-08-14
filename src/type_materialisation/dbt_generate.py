@@ -318,13 +318,15 @@ def _write_table_source_model(spec: dict[str, Any], options: GenerateDbtOptions,
     for field in fields(spec):
         column = field.get("source", {}).get("column", field["id"])
         select_lines.append(f"    {_quote_identifier(column)} as {_quote_identifier(column)}")
+    source_sql = _table_source_sql(source)
     sql = "\n".join(
         [
             f"{{{{ config(materialized='view', alias='{_physical_name(model_name)}') }}}}",
             "",
+            *source_sql,
             "select",
             ",\n".join(select_lines),
-            f"from {_table_source_relation(source)}",
+            "from source_query",
             "",
         ]
     )
@@ -2175,6 +2177,17 @@ def _table_source_relation(source: dict[str, Any]) -> str:
         parts.append(_physical_name(source["database"]))
     parts.extend([_physical_name(source["schema"]), _physical_name(source["table"])])
     return ".".join(parts)
+
+
+def _table_source_sql(source: dict[str, Any]) -> list[str]:
+    query = source.get("query")
+    if isinstance(query, str) and query.strip():
+        return ["with source_query as (", _indent_sql(query.strip()), ")", ""]
+    return ["with source_query as (", f"    select * from {_table_source_relation(source)}", ")", ""]
+
+
+def _indent_sql(sql: str) -> str:
+    return "\n".join(f"    {line}" if line.strip() else "" for line in sql.splitlines())
 
 
 def _stage_reference(value: str) -> str:

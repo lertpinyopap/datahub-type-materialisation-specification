@@ -1,14 +1,15 @@
-id: scd1_table_source_varchar_load
+id: scd1_table_source_query_quarantine
 control_data:
   materialisation_type: table
   change_type: scd1
+  failure_mode: quarantine_row
 source:
   format: table
   schema: TMP
-  table: account_source_table
+  table: account_query_quarantine_source
   query: |
     select account_id, account_name, account_priority
-    from TMP.account_source_table
+    from TMP.account_query_quarantine_source
     where load_batch_id = 'LOAD_001'
 target:
   id: account
@@ -18,6 +19,9 @@ target:
       source:
         column: account_id
       data_type: varchar(20)
+      validations:
+        - type: regex
+          pattern: "^A[0-9]$"
     - id: account_name
       source:
         column: account_name

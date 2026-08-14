@@ -817,13 +817,18 @@ source:
 ```text
 table_source ::=
   format: table
-  database?
-  schema
-  table
+  (
+    database?
+    schema
+    table
+    query?
+  | query
+  )
 
 database ::= string
 schema ::= string
 table ::= string
+query ::= SQL SELECT statement
 ```
 
 Sample: table source.
@@ -831,10 +836,20 @@ Sample: table source.
 ```yaml
 source:
   format: table
-  database: raw
-  schema: landing
-  table: account_file_landed
+  query: |
+    select *
+    from raw.landing.account_file_landed
+    where load_batch_id = '{{ var('load_batch_id') }}'
 ```
+
+`query` is optional. When supplied, implementations must treat it as the full
+SQL query that produces the source row set. The query must be a single
+`select`/`with` query without a statement terminator. The generated
+materialisation operates on the query result, so the query may filter by load
+timestamp or batch identifier, select a subset of columns, join, deduplicate, or
+perform other source shaping before target field mapping runs. If `query` is
+omitted, `schema` and `table` are required and implementations should read all
+rows from that source relation.
 
 ## 7. Target
 
@@ -1430,9 +1445,10 @@ Sample: table source with dbt-style variables.
 ```yaml
 source:
   format: table
-  database: "{{ env_var('RAW_DATABASE') }}"
-  schema: "{{ var('raw_schema', 'landing') }}"
-  table: "{{ env_var('ENV') }}_account_file_landed"
+  query: |
+    select *
+    from {{ env_var('RAW_DATABASE') }}.{{ var('raw_schema', 'landing') }}.{{ env_var('ENV') }}_account_file_landed
+    where load_batch_id = '{{ var('load_batch_id') }}'
 ```
 
 ## 14. Validation Phases
@@ -1471,6 +1487,9 @@ Parse-time rules:
   `source.header = false`, each field source must specify `pos`.
 - For `source.format = table`, `field.source.column` is required.
 - For `source.format = table`, `field.source.pos` is invalid.
+- For `source.format = table`, if `source.query` is supplied, it must be a
+  single SQL query starting with `select` or `with` and must not include a
+  statement terminator.
 - Target field ids must be unique within the resolved target field list.
 - Specified `field.source.column` values must be unique within the resolved
   target field list.

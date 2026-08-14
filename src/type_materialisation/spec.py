@@ -97,6 +97,7 @@ def validate_semantics(spec: dict[str, Any], *, abstract: bool) -> list[Diagnost
     diagnostics.extend(_validate_jinja(spec))
     diagnostics.extend(_validate_target_fields(spec))
     diagnostics.extend(_validate_csv_seed_source(spec))
+    diagnostics.extend(_validate_table_query(spec))
     diagnostics.extend(_validate_scd(spec, abstract=abstract))
     return diagnostics
 
@@ -195,6 +196,22 @@ def _validate_csv_seed_source(spec: dict[str, Any]) -> list[Diagnostic]:
                     f"$.target.fields[{index}].source.pos",
                 )
             )
+    return diagnostics
+
+
+def _validate_table_query(spec: dict[str, Any]) -> list[Diagnostic]:
+    source = spec.get("source")
+    if not isinstance(source, dict) or source.get("format") != "table":
+        return []
+    query = source.get("query")
+    if not isinstance(query, str):
+        return []
+    stripped = query.strip()
+    diagnostics: list[Diagnostic] = []
+    if ";" in stripped:
+        diagnostics.append(Diagnostic("table source query must be a single SQL query without `;`", "$.source.query"))
+    if not re.match(r"(?is)^(select|with)\b", stripped):
+        diagnostics.append(Diagnostic("table source query must start with SELECT or WITH", "$.source.query"))
     return diagnostics
 
 

@@ -485,6 +485,9 @@
         },
         "table": {
           "$ref": "#/$defs/templatedString"
+        },
+        "query": {
+          "$ref": "#/$defs/templatedString"
         }
       }
     },
@@ -602,7 +605,15 @@
     "tableSource": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["format", "schema", "table"],
+      "required": ["format"],
+      "anyOf": [
+        {
+          "required": ["schema", "table"]
+        },
+        {
+          "required": ["query"]
+        }
+      ],
       "properties": {
         "format": {
           "const": "table"
@@ -614,6 +625,9 @@
           "$ref": "#/$defs/templatedString"
         },
         "table": {
+          "$ref": "#/$defs/templatedString"
+        },
+        "query": {
           "$ref": "#/$defs/templatedString"
         }
       }

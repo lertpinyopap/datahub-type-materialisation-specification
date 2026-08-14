@@ -7,8 +7,10 @@ control_data:
   failure_mode: fail_load
 source:
   format: table
-  schema: TMP
-  table: "{{ env_var('ENV') }}_account_file_landed"
+  query: |
+    select *
+    from TMP.{{ env_var('ENV') }}_account_file_landed
+    where load_batch_id = '{{ var('load_batch_id') }}'
 target:
   id: account
   schema: TMP

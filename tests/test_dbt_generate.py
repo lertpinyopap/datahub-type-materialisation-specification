@@ -521,7 +521,45 @@ def test_table_source_generation_reads_from_configured_relation(tmp_path: Path) 
     assert result.errors == []
     source_sql = (output_dir / "models" / "generated" / "account__source.sql").read_text(encoding="utf-8")
     assert "ACCOUNT_ID as ACCOUNT_ID" in source_sql
-    assert "from RAW.LANDING.ACCOUNT_SOURCE" in source_sql
+    assert "select * from RAW.LANDING.ACCOUNT_SOURCE" in source_sql
+    assert "from source_query" in source_sql
+
+
+def test_table_source_generation_wraps_source_query(tmp_path: Path) -> None:
+    result, output_dir = generate(
+        tmp_path,
+        """
+        id: table_spec
+        control_data:
+          change_type: scd1
+        source:
+          format: table
+          query: |
+            with latest_source as (
+              select account_id, load_batch_id
+              from landing.account_source
+              where load_batch_id = '{{ var('load_batch_id') }}'
+            )
+            select account_id
+            from latest_source
+        target:
+          id: account
+          schema: business
+          fields:
+            - id: account_id
+              source:
+                column: account_id
+              data_type: varchar(20)
+        """,
+    )
+
+    assert result.errors == []
+    source_sql = (output_dir / "models" / "generated" / "account__source.sql").read_text(encoding="utf-8")
+    assert "with source_query as (" in source_sql
+    assert "    with latest_source as (" in source_sql
+    assert "      from landing.account_source" in source_sql
+    assert "      where load_batch_id = '{{ var('load_batch_id') }}'" in source_sql
+    assert "from source_query" in source_sql
 
 
 def test_job_event_hooks_are_generated_at_project_run_level(tmp_path: Path) -> None:

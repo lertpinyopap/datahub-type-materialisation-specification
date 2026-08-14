@@ -19,6 +19,7 @@ Materialisation Specification.
 - dbt project generation for concrete CSV specifications using dbt seed loading
   from local CSV files.
 - dbt project generation for concrete table-source specifications.
+- Table-source `query` SQL in generated dbt source models.
 - Generated dbt projects reference the user-managed local
   `datahub_type_materialisation` dbt profile.
 - `fail_load` validation failure enforcement through generated dbt SQL.

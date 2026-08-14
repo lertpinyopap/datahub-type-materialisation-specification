@@ -1,0 +1,32 @@
+name: scd1_table_source_query_quarantine
+description: Table source query projection quarantines only rows in the query result.
+spec: spec/account.yaml
+target:
+  expected_columns:
+    - ACCOUNT_ID
+    - ACCOUNT_NAME
+    - ACCOUNT_PRIORITY
+  order_by:
+    - ACCOUNT_ID
+checks:
+  - The source table contains valid and malformed rows across multiple load batches.
+  - source.query filters to LOAD_001 and projects away the load_batch_id control column.
+  - Valid LOAD_001 rows are written to the typed target table.
+  - The malformed LOAD_001 row is written to quarantine.
+  - Malformed rows outside LOAD_001 are not loaded or quarantined.
+  - The quarantine assertion does not include load_batch_id because quarantine sees the query result.
+loads:
+  - name: load_001
+    source_csv: data/load_001_source.csv
+    expected_target: data/expected_after_load_001.csv
+    expected_relations:
+      - name: quarantine
+        table: account__quarantine
+        expected_csv: data/expected_quarantine_after_load_001.csv
+        columns:
+          - FAILURE_DETAILS
+          - ACCOUNT_ID
+          - ACCOUNT_NAME
+          - ACCOUNT_PRIORITY
+        order_by:
+          - ACCOUNT_ID

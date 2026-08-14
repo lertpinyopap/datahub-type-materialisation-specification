@@ -11,7 +11,9 @@ target:
 checks:
   - The source table is created with the TMS integration table prefix.
   - The generated dbt source model reads from the live source table.
-  - Both source rows are materialised into the typed target table.
+  - The generated table-source model applies source.query before materialisation.
+  - The source query projects business columns and drops the load_batch_id control column.
+  - Only the LOAD_001 source rows are materialised into the typed target table.
   - account_priority is loaded from a VARCHAR source column into a numeric target column.
 loads:
   - name: load_001

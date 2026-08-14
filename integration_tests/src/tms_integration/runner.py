@@ -324,8 +324,18 @@ def _prefix_spec_relations(spec: dict, original_spec_path: Path) -> None:
                 seed_file = original_spec_path.parent / seed_file
             seed["file"] = str(seed_file)
     elif isinstance(source, dict) and source.get("format") == "table":
+        original_source_schema = str(source.get("schema", "TMP"))
+        original_source_table = str(source.get("table", ""))
+        prefixed_source_table = _prefixed_logical_name(original_source_table) if original_source_table else original_source_table
         source["schema"] = "{{ var('target_schema', 'TMP') }}"
-        source["table"] = _prefixed_logical_name(str(source["table"]))
+        if original_source_table:
+            source["table"] = prefixed_source_table
+        if isinstance(source.get("query"), str):
+            source["query"] = (
+                source["query"]
+                .replace(f"{original_source_schema}.", "{{ var('target_schema', 'TMP') }}.")
+                .replace(original_source_table, prefixed_source_table)
+            )
     elif isinstance(source, dict) and source.get("format") == "csv":
         location = source.setdefault("location", {})
         if not isinstance(location, dict):

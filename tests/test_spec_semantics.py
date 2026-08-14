@@ -7,6 +7,8 @@ rules, data type support, and other cross-field specification constraints.
 from pathlib import Path
 from textwrap import indent
 
+import pytest
+
 from type_materialisation.cli import resolve_and_validate_spec
 from type_materialisation.spec import GENERATED_METADATA_FIELD_TYPES, parse_sql_type
 from tests.helpers import diagnostic_messages, write_spec
@@ -637,3 +639,91 @@ def test_supported_jinja_var_expression_accepts_double_quoted_arguments(tmp_path
     )
 
     assert diagnostic_messages(diagnostics) == []
+
+
+def test_table_source_query_accepts_full_select_with_supported_jinja(tmp_path: Path) -> None:
+    _, diagnostics = parse_yaml(
+        tmp_path,
+        """
+        id: table_spec
+        control_data:
+          change_type: scd1
+        source:
+          format: table
+          query: |
+            select account_id
+            from landing.account_source
+            where load_batch_id = '{{ var('load_batch_id') }}'
+        target:
+          id: account
+          schema: business
+          fields:
+            - id: account_id
+              source:
+                column: account_id
+              data_type: varchar(20)
+        """,
+    )
+
+    assert diagnostic_messages(diagnostics) == []
+
+
+def test_csv_source_rejects_query(tmp_path: Path) -> None:
+    _, diagnostics = parse_yaml(
+        tmp_path,
+        """
+        id: csv_spec
+        control_data:
+          change_type: scd1
+        source:
+          format: csv
+          header: true
+          query: "select * from landing.account_source"
+        target:
+          id: account
+          schema: business
+          fields:
+            - id: account_id
+              source:
+                pos: 0
+                column: account_id
+              data_type: varchar(20)
+        """,
+    )
+
+    assert any("query" in message for message in diagnostic_messages(diagnostics))
+
+
+@pytest.mark.parametrize(
+    ("query", "message"),
+    [
+        ("delete from account", "table source query must start with SELECT or WITH"),
+        ("select * from account; drop table account", "table source query must be a single SQL query without `;`"),
+    ],
+)
+def test_table_source_query_rejects_non_select_or_statement(
+    tmp_path: Path,
+    query: str,
+    message: str,
+) -> None:
+    _, diagnostics = parse_yaml(
+        tmp_path,
+        f"""
+        id: table_spec
+        control_data:
+          change_type: scd1
+        source:
+          format: table
+          query: "{query}"
+        target:
+          id: account
+          schema: business
+          fields:
+            - id: account_id
+              source:
+                column: account_id
+              data_type: varchar(20)
+        """,
+    )
+
+    assert message in diagnostic_messages(diagnostics)

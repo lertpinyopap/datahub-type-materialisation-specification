@@ -91,6 +91,7 @@ def test_integration_scenarios_are_discoverable_and_self_contained() -> None:
         "scd1_csv_stage_load",
         "scd1_csv_transforms",
         "scd1_quarantine_regex_validation",
+        "scd1_table_source_query_quarantine",
         "scd1_table_source_varchar_load",
         "scd2_continuous_field_validity",
         "scd2_hash_skip_current_duplicate",
@@ -644,7 +645,34 @@ def test_table_source_scenario_prefixes_source_table_and_adds_it_to_cleanup(tmp_
     assert _source_format(generated_project.spec_path) == "table"
     assert _source_table_name(generated_project.spec_path) == "TMS_INT__ACCOUNT_SOURCE_TABLE"
     assert "TMS_INT__ACCOUNT_SOURCE_TABLE" in relation_names
-    assert "from {{ var('target_schema', 'TMP') }}.TMS_INT__ACCOUNT_SOURCE_TABLE" in source_sql
+    assert "from {{ var('target_schema', 'TMP') }}.tms_int__account_source_table" in spec["source"]["query"]
+    assert "from {{ var('target_schema', 'TMP') }}.tms_int__account_source_table" in source_sql
+    assert "where load_batch_id = 'LOAD_001'" in source_sql
+
+
+def test_table_source_query_quarantine_scenario_projects_source_query(tmp_path: Path) -> None:
+    scenario = load_scenario(INTEGRATION_ROOT / "scd1_table_source_query_quarantine")
+    output_dir = tmp_path / scenario.name
+
+    generated_project = generate_project_for_scenario(scenario, output_dir)
+
+    spec = load_yaml(generated_project.spec_path)
+    relation_names = _generated_relation_names(generated_project.spec_path)
+    source_sql = (
+        output_dir / "models" / "generated" / "tms_int__account__source.sql"
+    ).read_text(encoding="utf-8")
+    quarantine_sql = (
+        output_dir / "models" / "generated" / "tms_int__account__quarantine.sql"
+    ).read_text(encoding="utf-8")
+    assert spec["source"]["table"] == "tms_int__account_query_quarantine_source"
+    assert "TMS_INT__ACCOUNT_QUERY_QUARANTINE_SOURCE" in relation_names
+    assert "select account_id, account_name, account_priority" in source_sql
+    assert "load_batch_id" in source_sql
+    assert "LOAD_001" in source_sql
+    assert "LOAD_999" not in source_sql
+    assert "LOAD_BATCH_ID as LOAD_BATCH_ID" not in source_sql
+    assert "LOAD_BATCH_ID" not in quarantine_sql
+    assert "where FAILURE_DETAILS is not null" in quarantine_sql
 
 
 def test_csv_stage_scenario_prefixes_stage_and_adds_it_to_cleanup(tmp_path: Path) -> None:
