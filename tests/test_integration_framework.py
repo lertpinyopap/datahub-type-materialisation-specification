@@ -94,6 +94,7 @@ def test_integration_scenarios_are_discoverable_and_self_contained() -> None:
         "scd1_table_source_varchar_load",
         "scd2_continuous_field_validity",
         "scd2_hash_skip_current_duplicate",
+        "scd2_hash_update_historical_boundary",
         "scd2_missing_from_source_delete",
     ]
     for scenario_root in scenario_roots:
@@ -736,6 +737,9 @@ def test_hash_skip_scenario_generates_business_hash_skip_sql(tmp_path: Path) -> 
     assert "cast('{{ var(\"valid_from_datetime\") }}' as timestamp_tz)" in model_sql
     assert "current_target.BUSINESS_DATA_HASH = typed_rows.BUSINESS_DATA_HASH" in model_sql
     assert "coalesce(current_target.IS_DELETED_FLAG, 'N') = typed_rows.TMS_IS_DELETED_FLAG_CANDIDATE" in model_sql
+    assert "duplicate_boundary_rows as (" in model_sql
+    assert "deduplicated_version_rows as (" in model_sql
+    assert "SCD2 duplicate hash handling: historical duplicate rows skipped=" in model_sql
 
 
 def test_continuous_scd2_scenario_dbt_unit_test_uses_exact_next_boundary(tmp_path: Path) -> None:

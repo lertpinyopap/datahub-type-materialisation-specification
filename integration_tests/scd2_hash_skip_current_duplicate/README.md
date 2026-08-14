@@ -34,9 +34,15 @@ The test creates a target table with one current active account:
 - `load_003_source.csv` contains `A1` with `account_value = 1`. This should
   create another new SCD2 version because the current value is `2`, even though
   the hash matches the original historical row.
+- `load_004_source.csv` contains `A1` with `account_value = 1` and a historical
+  `valid_from_datetime` between the value `2` and final value `1` versions. In
+  skip mode this should be skipped because it duplicates the next historical
+  business hash.
 
 ## Expected End State
 
 The target table contains three `A1` versions ordered by
 `valid_from_datetime`: value `1`, value `2`, then value `1` again. The final
 row is current, active, and open-ended.
+
+The fourth load leaves that state unchanged.

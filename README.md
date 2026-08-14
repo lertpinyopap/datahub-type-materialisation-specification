@@ -192,7 +192,16 @@ hooks and append-only quarantine models; see
 Generated dbt projects refer to a local user-managed dbt profile named
 `datahub_type_materialisation`. The reference implementation does not generate
 `profiles.yml`, because connection details must come from the operator's normal
-dbt environment.
+dbt environment. Before running `tms dbt-build` or dbt directly, make sure this
+profile exists in your local dbt profiles directory and contains the target
+passed with `--target`, such as `dev`.
+
+Live integration tests also need a Snowflake CLI-style configuration file at
+`~/.snowflake/config.toml`. By default the integration runner reads
+`[connections.tms_int]`; set `TMS_SNOWFLAKE_CONNECTION` to use a different
+connection entry from the same TOML file. This direct Snowflake connection is
+used for live-test setup, cleanup, and fixture loading. dbt still uses the
+`datahub_type_materialisation` dbt profile.
 
 Use `--project-dir` to run a project from another directory. The command streams
 dbt output directly to the console.

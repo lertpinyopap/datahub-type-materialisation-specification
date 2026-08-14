@@ -661,7 +661,7 @@ def test_scd2_generation_adds_business_data_hash(tmp_path: Path) -> None:
     model_sql = (output_dir / "models" / "generated" / "account.sql").read_text(encoding="utf-8")
     not_implemented = (output_dir / "NOT_IMPLEMENTED.md").read_text(encoding="utf-8")
     assert "cast(sha2(concat_ws('|', coalesce(cast(cast(ACCOUNT_ID as varchar(20)) as varchar), '')), 256) as varchar(64)) as BUSINESS_DATA_HASH" in model_sql
-    assert "SCD2 duplicate-hash historical boundary handling" in not_implemented
+    assert "SCD2 duplicate-hash historical boundary handling" not in not_implemented
 
 
 def test_scd2_business_data_hash_include_uses_configured_fields(tmp_path: Path) -> None:
@@ -855,8 +855,8 @@ def test_scd2_missing_from_source_queries_existing_target(tmp_path: Path) -> Non
     assert result.errors == []
     model_sql = (output_dir / "models" / "generated" / "account.sql").read_text(encoding="utf-8")
     assert "materialized='incremental'" in model_sql
-    assert "incremental_strategy='merge'" in model_sql
-    assert "unique_key=['ACCOUNT_ID', 'VALID_FROM_DATETIME']" in model_sql
+    assert "incremental_strategy='delete+insert'" in model_sql
+    assert "unique_key=['ACCOUNT_ID']" in model_sql
     assert "from {{ this }}" in model_sql
     assert "current_target_rows as (" in model_sql
     assert "where IS_CURRENT_FLAG = 'Y'" in model_sql
@@ -867,6 +867,84 @@ def test_scd2_missing_from_source_queries_existing_target(tmp_path: Path) -> Non
     assert "where coalesce(current_target.IS_DELETED_FLAG, 'N') <> 'Y'" in model_sql
     assert "from incoming_key_rows as incoming_key" in model_sql
     assert "existing_target.VALID_FROM_DATETIME as TMS_VALID_FROM_DATETIME_CANDIDATE" in model_sql
+
+
+def test_scd2_skip_mode_generates_duplicate_hash_boundary_handling(tmp_path: Path) -> None:
+    result, output_dir = generate(
+        tmp_path,
+        csv_generation_spec(
+            extra_control="""
+            control_data:
+              change_type: scd2
+              scd:
+                business_key:
+                  - account_id
+                delete_detection:
+                  mode: missing_from_source
+                business_data_hash_duplicate_mode: skip
+            """,
+            fields="""
+        - id: account_id
+          source:
+            pos: 0
+            column: account_id
+          data_type: varchar(20)
+        - id: account_name
+          source:
+            pos: 1
+            column: account_name
+          data_type: varchar(255)
+            """,
+        ),
+    )
+
+    assert result.errors == []
+    model_sql = (output_dir / "models" / "generated" / "account.sql").read_text(encoding="utf-8")
+    assert "duplicate_boundary_rows as (" in model_sql
+    assert "deduplicated_version_rows as (" in model_sql
+    assert "TMS_NEXT_BUSINESS_DATA_HASH" in model_sql
+    assert "TMS_NEXT_BUSINESS_DATA_HASH is not null" in model_sql
+    assert "where not (TMS_IS_EXISTING_TARGET_ROW = 'N' and" in model_sql
+    assert "SCD2 duplicate hash handling: current duplicate rows skipped=" in model_sql
+    assert "SCD2 duplicate hash handling: historical duplicate rows skipped=" in model_sql
+
+
+def test_scd2_update_mode_generates_duplicate_hash_boundary_updates(tmp_path: Path) -> None:
+    result, output_dir = generate(
+        tmp_path,
+        csv_generation_spec(
+            extra_control="""
+            control_data:
+              change_type: scd2
+              scd:
+                business_key:
+                  - account_id
+                delete_detection:
+                  mode: missing_from_source
+                business_data_hash_duplicate_mode: update
+            """,
+            fields="""
+        - id: account_id
+          source:
+            pos: 0
+            column: account_id
+          data_type: varchar(20)
+        - id: account_name
+          source:
+            pos: 1
+            column: account_name
+          data_type: varchar(255)
+            """,
+        ),
+    )
+
+    assert result.errors == []
+    model_sql = (output_dir / "models" / "generated" / "account.sql").read_text(encoding="utf-8")
+    assert "business_data_hash_duplicate_mode" not in model_sql
+    assert "TMS_PREVIOUS_IS_EXISTING_TARGET_ROW = 'N'" in model_sql
+    assert "TMS_PREVIOUS_BUSINESS_DATA_HASH is not null" in model_sql
+    assert "and not (TMS_PREVIOUS_2_BUSINESS_DATA_HASH is not null" in model_sql
+    assert "SCD2 duplicate hash handling: historical duplicate boundaries updated=" in model_sql
 
 
 def test_scd2_missing_from_source_unit_tests_override_is_incremental(tmp_path: Path) -> None:

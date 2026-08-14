@@ -19,6 +19,7 @@ checks:
   - Load 002 changes A1 from value 1 to value 2 and must create a new current SCD2 version.
   - Load 003 changes A1 from value 2 back to value 1 and must create another current SCD2 version.
   - The final value 1 has the same hash as the original historical row but is not skipped because the current hash differs.
+  - Load 004 adds a historical duplicate of value 1 and must leave the existing history unchanged in skip mode.
 loads:
   - name: load_001
     source_csv: data/load_001_source.csv
@@ -35,3 +36,8 @@ loads:
     expected_target: data/expected_after_load_003.csv
     dbt_vars:
       valid_from_datetime: "2026-09-03T00:00:00Z"
+  - name: load_004
+    source_csv: data/load_004_source.csv
+    expected_target: data/expected_after_load_004.csv
+    dbt_vars:
+      valid_from_datetime: "2026-09-02T12:00:00Z"

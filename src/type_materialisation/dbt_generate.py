@@ -19,7 +19,6 @@ SCD2_START_OF_TIME = "0001-01-01T00:00:00Z"
 SCD2_END_OF_TIME = "9999-12-31T23:59:59Z"
 
 NOT_IMPLEMENTED = [
-    "SCD2 duplicate-hash historical boundary handling",
     "generated Snowflake file-format objects for CSV stages",
     "Python upload of local CSV files to Snowflake stages",
     "date/timestamp format translation from Python strptime to Snowflake formats",
@@ -349,7 +348,7 @@ def _write_final_model(spec: dict[str, Any], result: DbtGenerationResult) -> Non
     if _scd2_uses_target_merge(spec):
         materialized = "incremental"
         extra_config_lines = [
-            "    incremental_strategy='merge',",
+            "    incremental_strategy='delete+insert',",
             f"    unique_key={_scd2_incremental_unique_key(spec)},",
             "    on_schema_change='fail',",
         ]
@@ -418,7 +417,15 @@ def _write_final_model(spec: dict[str, Any], result: DbtGenerationResult) -> Non
             *delete_filter_lines,
             "",
         ]
-    sql = "\n".join(["{{", "  config(", *config_lines, "  )", "}}", "", *body_lines])
+    runtime_log_lines = _scd2_duplicate_hash_runtime_log_lines(
+        spec,
+        source_model,
+        field_select_lines,
+        audit_select_lines,
+        quarantine_enabled=quarantine_enabled,
+        fail_load_enabled=fail_load_enabled,
+    )
+    sql = "\n".join(["{{", "  config(", *config_lines, "  )", "}}", "", *runtime_log_lines, *body_lines])
     _write(result.output_dir / "models" / "generated" / f"{target['id']}.sql", sql, result)
     if quarantine_enabled:
         _write_quarantine_model(spec, result)
@@ -513,7 +520,7 @@ def _scd2_final_body_lines(
     ]
 
 
-def _scd2_target_merge_body_lines(
+def _scd2_duplicate_hash_runtime_log_lines(
     spec: dict[str, Any],
     source_model: str,
     field_select_lines: list[str],
@@ -522,21 +529,12 @@ def _scd2_target_merge_body_lines(
     quarantine_enabled: bool,
     fail_load_enabled: bool,
 ) -> list[str]:
-    output_lines = [f"    {_quote_identifier(field['id'])}" for field in fields(spec)]
-    output_lines.extend(
-        [
-            "    IS_CURRENT_FLAG",
-            "    IS_DELETED_FLAG",
-            "    VALID_FROM_DATETIME",
-            "    VALID_TO_DATETIME",
-            "    BUSINESS_DATA_HASH",
-            "    AUDIT_DATA_PROCESS_KEY",
-            "    AUDIT_CREATED_DATETIME",
-            "    AUDIT_LAST_CHANGED_DATETIME",
-        ]
-    )
+    if not _scd2_uses_target_merge(spec):
+        return []
     change_row_columns = _scd2_change_row_columns(spec)
     return [
+        "{% if execute and is_incremental() %}",
+        "{% set tms_scd2_duplicate_hash_log_sql %}",
         *_scd2_valid_rows_lines(spec, source_model, quarantine_enabled, fail_load_enabled),
         "typed_rows as (",
         "    select",
@@ -554,11 +552,23 @@ def _scd2_target_merge_body_lines(
         ),
         "    from valid_rows",
         "),",
-        *_scd2_existing_target_rows_lines(spec),
+        *_scd2_runtime_existing_target_rows_lines(spec),
         "current_target_rows as (",
         "    select *",
         "    from existing_target_rows",
         "    where IS_CURRENT_FLAG = 'Y'",
+        "),",
+        "current_duplicate_rows as (",
+        "    select typed_rows.*",
+        "    from typed_rows",
+        "    where exists (",
+        "        select 1",
+        "        from current_target_rows as current_target",
+        f"        where {_business_key_join_condition(spec, 'typed_rows', 'current_target')}",
+        "          and current_target.BUSINESS_DATA_HASH = typed_rows.BUSINESS_DATA_HASH",
+        "          and coalesce(current_target.IS_DELETED_FLAG, 'N') = typed_rows.TMS_IS_DELETED_FLAG_CANDIDATE",
+        "          and typed_rows.TMS_VALID_FROM_DATETIME_CANDIDATE >= current_target.VALID_FROM_DATETIME",
+        "    )",
         "),",
         "incoming_key_rows as (",
         "    select distinct",
@@ -574,6 +584,7 @@ def _scd2_target_merge_body_lines(
         f"        where {_business_key_join_condition(spec, 'typed_rows', 'current_target')}",
         "          and current_target.BUSINESS_DATA_HASH = typed_rows.BUSINESS_DATA_HASH",
         "          and coalesce(current_target.IS_DELETED_FLAG, 'N') = typed_rows.TMS_IS_DELETED_FLAG_CANDIDATE",
+        "          and typed_rows.TMS_VALID_FROM_DATETIME_CANDIDATE >= current_target.VALID_FROM_DATETIME",
         "    )",
         "),",
         "missing_from_source_delete_rows as (",
@@ -664,7 +675,226 @@ def _scd2_target_merge_body_lines(
         "    )",
         "    where TMS_VERSION_ROW_NUMBER = 1",
         "),",
-        *_scd2_window_and_flag_lines(spec, "version_rows"),
+        "duplicate_boundary_rows as (",
+        "    select",
+        "        *,",
+        f"        lag(BUSINESS_DATA_HASH) over ({_scd2_window_clause(spec, 'TMS_VALID_FROM_DATETIME_CANDIDATE')}) as TMS_PREVIOUS_BUSINESS_DATA_HASH,",
+        f"        lag(TMS_IS_DELETED_FLAG_CANDIDATE) over ({_scd2_window_clause(spec, 'TMS_VALID_FROM_DATETIME_CANDIDATE')}) as TMS_PREVIOUS_IS_DELETED_FLAG,",
+        f"        lag(TMS_IS_EXISTING_TARGET_ROW) over ({_scd2_window_clause(spec, 'TMS_VALID_FROM_DATETIME_CANDIDATE')}) as TMS_PREVIOUS_IS_EXISTING_TARGET_ROW,",
+        f"        lag(BUSINESS_DATA_HASH, 2) over ({_scd2_window_clause(spec, 'TMS_VALID_FROM_DATETIME_CANDIDATE')}) as TMS_PREVIOUS_2_BUSINESS_DATA_HASH,",
+        f"        lag(TMS_IS_DELETED_FLAG_CANDIDATE, 2) over ({_scd2_window_clause(spec, 'TMS_VALID_FROM_DATETIME_CANDIDATE')}) as TMS_PREVIOUS_2_IS_DELETED_FLAG,",
+        f"        lead(BUSINESS_DATA_HASH) over ({_scd2_window_clause(spec, 'TMS_VALID_FROM_DATETIME_CANDIDATE')}) as TMS_NEXT_BUSINESS_DATA_HASH,",
+        (
+            f"        lead(TMS_IS_DELETED_FLAG_CANDIDATE) over "
+            f"({_scd2_window_clause(spec, 'TMS_VALID_FROM_DATETIME_CANDIDATE')}) as TMS_NEXT_IS_DELETED_FLAG"
+        ),
+        "    from version_rows",
+        "),",
+        "current_duplicate_counts as (",
+        "    select count(*) as CURRENT_DUPLICATE_SKIP_COUNT",
+        "    from current_duplicate_rows",
+        "),",
+        "duplicate_boundary_counts as (",
+        "    select",
+        f"        coalesce(sum(case when TMS_IS_EXISTING_TARGET_ROW = 'N' and ({_scd2_previous_duplicate_condition()} or {_scd2_next_duplicate_condition()}) then 1 else 0 end), 0) as HISTORICAL_DUPLICATE_SKIP_COUNT,",
+        f"        coalesce(sum(case when ((TMS_IS_EXISTING_TARGET_ROW = 'N' and {_scd2_previous_duplicate_condition()}) or (TMS_IS_EXISTING_TARGET_ROW = 'Y' and TMS_PREVIOUS_IS_EXISTING_TARGET_ROW = 'N' and {_scd2_previous_duplicate_condition()} and not ({_scd2_previous_2_duplicate_condition()}))) then 1 else 0 end), 0) as HISTORICAL_BOUNDARY_UPDATE_COUNT,",
+        (
+            "        coalesce(sum(case when TMS_IS_EXISTING_TARGET_ROW = 'Y' "
+            "and TMS_PREVIOUS_IS_EXISTING_TARGET_ROW = 'Y' "
+            f"and {_scd2_previous_duplicate_condition()} then 1 else 0 end), 0) "
+            "as CONTIGUOUS_DUPLICATE_HASH_COUNT"
+        ),
+        "    from duplicate_boundary_rows",
+        ")",
+        "select",
+        "    current_duplicate_counts.CURRENT_DUPLICATE_SKIP_COUNT,",
+        "    duplicate_boundary_counts.HISTORICAL_DUPLICATE_SKIP_COUNT,",
+        "    duplicate_boundary_counts.HISTORICAL_BOUNDARY_UPDATE_COUNT,",
+        "    duplicate_boundary_counts.CONTIGUOUS_DUPLICATE_HASH_COUNT",
+        "from current_duplicate_counts",
+        "cross join duplicate_boundary_counts",
+        "{% endset %}",
+        "{% set tms_scd2_duplicate_hash_log_result = run_query(tms_scd2_duplicate_hash_log_sql) %}",
+        "{% if tms_scd2_duplicate_hash_log_result is not none and (tms_scd2_duplicate_hash_log_result.rows | length) > 0 %}",
+        "{% set tms_current_duplicate_skip_count = tms_scd2_duplicate_hash_log_result.columns[0].values()[0] | int %}",
+        "{% set tms_historical_duplicate_skip_count = tms_scd2_duplicate_hash_log_result.columns[1].values()[0] | int %}",
+        "{% set tms_historical_boundary_update_count = tms_scd2_duplicate_hash_log_result.columns[2].values()[0] | int %}",
+        "{% set tms_contiguous_duplicate_hash_count = tms_scd2_duplicate_hash_log_result.columns[3].values()[0] | int %}",
+        "{% if tms_current_duplicate_skip_count > 0 %}{{ log('SCD2 duplicate hash handling: current duplicate rows skipped=' ~ tms_current_duplicate_skip_count, info=true) }}{% endif %}",
+        "{% if tms_historical_duplicate_skip_count > 0 and " + _sql_string(_business_data_hash_duplicate_mode(spec)) + " == 'skip' %}{{ log('SCD2 duplicate hash handling: historical duplicate rows skipped=' ~ tms_historical_duplicate_skip_count, info=true) }}{% endif %}",
+        "{% if tms_historical_boundary_update_count > 0 and " + _sql_string(_business_data_hash_duplicate_mode(spec)) + " == 'update' %}{{ log('SCD2 duplicate hash handling: historical duplicate boundaries updated=' ~ tms_historical_boundary_update_count, info=true) }}{% endif %}",
+        "{% if tms_contiguous_duplicate_hash_count > 0 %}{{ log('SCD2 duplicate hash handling: contiguous duplicate hash windows detected=' ~ tms_contiguous_duplicate_hash_count, info=true) }}{% endif %}",
+        "{% endif %}",
+        "{% endif %}",
+        "",
+    ]
+
+
+def _scd2_runtime_existing_target_rows_lines(spec: dict[str, Any]) -> list[str]:
+    columns = _scd2_target_column_types(spec)
+    return [
+        "existing_target_rows as (",
+        "    select",
+        ",\n".join(f"        {_quote_identifier(column)}" for column, _ in columns),
+        "    from {{ this }}",
+        "),",
+    ]
+
+
+def _scd2_target_merge_body_lines(
+    spec: dict[str, Any],
+    source_model: str,
+    field_select_lines: list[str],
+    audit_select_lines: list[str],
+    *,
+    quarantine_enabled: bool,
+    fail_load_enabled: bool,
+) -> list[str]:
+    output_lines = [f"    {_quote_identifier(field['id'])}" for field in fields(spec)]
+    output_lines.extend(
+        [
+            "    IS_CURRENT_FLAG",
+            "    IS_DELETED_FLAG",
+            "    VALID_FROM_DATETIME",
+            "    VALID_TO_DATETIME",
+            "    BUSINESS_DATA_HASH",
+            "    AUDIT_DATA_PROCESS_KEY",
+            "    AUDIT_CREATED_DATETIME",
+            "    AUDIT_LAST_CHANGED_DATETIME",
+        ]
+    )
+    change_row_columns = _scd2_change_row_columns(spec)
+    return [
+        *_scd2_valid_rows_lines(spec, source_model, quarantine_enabled, fail_load_enabled),
+        "typed_rows as (",
+        "    select",
+        ",\n".join(
+            [
+                *field_select_lines,
+                f"    {_valid_from_datetime_expression(spec)} as TMS_VALID_FROM_DATETIME_CANDIDATE",
+                f"    {_business_data_hash_expression(spec)} as BUSINESS_DATA_HASH",
+                f"    {_is_deleted_flag_expression(spec)} as TMS_IS_DELETED_FLAG_CANDIDATE",
+                "    cast(null as timestamp_tz) as TMS_EXISTING_VALID_TO_DATETIME",
+                "    cast(null as varchar(1)) as TMS_EXISTING_IS_CURRENT_FLAG",
+                "    'N' as TMS_IS_EXISTING_TARGET_ROW",
+                *audit_select_lines,
+            ]
+        ),
+        "    from valid_rows",
+        "),",
+        *_scd2_existing_target_rows_lines(spec),
+        "current_target_rows as (",
+        "    select *",
+        "    from existing_target_rows",
+        "    where IS_CURRENT_FLAG = 'Y'",
+        "),",
+        "incoming_key_rows as (",
+        "    select distinct",
+        ",\n".join(f"        {_quote_identifier(column)}" for column in _business_key_columns(spec)),
+        "    from typed_rows",
+        "),",
+        "source_change_rows as (",
+        "    select *",
+        "    from typed_rows",
+        "    where not exists (",
+        "        select 1",
+        "        from current_target_rows as current_target",
+        f"        where {_business_key_join_condition(spec, 'typed_rows', 'current_target')}",
+        "          and current_target.BUSINESS_DATA_HASH = typed_rows.BUSINESS_DATA_HASH",
+        "          and coalesce(current_target.IS_DELETED_FLAG, 'N') = typed_rows.TMS_IS_DELETED_FLAG_CANDIDATE",
+        "          and typed_rows.TMS_VALID_FROM_DATETIME_CANDIDATE >= current_target.VALID_FROM_DATETIME",
+        "    )",
+        "),",
+        "missing_from_source_delete_rows as (",
+        "    select",
+        ",\n".join(
+            [
+                *[
+                    f"        current_target.{_quote_identifier(field['id'])} as {_quote_identifier(field['id'])}"
+                    for field in fields(spec)
+                ],
+                f"        {_valid_from_datetime_expression(spec)} as TMS_VALID_FROM_DATETIME_CANDIDATE",
+                "        current_target.BUSINESS_DATA_HASH as BUSINESS_DATA_HASH",
+                "        'Y' as TMS_IS_DELETED_FLAG_CANDIDATE",
+                "        cast(null as timestamp_tz) as TMS_EXISTING_VALID_TO_DATETIME",
+                "        cast(null as varchar(1)) as TMS_EXISTING_IS_CURRENT_FLAG",
+                "        'N' as TMS_IS_EXISTING_TARGET_ROW",
+                *audit_select_lines,
+            ]
+        ),
+        "    from current_target_rows as current_target",
+        "    where coalesce(current_target.IS_DELETED_FLAG, 'N') <> 'Y'",
+        "      and not exists (",
+        "          select 1",
+        "          from incoming_key_rows as incoming_key",
+        f"          where {_business_key_join_condition(spec, 'current_target', 'incoming_key')}",
+        "      )",
+        "),",
+        "change_rows as (",
+        "    select",
+        ",\n".join(f"        {column}" for column in change_row_columns),
+        "    from source_change_rows",
+        "    union all",
+        "    select",
+        ",\n".join(f"        {column}" for column in change_row_columns),
+        "    from missing_from_source_delete_rows",
+        "),",
+        "affected_key_rows as (",
+        "    select distinct",
+        ",\n".join(f"        {_quote_identifier(column)}" for column in _business_key_columns(spec)),
+        "    from change_rows",
+        "),",
+        "affected_existing_rows as (",
+        "    select",
+        ",\n".join(
+            [
+                *[
+                    f"        existing_target.{_quote_identifier(field['id'])} as {_quote_identifier(field['id'])}"
+                    for field in fields(spec)
+                ],
+                "        existing_target.VALID_FROM_DATETIME as TMS_VALID_FROM_DATETIME_CANDIDATE",
+                "        existing_target.BUSINESS_DATA_HASH as BUSINESS_DATA_HASH",
+                "        existing_target.IS_DELETED_FLAG as TMS_IS_DELETED_FLAG_CANDIDATE",
+                "        existing_target.VALID_TO_DATETIME as TMS_EXISTING_VALID_TO_DATETIME",
+                "        existing_target.IS_CURRENT_FLAG as TMS_EXISTING_IS_CURRENT_FLAG",
+                "        'Y' as TMS_IS_EXISTING_TARGET_ROW",
+                "        existing_target.AUDIT_DATA_PROCESS_KEY as AUDIT_DATA_PROCESS_KEY",
+                "        existing_target.AUDIT_CREATED_DATETIME as AUDIT_CREATED_DATETIME",
+                "        existing_target.AUDIT_LAST_CHANGED_DATETIME as AUDIT_LAST_CHANGED_DATETIME",
+            ]
+        ),
+        "    from existing_target_rows as existing_target",
+        "    where exists (",
+        "        select 1",
+        "        from affected_key_rows as affected_key",
+        f"        where {_business_key_join_condition(spec, 'existing_target', 'affected_key')}",
+        "    )",
+        "),",
+        "version_row_candidates as (",
+        "    select",
+        ",\n".join(f"        {column}" for column in change_row_columns),
+        "    from affected_existing_rows",
+        "    union all",
+        "    select",
+        ",\n".join(f"        {column}" for column in change_row_columns),
+        "    from change_rows",
+        "),",
+        "version_rows as (",
+        "    select",
+        ",\n".join(f"        {column}" for column in change_row_columns),
+        "    from (",
+        "        select",
+        "            *,",
+        "            row_number() over (",
+        f"                partition by {_scd2_version_row_key_columns(spec)}",
+        "                order by case when TMS_IS_EXISTING_TARGET_ROW = 'N' then 0 else 1 end",
+        "            ) as TMS_VERSION_ROW_NUMBER",
+        "        from version_row_candidates",
+        "    )",
+        "    where TMS_VERSION_ROW_NUMBER = 1",
+        "),",
+        *_scd2_duplicate_boundary_lines(spec),
+        *_scd2_window_and_flag_lines(spec, "deduplicated_version_rows"),
         "",
         "select",
         ",\n".join(output_lines),
@@ -718,7 +948,7 @@ def _scd2_uses_target_merge(spec: dict[str, Any]) -> bool:
 
 
 def _scd2_incremental_unique_key(spec: dict[str, Any]) -> str:
-    columns = [*_business_key_columns(spec), "VALID_FROM_DATETIME"]
+    columns = _business_key_columns(spec)
     return "[" + ", ".join(_sql_string(_physical_name(column)) for column in columns) + "]"
 
 
@@ -774,6 +1004,79 @@ def _scd2_change_row_columns(spec: dict[str, Any]) -> list[str]:
         "AUDIT_CREATED_DATETIME",
         "AUDIT_LAST_CHANGED_DATETIME",
     ]
+
+
+def _scd2_duplicate_boundary_lines(spec: dict[str, Any]) -> list[str]:
+    return [
+        "duplicate_boundary_rows as (",
+        "    select",
+        "        *,",
+        f"        lag(BUSINESS_DATA_HASH) over ({_scd2_window_clause(spec, 'TMS_VALID_FROM_DATETIME_CANDIDATE')}) as TMS_PREVIOUS_BUSINESS_DATA_HASH,",
+        f"        lag(TMS_IS_DELETED_FLAG_CANDIDATE) over ({_scd2_window_clause(spec, 'TMS_VALID_FROM_DATETIME_CANDIDATE')}) as TMS_PREVIOUS_IS_DELETED_FLAG,",
+        f"        lag(TMS_IS_EXISTING_TARGET_ROW) over ({_scd2_window_clause(spec, 'TMS_VALID_FROM_DATETIME_CANDIDATE')}) as TMS_PREVIOUS_IS_EXISTING_TARGET_ROW,",
+        f"        lag(BUSINESS_DATA_HASH, 2) over ({_scd2_window_clause(spec, 'TMS_VALID_FROM_DATETIME_CANDIDATE')}) as TMS_PREVIOUS_2_BUSINESS_DATA_HASH,",
+        f"        lag(TMS_IS_DELETED_FLAG_CANDIDATE, 2) over ({_scd2_window_clause(spec, 'TMS_VALID_FROM_DATETIME_CANDIDATE')}) as TMS_PREVIOUS_2_IS_DELETED_FLAG,",
+        f"        lead(BUSINESS_DATA_HASH) over ({_scd2_window_clause(spec, 'TMS_VALID_FROM_DATETIME_CANDIDATE')}) as TMS_NEXT_BUSINESS_DATA_HASH,",
+        (
+            f"        lead(TMS_IS_DELETED_FLAG_CANDIDATE) over "
+            f"({_scd2_window_clause(spec, 'TMS_VALID_FROM_DATETIME_CANDIDATE')}) as TMS_NEXT_IS_DELETED_FLAG"
+        ),
+        "    from version_rows",
+        "),",
+        "deduplicated_version_rows as (",
+        "    select",
+        ",\n".join(f"        {column}" for column in _scd2_change_row_columns(spec)),
+        "    from duplicate_boundary_rows",
+        f"    where {_scd2_duplicate_boundary_keep_condition(spec)}",
+        "),",
+    ]
+
+
+def _scd2_duplicate_boundary_keep_condition(spec: dict[str, Any]) -> str:
+    mode = _business_data_hash_duplicate_mode(spec)
+    previous_matches = _scd2_previous_duplicate_condition()
+    next_matches = _scd2_next_duplicate_condition()
+    if mode == "update":
+        return (
+            "not ("
+            f"(TMS_IS_EXISTING_TARGET_ROW = 'N' and {previous_matches}) "
+            "or "
+            "(TMS_IS_EXISTING_TARGET_ROW = 'Y' "
+            "and TMS_PREVIOUS_IS_EXISTING_TARGET_ROW = 'N' "
+            f"and {previous_matches} "
+            f"and not ({_scd2_previous_2_duplicate_condition()}))"
+            ")"
+        )
+    return (
+        "not ("
+        "TMS_IS_EXISTING_TARGET_ROW = 'N' "
+        f"and ({previous_matches} or {next_matches})"
+        ")"
+    )
+
+
+def _scd2_previous_duplicate_condition() -> str:
+    return (
+        "TMS_PREVIOUS_BUSINESS_DATA_HASH is not null "
+        "and BUSINESS_DATA_HASH = TMS_PREVIOUS_BUSINESS_DATA_HASH "
+        "and coalesce(TMS_IS_DELETED_FLAG_CANDIDATE, 'N') = coalesce(TMS_PREVIOUS_IS_DELETED_FLAG, 'N')"
+    )
+
+
+def _scd2_previous_2_duplicate_condition() -> str:
+    return (
+        "TMS_PREVIOUS_2_BUSINESS_DATA_HASH is not null "
+        "and BUSINESS_DATA_HASH = TMS_PREVIOUS_2_BUSINESS_DATA_HASH "
+        "and coalesce(TMS_IS_DELETED_FLAG_CANDIDATE, 'N') = coalesce(TMS_PREVIOUS_2_IS_DELETED_FLAG, 'N')"
+    )
+
+
+def _scd2_next_duplicate_condition() -> str:
+    return (
+        "TMS_NEXT_BUSINESS_DATA_HASH is not null "
+        "and BUSINESS_DATA_HASH = TMS_NEXT_BUSINESS_DATA_HASH "
+        "and coalesce(TMS_IS_DELETED_FLAG_CANDIDATE, 'N') = coalesce(TMS_NEXT_IS_DELETED_FLAG, 'N')"
+    )
 
 
 def _business_key_join_condition(spec: dict[str, Any], left_alias: str, right_alias: str) -> str:
@@ -1513,6 +1816,10 @@ def _scd_config(spec: dict[str, Any]) -> dict[str, Any]:
 
 def _valid_from_to_mode(spec: dict[str, Any]) -> str:
     return str(_scd_config(spec).get("valid_from_to_mode", "continuous"))
+
+
+def _business_data_hash_duplicate_mode(spec: dict[str, Any]) -> str:
+    return str(_scd_config(spec).get("business_data_hash_duplicate_mode", "skip"))
 
 
 def _valid_from_datetime_config(spec: dict[str, Any]) -> dict[str, Any]:

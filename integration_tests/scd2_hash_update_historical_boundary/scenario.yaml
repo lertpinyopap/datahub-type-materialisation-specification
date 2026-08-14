@@ -1,0 +1,27 @@
+name: scd2_hash_update_historical_boundary
+description: SCD2 hash update mode moves a matching historical boundary backward.
+spec: spec/account.yaml
+initial_target: data/initial_target.csv
+target:
+  expected_columns:
+    - ACCOUNT_ID
+    - ACCOUNT_VALUE
+    - IS_CURRENT_FLAG
+    - IS_DELETED_FLAG
+    - VALID_FROM_DATETIME
+    - VALID_TO_DATETIME
+    - BUSINESS_DATA_HASH
+  order_by:
+    - ACCOUNT_ID
+    - VALID_FROM_DATETIME
+checks:
+  - A1 starts with two historical versions.
+  - Load 001 repeats current value 2 with a historical valid_from_datetime.
+  - Update mode moves the value 2 boundary backward to the incoming valid_from_datetime.
+  - The old value 2 boundary row is not retained.
+loads:
+  - name: load_001
+    source_csv: data/load_001_source.csv
+    expected_target: data/expected_after_load_001.csv
+    dbt_vars:
+      valid_from_datetime: "2026-09-02T00:00:00Z"
