@@ -22,6 +22,8 @@ def test_resolves_parent_from_same_directory(tmp_path: Path) -> None:
         "base",
         """
         id: base
+        control_data:
+          change_type: scd1
         source:
           format: csv
           header: true
@@ -232,6 +234,7 @@ def test_child_overlays_nested_mappings_and_replaces_non_field_lists(tmp_path: P
         id: base
         control_data:
           materialisation_type: table
+          change_type: scd1
           failure_mode: quarantine_row
         source:
           format: csv
@@ -434,6 +437,8 @@ def test_parse_resolves_before_concrete_validation(tmp_path: Path) -> None:
         "base",
         """
         id: base
+        control_data:
+          change_type: scd1
         source:
           format: csv
           header: true
@@ -534,6 +539,7 @@ def test_dbt_generation_resolves_inheritance_before_generating(tmp_path: Path) -
         id: base
         control_data:
           materialisation_type: view
+          change_type: scd1
         source:
           format: csv
           header: true

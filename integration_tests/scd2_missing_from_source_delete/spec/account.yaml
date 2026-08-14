@@ -1,0 +1,40 @@
+id: scd2_missing_from_source_delete
+control_data:
+  materialisation_type: table
+  change_type: scd2
+  scd:
+    business_key:
+      - account_id
+    delete_detection:
+      mode: missing_from_source
+    valid_from_datetime:
+      valid_from_datetime_selection: explicit
+      value: "2026-08-01T00:00:00Z"
+    valid_to_datetime:
+      valid_to_datetime_selection: next
+    valid_from_to_mode: continuous
+    business_data_hash:
+      mode: include
+      fields:
+        - account_name
+source:
+  format: csv
+  header: true
+  load_method: dbt_seed
+  seed:
+    file: ../data/load_001_source.csv
+    name: account_source_seed
+target:
+  id: account
+  schema: business
+  fields:
+    - id: account_id
+      source:
+        pos: 0
+        column: account_id
+      data_type: varchar(20)
+    - id: account_name
+      source:
+        pos: 1
+        column: account_name
+      data_type: varchar(255)

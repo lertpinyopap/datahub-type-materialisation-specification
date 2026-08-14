@@ -1,6 +1,8 @@
 import csv
+import hashlib
 import shutil
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -8,14 +10,16 @@ from .custom_macros import MacroLoadError, PythonMacroResolver
 from .errors import Diagnostic
 from .inheritance import InheritanceError, resolve_spec
 from .schema import require_yaml
-from .spec import GENERATED_METADATA_FIELD_TYPES, fields, parse_sql_type
+from .spec import GENERATED_METADATA_FIELD_TYPES, case_key, fields, parse_sql_type
 
 
 DBT_PROJECT_NAME = "type_materialisation_generated"
 DBT_PROFILE_NAME = "datahub_type_materialisation"
+SCD2_START_OF_TIME = "0001-01-01T00:00:00Z"
+SCD2_END_OF_TIME = "9999-12-31T23:59:59Z"
 
 NOT_IMPLEMENTED = [
-    "SCD1 and SCD2 materialisation",
+    "SCD2 duplicate-hash historical boundary handling",
     "generated Snowflake file-format objects for CSV stages",
     "Python upload of local CSV files to Snowflake stages",
     "date/timestamp format translation from Python strptime to Snowflake formats",
@@ -111,7 +115,10 @@ def generate_dbt_project(options: GenerateDbtOptions) -> DbtGenerationResult:
         _write_validation_guard_model(spec, result)
     _write_generated_macros(options.output_dir, generated_macros, result)
     if options.unit_test_csv is not None:
-        _write_unit_tests(spec, options, macros, result)
+        try:
+            _write_unit_tests(spec, options, macros, result)
+        except ValueError as exc:
+            result.errors.append(Diagnostic(str(exc), str(options.unit_test_csv)))
     result.warnings = _dedupe_diagnostics(result.warnings)
     return result
 
@@ -119,11 +126,30 @@ def generate_dbt_project(options: GenerateDbtOptions) -> DbtGenerationResult:
 def _unsupported_for_initial_dbt_generation(spec: dict[str, Any]) -> list[Diagnostic]:
     diagnostics: list[Diagnostic] = []
     source = spec.get("source", {})
-    control_data = spec.get("control_data", {})
+    scd = _scd_config(spec)
     if not isinstance(source, dict) or source.get("format") not in {"csv", "table"}:
         diagnostics.append(Diagnostic("dbt generation supports source.format = csv or table", "$.source.format"))
-    if isinstance(control_data, dict) and control_data.get("change_type") in {"scd1", "scd2"}:
-        diagnostics.append(Diagnostic("SCD materialisation is not implemented yet", "$.control_data.change_type"))
+    if _change_type(spec) == "scd2" and scd.get("valid_from_to_mode", "continuous") == "sparse":
+        diagnostics.append(
+            Diagnostic("valid_from_to_mode `sparse` is not implemented yet", "$.control_data.scd.valid_from_to_mode")
+        )
+    if _change_type(spec) == "scd2":
+        valid_from = scd.get("valid_from_datetime", {})
+        if not isinstance(valid_from, dict):
+            valid_from = {}
+        delete_detection = scd.get("delete_detection", {})
+        if not isinstance(delete_detection, dict):
+            delete_detection = {}
+        if (
+            delete_detection.get("mode") == "missing_from_source"
+            and valid_from.get("valid_from_datetime_selection") == "field"
+        ):
+            diagnostics.append(
+                Diagnostic(
+                    "delete_detection.mode `missing_from_source` is invalid when valid_from_datetime_selection is field",
+                    "$.control_data.scd.delete_detection.mode",
+                )
+            )
     return diagnostics
 
 
@@ -308,28 +334,39 @@ def _write_final_model(spec: dict[str, Any], result: DbtGenerationResult) -> Non
     source_model = _source_model_name(target["id"])
     quarantine_enabled = _quarantine_enabled(spec)
     fail_file_enabled = _failure_mode(spec) == "fail_file"
-    select_lines = []
+    field_select_lines = []
     for field in fields(spec):
         expression = _field_expression(field)
         data_type = field["data_type"]
-        select_lines.append(f"    cast({expression} as {data_type}) as {_quote_identifier(field['id'])}")
-    select_lines.extend(
-        [
-            "    cast('{{ var(\"audit_data_process_key\", \"manual\") }}' "
-            f"as {GENERATED_METADATA_FIELD_TYPES['audit_data_process_key']}) as AUDIT_DATA_PROCESS_KEY",
-            f"    cast(current_timestamp() as {GENERATED_METADATA_FIELD_TYPES['audit_created_datetime']}) "
-            "as AUDIT_CREATED_DATETIME",
-            f"    cast(current_timestamp() as {GENERATED_METADATA_FIELD_TYPES['audit_last_changed_datetime']}) "
-            "as AUDIT_LAST_CHANGED_DATETIME",
+        field_select_lines.append(f"    cast({expression} as {data_type}) as {_quote_identifier(field['id'])}")
+    audit_select_lines = _audit_select_lines()
+    extra_config_lines: list[str] = []
+    if _scd2_uses_target_merge(spec):
+        materialized = "incremental"
+        extra_config_lines = [
+            "    incremental_strategy='merge',",
+            f"    unique_key={_scd2_incremental_unique_key(spec)},",
+            "    on_schema_change='fail',",
         ]
-    )
     config_lines = _model_config_lines(
         materialized=materialized,
         schema=target["schema"],
         alias=table_name,
         database=target.get("database"),
+        extra_config_lines=extra_config_lines,
     )
-    if quarantine_enabled:
+    if _change_type(spec) == "scd2":
+        body_lines = _scd2_final_body_lines(
+            spec,
+            source_model,
+            field_select_lines,
+            audit_select_lines,
+            quarantine_enabled=quarantine_enabled,
+            fail_file_enabled=fail_file_enabled,
+        )
+    elif quarantine_enabled:
+        select_lines = [*field_select_lines, *audit_select_lines]
+        delete_filter_lines = _scd1_delete_filter_lines(spec)
         body_lines = [
             "with source_rows as (",
             f"    select * from {{{{ ref('{source_model}') }}}}",
@@ -340,9 +377,12 @@ def _write_final_model(spec: dict[str, Any], result: DbtGenerationResult) -> Non
             "select",
             ",\n".join(select_lines),
             "from valid_rows",
+            *delete_filter_lines,
             "",
         ]
     elif fail_file_enabled:
+        select_lines = [*field_select_lines, *audit_select_lines]
+        delete_filter_lines = _scd1_delete_filter_lines(spec)
         validation_guard_model = _validation_guard_model_name(target["id"])
         body_lines = [
             "with source_rows as (",
@@ -360,19 +400,419 @@ def _write_final_model(spec: dict[str, Any], result: DbtGenerationResult) -> Non
             "select",
             ",\n".join(select_lines),
             "from valid_rows",
+            *delete_filter_lines,
             "",
         ]
     else:
+        select_lines = [*field_select_lines, *audit_select_lines]
+        delete_filter_lines = _scd1_delete_filter_lines(spec)
         body_lines = [
             "select",
             ",\n".join(select_lines),
             f"from {{{{ ref('{source_model}') }}}}",
+            *delete_filter_lines,
             "",
         ]
     sql = "\n".join(["{{", "  config(", *config_lines, "  )", "}}", "", *body_lines])
     _write(result.output_dir / "models" / "generated" / f"{target['id']}.sql", sql, result)
     if quarantine_enabled:
         _write_quarantine_model(spec, result)
+
+
+def _audit_select_lines() -> list[str]:
+    return [
+        "    cast('{{ var(\"audit_data_process_key\", \"manual\") }}' "
+        f"as {GENERATED_METADATA_FIELD_TYPES['audit_data_process_key']}) as AUDIT_DATA_PROCESS_KEY",
+        f"    cast(current_timestamp() as {GENERATED_METADATA_FIELD_TYPES['audit_created_datetime']}) "
+        "as AUDIT_CREATED_DATETIME",
+        f"    cast(current_timestamp() as {GENERATED_METADATA_FIELD_TYPES['audit_last_changed_datetime']}) "
+        "as AUDIT_LAST_CHANGED_DATETIME",
+    ]
+
+
+def _scd2_final_body_lines(
+    spec: dict[str, Any],
+    source_model: str,
+    field_select_lines: list[str],
+    audit_select_lines: list[str],
+    *,
+    quarantine_enabled: bool,
+    fail_file_enabled: bool,
+) -> list[str]:
+    if _scd2_uses_target_merge(spec):
+        return _scd2_target_merge_body_lines(
+            spec,
+            source_model,
+            field_select_lines,
+            audit_select_lines,
+            quarantine_enabled=quarantine_enabled,
+            fail_file_enabled=fail_file_enabled,
+        )
+
+    output_lines = [f"    {_quote_identifier(field['id'])}" for field in fields(spec)]
+    output_lines.extend(
+        [
+            "    IS_CURRENT_FLAG",
+            "    IS_DELETED_FLAG",
+            "    VALID_FROM_DATETIME",
+            "    VALID_TO_DATETIME",
+            "    BUSINESS_DATA_HASH",
+            *audit_select_lines,
+        ]
+    )
+    return [
+        *_scd2_valid_rows_lines(spec, source_model, quarantine_enabled, fail_file_enabled),
+        "typed_rows as (",
+        "    select",
+        ",\n".join(
+            [
+                *field_select_lines,
+                f"    {_valid_from_datetime_expression(spec)} as TMS_VALID_FROM_DATETIME_CANDIDATE",
+                f"    {_business_data_hash_expression(spec)} as BUSINESS_DATA_HASH",
+            ]
+        ),
+        "    from valid_rows",
+        "),",
+        "valid_from_rows as (",
+        "    select",
+        "        *,",
+        "        case",
+        f"            when row_number() over ({_scd2_window_clause(spec, 'TMS_VALID_FROM_DATETIME_CANDIDATE')}) = 1",
+        f"            then cast({_sql_string(SCD2_START_OF_TIME)} as timestamp_tz)",
+        "            else TMS_VALID_FROM_DATETIME_CANDIDATE",
+        "        end as VALID_FROM_DATETIME",
+        "    from typed_rows",
+        "),",
+        "windowed_rows as (",
+        "    select",
+        "        *,",
+        f"        {_valid_to_datetime_expression(spec)} as VALID_TO_DATETIME",
+        "    from valid_from_rows",
+        "),",
+        "flagged_rows as (",
+        "    select",
+        "        *,",
+        "        case",
+        f"            when VALID_TO_DATETIME = cast({_sql_string(SCD2_END_OF_TIME)} as timestamp_tz)",
+        "            then 'Y'",
+        "            else 'N'",
+        "        end as IS_CURRENT_FLAG,",
+        f"        {_is_deleted_flag_expression(spec)} as IS_DELETED_FLAG",
+        "    from windowed_rows",
+        ")",
+        "",
+        "select",
+        ",\n".join(output_lines),
+        "from flagged_rows",
+        "",
+    ]
+
+
+def _scd2_target_merge_body_lines(
+    spec: dict[str, Any],
+    source_model: str,
+    field_select_lines: list[str],
+    audit_select_lines: list[str],
+    *,
+    quarantine_enabled: bool,
+    fail_file_enabled: bool,
+) -> list[str]:
+    output_lines = [f"    {_quote_identifier(field['id'])}" for field in fields(spec)]
+    output_lines.extend(
+        [
+            "    IS_CURRENT_FLAG",
+            "    IS_DELETED_FLAG",
+            "    VALID_FROM_DATETIME",
+            "    VALID_TO_DATETIME",
+            "    BUSINESS_DATA_HASH",
+            "    AUDIT_DATA_PROCESS_KEY",
+            "    AUDIT_CREATED_DATETIME",
+            "    AUDIT_LAST_CHANGED_DATETIME",
+        ]
+    )
+    change_row_columns = _scd2_change_row_columns(spec)
+    return [
+        *_scd2_valid_rows_lines(spec, source_model, quarantine_enabled, fail_file_enabled),
+        "typed_rows as (",
+        "    select",
+        ",\n".join(
+            [
+                *field_select_lines,
+                f"    {_valid_from_datetime_expression(spec)} as TMS_VALID_FROM_DATETIME_CANDIDATE",
+                f"    {_business_data_hash_expression(spec)} as BUSINESS_DATA_HASH",
+                f"    {_is_deleted_flag_expression(spec)} as TMS_IS_DELETED_FLAG_CANDIDATE",
+                "    cast(null as timestamp_tz) as TMS_EXISTING_VALID_TO_DATETIME",
+                "    cast(null as varchar(1)) as TMS_EXISTING_IS_CURRENT_FLAG",
+                "    'N' as TMS_IS_EXISTING_TARGET_ROW",
+                *audit_select_lines,
+            ]
+        ),
+        "    from valid_rows",
+        "),",
+        *_scd2_existing_target_rows_lines(spec),
+        "current_target_rows as (",
+        "    select *",
+        "    from existing_target_rows",
+        "    where IS_CURRENT_FLAG = 'Y'",
+        "),",
+        "incoming_key_rows as (",
+        "    select distinct",
+        ",\n".join(f"        {_quote_identifier(column)}" for column in _business_key_columns(spec)),
+        "    from typed_rows",
+        "),",
+        "source_change_rows as (",
+        "    select *",
+        "    from typed_rows",
+        "    where not exists (",
+        "        select 1",
+        "        from current_target_rows as current_target",
+        f"        where {_business_key_join_condition(spec, 'typed_rows', 'current_target')}",
+        "          and current_target.BUSINESS_DATA_HASH = typed_rows.BUSINESS_DATA_HASH",
+        "          and coalesce(current_target.IS_DELETED_FLAG, 'N') = typed_rows.TMS_IS_DELETED_FLAG_CANDIDATE",
+        "    )",
+        "),",
+        "missing_from_source_delete_rows as (",
+        "    select",
+        ",\n".join(
+            [
+                *[
+                    f"        current_target.{_quote_identifier(field['id'])} as {_quote_identifier(field['id'])}"
+                    for field in fields(spec)
+                ],
+                f"        {_valid_from_datetime_expression(spec)} as TMS_VALID_FROM_DATETIME_CANDIDATE",
+                "        current_target.BUSINESS_DATA_HASH as BUSINESS_DATA_HASH",
+                "        'Y' as TMS_IS_DELETED_FLAG_CANDIDATE",
+                "        cast(null as timestamp_tz) as TMS_EXISTING_VALID_TO_DATETIME",
+                "        cast(null as varchar(1)) as TMS_EXISTING_IS_CURRENT_FLAG",
+                "        'N' as TMS_IS_EXISTING_TARGET_ROW",
+                *audit_select_lines,
+            ]
+        ),
+        "    from current_target_rows as current_target",
+        "    where coalesce(current_target.IS_DELETED_FLAG, 'N') <> 'Y'",
+        "      and not exists (",
+        "          select 1",
+        "          from incoming_key_rows as incoming_key",
+        f"          where {_business_key_join_condition(spec, 'current_target', 'incoming_key')}",
+        "      )",
+        "),",
+        "change_rows as (",
+        "    select",
+        ",\n".join(f"        {column}" for column in change_row_columns),
+        "    from source_change_rows",
+        "    union all",
+        "    select",
+        ",\n".join(f"        {column}" for column in change_row_columns),
+        "    from missing_from_source_delete_rows",
+        "),",
+        "affected_key_rows as (",
+        "    select distinct",
+        ",\n".join(f"        {_quote_identifier(column)}" for column in _business_key_columns(spec)),
+        "    from change_rows",
+        "),",
+        "affected_existing_rows as (",
+        "    select",
+        ",\n".join(
+            [
+                *[
+                    f"        existing_target.{_quote_identifier(field['id'])} as {_quote_identifier(field['id'])}"
+                    for field in fields(spec)
+                ],
+                "        existing_target.VALID_FROM_DATETIME as TMS_VALID_FROM_DATETIME_CANDIDATE",
+                "        existing_target.BUSINESS_DATA_HASH as BUSINESS_DATA_HASH",
+                "        existing_target.IS_DELETED_FLAG as TMS_IS_DELETED_FLAG_CANDIDATE",
+                "        existing_target.VALID_TO_DATETIME as TMS_EXISTING_VALID_TO_DATETIME",
+                "        existing_target.IS_CURRENT_FLAG as TMS_EXISTING_IS_CURRENT_FLAG",
+                "        'Y' as TMS_IS_EXISTING_TARGET_ROW",
+                "        existing_target.AUDIT_DATA_PROCESS_KEY as AUDIT_DATA_PROCESS_KEY",
+                "        existing_target.AUDIT_CREATED_DATETIME as AUDIT_CREATED_DATETIME",
+                "        existing_target.AUDIT_LAST_CHANGED_DATETIME as AUDIT_LAST_CHANGED_DATETIME",
+            ]
+        ),
+        "    from existing_target_rows as existing_target",
+        "    where exists (",
+        "        select 1",
+        "        from affected_key_rows as affected_key",
+        f"        where {_business_key_join_condition(spec, 'existing_target', 'affected_key')}",
+        "    )",
+        "),",
+        "version_row_candidates as (",
+        "    select",
+        ",\n".join(f"        {column}" for column in change_row_columns),
+        "    from affected_existing_rows",
+        "    union all",
+        "    select",
+        ",\n".join(f"        {column}" for column in change_row_columns),
+        "    from change_rows",
+        "),",
+        "version_rows as (",
+        "    select",
+        ",\n".join(f"        {column}" for column in change_row_columns),
+        "    from (",
+        "        select",
+        "            *,",
+        "            row_number() over (",
+        f"                partition by {_scd2_version_row_key_columns(spec)}",
+        "                order by case when TMS_IS_EXISTING_TARGET_ROW = 'N' then 0 else 1 end",
+        "            ) as TMS_VERSION_ROW_NUMBER",
+        "        from version_row_candidates",
+        "    )",
+        "    where TMS_VERSION_ROW_NUMBER = 1",
+        "),",
+        *_scd2_window_and_flag_lines(spec, "version_rows"),
+        "",
+        "select",
+        ",\n".join(output_lines),
+        "from flagged_rows",
+        "",
+    ]
+
+
+def _scd2_valid_rows_lines(
+    spec: dict[str, Any],
+    source_model: str,
+    quarantine_enabled: bool,
+    fail_file_enabled: bool,
+) -> list[str]:
+    if quarantine_enabled:
+        return [
+            "with source_rows as (",
+            f"    select * from {{{{ ref('{source_model}') }}}}",
+            "),",
+            *_validation_rows_cte(spec, trailing_comma=True),
+            *_valid_rows_cte(),
+            ",",
+        ]
+    if fail_file_enabled:
+        validation_guard_model = _validation_guard_model_name(spec["target"]["id"])
+        return [
+            "with source_rows as (",
+            f"    select * from {{{{ ref('{source_model}') }}}}",
+            "),",
+            *_validation_rows_cte(spec, trailing_comma=True),
+            "valid_rows as (",
+            "    select validation_rows.*",
+            "    from validation_rows",
+            f"    cross join {{{{ ref('{validation_guard_model}') }}}} as validation_guard",
+            "    where validation_rows.FAILURE_DETAILS is null",
+            "      and validation_guard.VALIDATION_FAILURE_GUARD = 0",
+            "),",
+        ]
+    return [
+        "with source_rows as (",
+        f"    select * from {{{{ ref('{source_model}') }}}}",
+        "),",
+        "valid_rows as (",
+        "    select * from source_rows",
+        "),",
+    ]
+
+
+def _scd2_uses_target_merge(spec: dict[str, Any]) -> bool:
+    return _change_type(spec) == "scd2" and _delete_detection_mode(spec) == "missing_from_source"
+
+
+def _scd2_incremental_unique_key(spec: dict[str, Any]) -> str:
+    columns = [*_business_key_columns(spec), "VALID_FROM_DATETIME"]
+    return "[" + ", ".join(_sql_string(_physical_name(column)) for column in columns) + "]"
+
+
+def _scd2_target_column_types(spec: dict[str, Any]) -> list[tuple[str, str]]:
+    columns = [
+        (str(field["id"]), str(field["data_type"]))
+        for field in fields(spec)
+    ]
+    columns.extend(
+        [
+            ("IS_CURRENT_FLAG", GENERATED_METADATA_FIELD_TYPES["is_current_flag"]),
+            ("IS_DELETED_FLAG", GENERATED_METADATA_FIELD_TYPES["is_deleted_flag"]),
+            ("VALID_FROM_DATETIME", GENERATED_METADATA_FIELD_TYPES["valid_from_datetime"]),
+            ("VALID_TO_DATETIME", GENERATED_METADATA_FIELD_TYPES["valid_to_datetime"]),
+            ("BUSINESS_DATA_HASH", GENERATED_METADATA_FIELD_TYPES["business_data_hash"]),
+            ("AUDIT_DATA_PROCESS_KEY", GENERATED_METADATA_FIELD_TYPES["audit_data_process_key"]),
+            ("AUDIT_CREATED_DATETIME", GENERATED_METADATA_FIELD_TYPES["audit_created_datetime"]),
+            ("AUDIT_LAST_CHANGED_DATETIME", GENERATED_METADATA_FIELD_TYPES["audit_last_changed_datetime"]),
+        ]
+    )
+    return columns
+
+
+def _scd2_existing_target_rows_lines(spec: dict[str, Any]) -> list[str]:
+    columns = _scd2_target_column_types(spec)
+    return [
+        "{% if is_incremental() %}",
+        "existing_target_rows as (",
+        "    select",
+        ",\n".join(f"        {_quote_identifier(column)}" for column, _ in columns),
+        "    from {{ this }}",
+        "),",
+        "{% else %}",
+        "existing_target_rows as (",
+        "    select",
+        ",\n".join(f"        cast(null as {data_type}) as {_quote_identifier(column)}" for column, data_type in columns),
+        "    where 1 = 0",
+        "),",
+        "{% endif %}",
+    ]
+
+
+def _scd2_change_row_columns(spec: dict[str, Any]) -> list[str]:
+    return [
+        *[_quote_identifier(field["id"]) for field in fields(spec)],
+        "TMS_VALID_FROM_DATETIME_CANDIDATE",
+        "BUSINESS_DATA_HASH",
+        "TMS_IS_DELETED_FLAG_CANDIDATE",
+        "TMS_EXISTING_VALID_TO_DATETIME",
+        "TMS_EXISTING_IS_CURRENT_FLAG",
+        "TMS_IS_EXISTING_TARGET_ROW",
+        "AUDIT_DATA_PROCESS_KEY",
+        "AUDIT_CREATED_DATETIME",
+        "AUDIT_LAST_CHANGED_DATETIME",
+    ]
+
+
+def _business_key_join_condition(spec: dict[str, Any], left_alias: str, right_alias: str) -> str:
+    return " and ".join(
+        f"{left_alias}.{_quote_identifier(column)} = {right_alias}.{_quote_identifier(column)}"
+        for column in _business_key_columns(spec)
+    )
+
+
+def _scd2_version_row_key_columns(spec: dict[str, Any]) -> str:
+    columns = [*_business_key_columns(spec), "TMS_VALID_FROM_DATETIME_CANDIDATE"]
+    return ", ".join(_quote_identifier(column) for column in columns)
+
+
+def _scd2_window_and_flag_lines(spec: dict[str, Any], input_cte: str) -> list[str]:
+    return [
+        "valid_from_rows as (",
+        "    select",
+        "        *,",
+        "        case",
+        f"            when row_number() over ({_scd2_window_clause(spec, 'TMS_VALID_FROM_DATETIME_CANDIDATE')}) = 1",
+        f"            then cast({_sql_string(SCD2_START_OF_TIME)} as timestamp_tz)",
+        "            else TMS_VALID_FROM_DATETIME_CANDIDATE",
+        "        end as VALID_FROM_DATETIME",
+        f"    from {input_cte}",
+        "),",
+        "windowed_rows as (",
+        "    select",
+        "        *,",
+        f"        {_valid_to_datetime_expression(spec)} as VALID_TO_DATETIME",
+        "    from valid_from_rows",
+        "),",
+        "flagged_rows as (",
+        "    select",
+        "        *,",
+        "        case",
+        f"            when VALID_TO_DATETIME = cast({_sql_string(SCD2_END_OF_TIME)} as timestamp_tz)",
+        "            then 'Y'",
+        "            else 'N'",
+        "        end as IS_CURRENT_FLAG,",
+        "        TMS_IS_DELETED_FLAG_CANDIDATE as IS_DELETED_FLAG",
+        "    from windowed_rows",
+        ")",
+    ]
 
 
 def _write_validation_guard_model(spec: dict[str, Any], result: DbtGenerationResult) -> None:
@@ -589,18 +1029,28 @@ def _unit_test_rows(
         header = next(reader) if source.get("header") else None
         source_rows: list[dict[str, Any]] = []
         expected_rows: list[dict[str, Any]] = []
+        transformed_rows: list[dict[str, Any]] = []
         for row in reader:
             source_row: dict[str, Any] = {}
             expected_row: dict[str, Any] = {}
+            transformed_values: dict[str, Any] = {}
             for field in target_fields:
                 column = _source_column_name(field)
                 value = _extract_csv_value(field, row, header)
                 source_row[column] = value
                 expected_value = _locally_transformable_value(field, value, macros, warnings)
                 if expected_value is not _SKIP_EXPECTED:
+                    transformed_values[case_key(field["id"])] = expected_value
                     expected_row[_physical_name(field["id"])] = expected_value
+            if _change_type(spec) == "scd2":
+                hash_value = _unit_test_business_data_hash(spec, transformed_values, warnings)
+                if hash_value is not _SKIP_EXPECTED:
+                    expected_row["BUSINESS_DATA_HASH"] = hash_value
             source_rows.append(source_row)
             expected_rows.append(expected_row)
+            transformed_rows.append(transformed_values)
+    if _change_type(spec) == "scd2":
+        _apply_unit_test_scd2_validity(spec, expected_rows, transformed_rows, warnings)
     return source_rows, expected_rows, warnings
 
 
@@ -652,6 +1102,181 @@ def _locally_transformable_value(
             )
             return _SKIP_EXPECTED
     return current
+
+
+def _unit_test_business_data_hash(
+    spec: dict[str, Any],
+    transformed_values: dict[str, Any],
+    warnings: list[Diagnostic],
+) -> Any:
+    hash_parts: list[str] = []
+    for field in _business_data_hash_fields(spec):
+        field_id = case_key(field["id"])
+        if field_id not in transformed_values:
+            warnings.append(
+                Diagnostic(
+                    "BUSINESS_DATA_HASH omitted from unit-test expectation because a hash field is not implemented locally",
+                    field["id"],
+                )
+            )
+            return _SKIP_EXPECTED
+        value = transformed_values[field_id]
+        hash_parts.append("" if value is None else str(value))
+    return hashlib.sha256("|".join(hash_parts).encode("utf-8")).hexdigest()
+
+
+def _apply_unit_test_scd2_validity(
+    spec: dict[str, Any],
+    expected_rows: list[dict[str, Any]],
+    transformed_rows: list[dict[str, Any]],
+    warnings: list[Diagnostic],
+) -> None:
+    for expected_row, transformed_values in zip(expected_rows, transformed_rows, strict=True):
+        deleted_flag = _unit_test_is_deleted_flag(spec, transformed_values, warnings)
+        if deleted_flag is not _SKIP_EXPECTED:
+            expected_row["IS_DELETED_FLAG"] = deleted_flag
+
+    valid_from_values = [
+        _unit_test_valid_from_datetime(spec, transformed_values, warnings)
+        for transformed_values in transformed_rows
+    ]
+    if any(value is _SKIP_EXPECTED for value in valid_from_values):
+        return
+    parsed_valid_from_values = [value for value in valid_from_values if isinstance(value, datetime)]
+
+    valid_to_values, output_valid_from_values = _unit_test_valid_to_datetimes(
+        spec,
+        transformed_rows,
+        parsed_valid_from_values,
+        warnings,
+    )
+    if valid_to_values is _SKIP_EXPECTED:
+        return
+    for expected_row, valid_from_value in zip(expected_rows, output_valid_from_values, strict=True):
+        expected_row["VALID_FROM_DATETIME"] = _format_unit_test_datetime(valid_from_value)
+    for expected_row, valid_to_value in zip(expected_rows, valid_to_values, strict=True):
+        expected_row["VALID_TO_DATETIME"] = _format_unit_test_datetime(valid_to_value)
+        expected_row["IS_CURRENT_FLAG"] = "Y" if _format_unit_test_datetime(valid_to_value) == SCD2_END_OF_TIME else "N"
+
+
+def _unit_test_valid_from_datetime(
+    spec: dict[str, Any],
+    transformed_values: dict[str, Any],
+    warnings: list[Diagnostic],
+) -> datetime | object:
+    config = _valid_from_datetime_config(spec)
+    selection = config.get("valid_from_datetime_selection", "load_datetime")
+    if selection == "field":
+        field_id = case_key(str(config["field"]))
+        if field_id not in transformed_values:
+            warnings.append(Diagnostic("VALID_FROM_DATETIME omitted from unit-test expectation because field is not implemented locally", str(config["field"])))
+            return _SKIP_EXPECTED
+        value = transformed_values[field_id]
+    elif selection == "explicit":
+        value = config["value"]
+    else:
+        warnings.append(Diagnostic("VALID_FROM_DATETIME omitted from unit-test expectation because load_datetime is runtime-defined", "$.control_data.scd.valid_from_datetime"))
+        return _SKIP_EXPECTED
+    parsed = _parse_unit_test_datetime(value)
+    if config.get("truncate_to_day") is True:
+        parsed = parsed.replace(hour=0, minute=0, second=0, microsecond=0)
+    return parsed
+
+
+def _unit_test_is_deleted_flag(
+    spec: dict[str, Any],
+    transformed_values: dict[str, Any],
+    warnings: list[Diagnostic],
+) -> str | object:
+    if _delete_detection_mode(spec) != "field":
+        return "N"
+    config = _delete_detection_config(spec)
+    field_id = case_key(str(config["field"]))
+    if field_id not in transformed_values:
+        warnings.append(Diagnostic("IS_DELETED_FLAG omitted from unit-test expectation because delete field is not implemented locally", str(config["field"])))
+        return _SKIP_EXPECTED
+    return "Y" if transformed_values[field_id] == config["value"] else "N"
+
+
+def _unit_test_valid_to_datetimes(
+    spec: dict[str, Any],
+    transformed_rows: list[dict[str, Any]],
+    valid_from_values: list[datetime],
+    warnings: list[Diagnostic],
+) -> tuple[list[datetime] | object, list[datetime]]:
+    config = _valid_to_datetime_config(spec)
+    selection = config.get("valid_to_datetime_selection", "next")
+    if selection == "field":
+        values: list[datetime] = []
+        for transformed_values in transformed_rows:
+            field_id = case_key(str(config["field"]))
+            if field_id not in transformed_values:
+                warnings.append(Diagnostic("VALID_TO_DATETIME omitted from unit-test expectation because field is not implemented locally", str(config["field"])))
+                return _SKIP_EXPECTED, valid_from_values
+            values.append(_parse_unit_test_datetime(transformed_values[field_id]))
+        return values, valid_from_values
+    if selection == "explicit":
+        return [_parse_unit_test_datetime(config["value"]) for _ in transformed_rows], valid_from_values
+
+    adjusted_valid_from = _continuous_unit_test_valid_from_datetimes(spec, transformed_rows, valid_from_values)
+    return _continuous_unit_test_valid_to_datetimes(spec, transformed_rows, adjusted_valid_from), adjusted_valid_from
+
+
+def _continuous_unit_test_valid_from_datetimes(
+    spec: dict[str, Any],
+    transformed_rows: list[dict[str, Any]],
+    valid_from_values: list[datetime],
+) -> list[datetime]:
+    adjusted = list(valid_from_values)
+    for group in _unit_test_business_key_groups(spec, transformed_rows, adjusted):
+        first_index = group[0]
+        adjusted[first_index] = _parse_unit_test_datetime(SCD2_START_OF_TIME)
+    return adjusted
+
+
+def _continuous_unit_test_valid_to_datetimes(
+    spec: dict[str, Any],
+    transformed_rows: list[dict[str, Any]],
+    valid_from_values: list[datetime],
+) -> list[datetime]:
+    valid_to_values = [_parse_unit_test_datetime(SCD2_END_OF_TIME) for _ in valid_from_values]
+    for group in _unit_test_business_key_groups(spec, transformed_rows, valid_from_values):
+        for current_index, next_index in zip(group, group[1:]):
+            valid_to_values[current_index] = valid_from_values[next_index]
+    return valid_to_values
+
+
+def _unit_test_business_key_groups(
+    spec: dict[str, Any],
+    transformed_rows: list[dict[str, Any]],
+    valid_from_values: list[datetime],
+) -> list[list[int]]:
+    groups: dict[tuple[Any, ...], list[int]] = {}
+    for index, transformed_values in enumerate(transformed_rows):
+        key = tuple(transformed_values.get(case_key(column)) for column in _business_key_columns(spec))
+        groups.setdefault(key, []).append(index)
+    return [
+        sorted(indexes, key=lambda index: valid_from_values[index])
+        for indexes in groups.values()
+    ]
+
+
+def _parse_unit_test_datetime(value: Any) -> datetime:
+    if isinstance(value, datetime):
+        if value.tzinfo is None or value.tzinfo.utcoffset(value) is None:
+            raise ValueError("unit-test timestamp value must include a timezone")
+        return value.astimezone(timezone.utc)
+    text = str(value).replace("Z", "+00:00")
+    parsed = datetime.fromisoformat(text)
+    if parsed.tzinfo is None or parsed.tzinfo.utcoffset(parsed) is None:
+        raise ValueError("unit-test timestamp value must include a timezone")
+    return parsed.astimezone(timezone.utc)
+
+
+def _format_unit_test_datetime(value: datetime | object) -> str:
+    if not isinstance(value, datetime):
+        return str(value)
+    return value.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def _field_expression(field: dict[str, Any]) -> str:
@@ -820,6 +1445,170 @@ def _custom_macro_names(spec: dict[str, Any]) -> list[str]:
                 if isinstance(rule, dict) and rule.get("type") == "custom":
                     names.append(rule["macro"])
     return sorted(set(names))
+
+
+def _change_type(spec: dict[str, Any]) -> str | None:
+    control_data = spec.get("control_data", {})
+    if not isinstance(control_data, dict):
+        return None
+    value = control_data.get("change_type")
+    return str(value) if value is not None else None
+
+
+def _scd_config(spec: dict[str, Any]) -> dict[str, Any]:
+    control_data = spec.get("control_data", {})
+    if not isinstance(control_data, dict):
+        return {}
+    scd = control_data.get("scd", {})
+    return scd if isinstance(scd, dict) else {}
+
+
+def _valid_from_to_mode(spec: dict[str, Any]) -> str:
+    return str(_scd_config(spec).get("valid_from_to_mode", "continuous"))
+
+
+def _valid_from_datetime_config(spec: dict[str, Any]) -> dict[str, Any]:
+    config = _scd_config(spec).get("valid_from_datetime", {})
+    return config if isinstance(config, dict) else {}
+
+
+def _valid_to_datetime_config(spec: dict[str, Any]) -> dict[str, Any]:
+    config = _scd_config(spec).get("valid_to_datetime", {})
+    return config if isinstance(config, dict) else {}
+
+
+def _delete_detection_config(spec: dict[str, Any]) -> dict[str, Any]:
+    config = _scd_config(spec).get("delete_detection", {})
+    return config if isinstance(config, dict) else {"mode": "never"}
+
+
+def _delete_detection_mode(spec: dict[str, Any]) -> str:
+    return str(_delete_detection_config(spec).get("mode", "never"))
+
+
+def _scd1_delete_filter_lines(spec: dict[str, Any]) -> list[str]:
+    if _change_type(spec) != "scd1" or _delete_detection_mode(spec) != "field":
+        return []
+    return [f"where not ({_delete_detection_field_condition(spec)})"]
+
+
+def _is_deleted_flag_expression(spec: dict[str, Any]) -> str:
+    mode = _delete_detection_mode(spec)
+    if mode == "field":
+        return f"case when {_delete_detection_field_condition(spec)} then 'Y' else 'N' end"
+    return "'N'"
+
+
+def _delete_detection_field_condition(spec: dict[str, Any]) -> str:
+    config = _delete_detection_config(spec)
+    field = _field_by_id(spec, str(config["field"]))
+    return f"{_field_expression(field)} = {_sql_scalar(config['value'])}"
+
+
+def _valid_from_datetime_expression(spec: dict[str, Any]) -> str:
+    config = _valid_from_datetime_config(spec)
+    selection = config.get("valid_from_datetime_selection", "load_datetime")
+    if selection == "field":
+        field = _field_by_id(spec, str(config["field"]))
+        expression = f"cast({_field_expression(field)} as timestamp_tz)"
+    elif selection == "explicit":
+        expression = f"cast({_sql_scalar(config['value'])} as timestamp_tz)"
+    else:
+        expression = "cast('{{ run_started_at }}' as timestamp_tz)"
+    if config.get("truncate_to_day") is True:
+        expression = f"date_trunc('day', {expression})"
+    return expression
+
+
+def _valid_to_datetime_expression(spec: dict[str, Any]) -> str:
+    config = _valid_to_datetime_config(spec)
+    selection = config.get("valid_to_datetime_selection", "next")
+    if selection == "field":
+        return f"cast({_quote_identifier(str(config['field']))} as timestamp_tz)"
+    if selection == "explicit":
+        return f"cast({_sql_scalar(config['value'])} as timestamp_tz)"
+    return (
+        "coalesce("
+        f"lead(VALID_FROM_DATETIME) over ({_scd2_window_clause(spec, 'VALID_FROM_DATETIME')})"
+        ", "
+        f"cast({_sql_string(SCD2_END_OF_TIME)} as timestamp_tz)"
+        ")"
+    )
+
+
+def _scd2_window_clause(spec: dict[str, Any], order_column: str) -> str:
+    partition_columns = ", ".join(_quote_identifier(column) for column in _business_key_columns(spec))
+    return f"partition by {partition_columns} order by {order_column}"
+
+
+def _business_key_columns(spec: dict[str, Any]) -> list[str]:
+    business_key = _scd_config(spec).get("business_key", [])
+    return [str(column) for column in business_key if isinstance(column, str)]
+
+
+def _field_by_id(spec: dict[str, Any], field_id: str) -> dict[str, Any]:
+    key = case_key(field_id)
+    for field in fields(spec):
+        if isinstance(field, dict) and isinstance(field.get("id"), str) and case_key(field["id"]) == key:
+            return field
+    raise ValueError(f"field `{field_id}` does not exist")
+
+
+def _business_data_hash_expression(spec: dict[str, Any]) -> str:
+    hash_fields = _business_data_hash_fields(spec)
+    if not hash_fields:
+        value_expression = "''"
+    else:
+        hash_values = [
+            "coalesce("
+            f"cast(cast({_field_expression(field)} as {field['data_type']}) as varchar), "
+            "''"
+            ")"
+            for field in hash_fields
+        ]
+        value_expression = "concat_ws('|', " + ", ".join(hash_values) + ")"
+    return (
+        f"cast(sha2({value_expression}, 256) "
+        f"as {GENERATED_METADATA_FIELD_TYPES['business_data_hash']})"
+    )
+
+
+def _business_data_hash_fields(spec: dict[str, Any]) -> list[dict[str, Any]]:
+    target_fields = fields(spec)
+    fields_by_id = {
+        case_key(field["id"]): field
+        for field in target_fields
+        if isinstance(field, dict) and isinstance(field.get("id"), str)
+    }
+    control_data = spec.get("control_data", {})
+    if not isinstance(control_data, dict):
+        control_data = {}
+    scd = control_data.get("scd", {})
+    if not isinstance(scd, dict):
+        scd = {}
+    hash_config = scd.get("business_data_hash", {})
+    if not isinstance(hash_config, dict):
+        hash_config = {}
+    mode = hash_config.get("mode", "exclude")
+    configured_fields = [
+        case_key(field_id)
+        for field_id in hash_config.get("fields", [])
+        if isinstance(field_id, str)
+    ]
+    if mode == "include":
+        return [
+            fields_by_id[field_id]
+            for field_id in configured_fields
+            if field_id in fields_by_id
+        ]
+    excluded = set(configured_fields)
+    return [
+        field
+        for field in target_fields
+        if isinstance(field, dict)
+        and isinstance(field.get("id"), str)
+        and case_key(field["id"]) not in excluded
+    ]
 
 
 def _source_model_name(target_id: str) -> str:
@@ -1187,6 +1976,16 @@ def _optional_job_hook(sql: str) -> str:
 
 def _sql_string(value: str) -> str:
     return "'" + value.replace("'", "''") + "'"
+
+
+def _sql_scalar(value: Any) -> str:
+    if value is None:
+        return "null"
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, int | float):
+        return str(value)
+    return _sql_string(str(value))
 
 
 def _nullable_sql_string(value: str | None) -> str:

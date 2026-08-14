@@ -227,9 +227,9 @@ def _validate_scd(spec: dict[str, Any], *, abstract: bool) -> list[Diagnostic]:
     scd = control_data.get("scd")
     field_ids = {case_key(field.get("id")) for field in fields(spec) if isinstance(field.get("id"), str)}
 
-    if change_type in {"scd1", "scd2"}:
+    if change_type == "scd2":
         if not isinstance(scd, dict):
-            diagnostics.append(Diagnostic("`scd` is required when `change_type` is scd1 or scd2", "$.control_data"))
+            diagnostics.append(Diagnostic("`scd` is required when `change_type` is scd2", "$.control_data"))
             return diagnostics
         business_key = scd.get("business_key")
         if not isinstance(business_key, list) or not business_key:
@@ -241,10 +241,42 @@ def _validate_scd(spec: dict[str, Any], *, abstract: bool) -> list[Diagnostic]:
                         Diagnostic("business key field does not exist in target.fields", f"$.control_data.scd.business_key[{index}]")
                     )
 
-    if not isinstance(scd, dict) or change_type != "scd2":
+    if not isinstance(scd, dict):
         return diagnostics
 
-    for section_name in ("delete_detection", "effective_from", "effective_to"):
+    delete_detection = scd.get("delete_detection")
+    if isinstance(delete_detection, dict):
+        field = delete_detection.get("field")
+        if isinstance(field, str) and field_ids and case_key(field) not in field_ids:
+            diagnostics.append(
+                Diagnostic("referenced field does not exist in target.fields", "$.control_data.scd.delete_detection.field")
+            )
+
+    if change_type != "scd2":
+        return diagnostics
+
+    if scd.get("valid_from_to_mode", "continuous") == "sparse":
+        diagnostics.append(
+            Diagnostic("valid_from_to_mode `sparse` is not implemented yet", "$.control_data.scd.valid_from_to_mode")
+        )
+
+    valid_from_datetime = scd.get("valid_from_datetime")
+    valid_from_selection = "load_datetime"
+    if isinstance(valid_from_datetime, dict):
+        valid_from_selection = str(valid_from_datetime.get("valid_from_datetime_selection", valid_from_selection))
+    if (
+        isinstance(delete_detection, dict)
+        and delete_detection.get("mode") == "missing_from_source"
+        and valid_from_selection == "field"
+    ):
+        diagnostics.append(
+            Diagnostic(
+                "delete_detection.mode `missing_from_source` is invalid when valid_from_datetime_selection is field",
+                "$.control_data.scd.delete_detection.mode",
+            )
+        )
+
+    for section_name in ("valid_from_datetime", "valid_to_datetime"):
         section = scd.get(section_name)
         if not isinstance(section, dict):
             continue

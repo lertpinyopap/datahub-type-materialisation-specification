@@ -3,6 +3,7 @@ id: abstract_reference_code_data
 description: Shared shape for reference code data tables.
 control_data:
   materialisation_type: table
+  change_type: scd1
   failure_mode: quarantine_row
   quarantine:
     schema: TMP

@@ -4,6 +4,7 @@ These checks cover CSV and table source models, generated model SQL, job hooks,
 quarantine models, generated unit tests, and unsupported feature reporting.
 """
 
+import hashlib
 from pathlib import Path
 from textwrap import indent
 
@@ -25,6 +26,8 @@ def csv_generation_spec(
           data_type: varchar(20)
     """
     control_block = indent(extra_control.strip(), "    ") if extra_control.strip() else ""
+    if not control_block:
+        control_block = "    control_data:\n      change_type: scd1"
     location_block = indent(extra_location.strip(), "        ") if extra_location.strip() else ""
     return f"""
     id: account_csv
@@ -98,6 +101,8 @@ def test_csv_dbt_seed_generation_copies_seed_and_reads_from_ref(tmp_path: Path) 
         tmp_path,
         f"""
         id: account_csv
+        control_data:
+          change_type: scd1
         source:
           format: csv
           header: true
@@ -144,6 +149,8 @@ def test_csv_dbt_seed_without_header_synthesizes_position_column_names(tmp_path:
         tmp_path,
         f"""
         id: account_csv
+        control_data:
+          change_type: scd1
         source:
           format: csv
           header: false
@@ -190,6 +197,8 @@ def test_csv_dbt_seed_generation_reports_missing_seed_file(tmp_path: Path) -> No
         tmp_path,
         """
         id: account_csv
+        control_data:
+          change_type: scd1
         source:
           format: csv
           header: true
@@ -245,6 +254,7 @@ def test_headerless_csv_stage_generation_aliases_positions_to_col_names(tmp_path
         """
         id: account_csv
         control_data:
+          change_type: scd1
           failure_mode: quarantine_row
         source:
           format: csv
@@ -297,6 +307,8 @@ def test_generated_project_uses_named_local_user_profile(tmp_path: Path) -> None
         tmp_path,
         """
         id: account_csv
+        control_data:
+          change_type: scd1
         source:
           format: csv
           header: true
@@ -379,6 +391,8 @@ def test_table_source_generation_reads_from_configured_relation(tmp_path: Path) 
         tmp_path,
         """
         id: table_spec
+        control_data:
+          change_type: scd1
         source:
           format: table
           database: raw
@@ -467,6 +481,7 @@ def test_job_event_hooks_include_quarantine_relation_when_enabled(tmp_path: Path
         csv_generation_spec(
             extra_control="""
             control_data:
+              change_type: scd1
               failure_mode: quarantine_row
             """
         ),
@@ -487,6 +502,7 @@ def test_quarantine_model_is_incremental_and_append_only(tmp_path: Path) -> None
         csv_generation_spec(
             extra_control="""
             control_data:
+              change_type: scd1
               failure_mode: quarantine_row
             """
         ),
@@ -509,6 +525,7 @@ def test_quarantine_model_uses_generated_uniqueness_validation(tmp_path: Path) -
         csv_generation_spec(
             extra_control="""
             control_data:
+              change_type: scd1
               failure_mode: quarantine_row
             """,
             fields="""
@@ -534,6 +551,7 @@ def test_quarantine_config_defaults_can_be_overridden(tmp_path: Path) -> None:
         csv_generation_spec(
             extra_control="""
             control_data:
+              change_type: scd1
               failure_mode: quarantine_row
               quarantine:
                 database: ops
@@ -558,6 +576,7 @@ def test_generated_unit_tests_include_final_and_quarantine_models(tmp_path: Path
         csv_generation_spec(
             extra_control="""
             control_data:
+              change_type: scd1
               failure_mode: quarantine_row
             """
         ),
@@ -574,8 +593,8 @@ def test_generated_unit_tests_include_final_and_quarantine_models(tmp_path: Path
     assert unit_test_yaml["unit_tests"][1]["expect"]["rows"] == []
 
 
-def test_scd2_generation_fails_cleanly_for_now(tmp_path: Path) -> None:
-    result, _ = generate(
+def test_scd2_generation_adds_business_data_hash(tmp_path: Path) -> None:
+    result, output_dir = generate(
         tmp_path,
         csv_generation_spec(
             extra_control="""
@@ -588,8 +607,454 @@ def test_scd2_generation_fails_cleanly_for_now(tmp_path: Path) -> None:
         ),
     )
 
-    assert diagnostic_messages(result.errors) == ["SCD materialisation is not implemented yet"]
-    assert result.errors[0].location == "$.control_data.change_type"
+    assert result.errors == []
+    model_sql = (output_dir / "models" / "generated" / "account.sql").read_text(encoding="utf-8")
+    not_implemented = (output_dir / "NOT_IMPLEMENTED.md").read_text(encoding="utf-8")
+    assert "cast(sha2(concat_ws('|', coalesce(cast(cast(ACCOUNT_ID as varchar(20)) as varchar), '')), 256) as varchar(64)) as BUSINESS_DATA_HASH" in model_sql
+    assert "SCD2 duplicate-hash historical boundary handling" in not_implemented
+
+
+def test_scd2_business_data_hash_include_uses_configured_fields(tmp_path: Path) -> None:
+    result, output_dir = generate(
+        tmp_path,
+        csv_generation_spec(
+            extra_control="""
+            control_data:
+              change_type: scd2
+              scd:
+                business_key:
+                  - account_id
+                business_data_hash:
+                  mode: include
+                  fields:
+                    - account_name
+            """,
+            fields="""
+        - id: account_id
+          source:
+            pos: 0
+            column: account_id
+          data_type: varchar(20)
+        - id: account_name
+          source:
+            pos: 1
+            column: account_name
+          data_type: varchar(255)
+          transforms:
+            - type: trim
+            """,
+        ),
+    )
+
+    assert result.errors == []
+    model_sql = (output_dir / "models" / "generated" / "account.sql").read_text(encoding="utf-8")
+    hash_line = next(line for line in model_sql.splitlines() if "BUSINESS_DATA_HASH" in line)
+    assert "trim(ACCOUNT_NAME)" in hash_line
+    assert "varchar(255)" in hash_line
+    assert "ACCOUNT_ID" not in hash_line
+
+
+def test_scd2_generation_adds_continuous_validity_windows(tmp_path: Path) -> None:
+    result, output_dir = generate(
+        tmp_path,
+        csv_generation_spec(
+            extra_control="""
+            control_data:
+              change_type: scd2
+              scd:
+                business_key:
+                  - account_id
+                valid_from_datetime:
+                  valid_from_datetime_selection: field
+                  field: source_changed_at
+                valid_to_datetime:
+                  valid_to_datetime_selection: next
+            """,
+            fields="""
+        - id: account_id
+          source:
+            pos: 0
+            column: account_id
+          data_type: varchar(20)
+        - id: account_name
+          source:
+            pos: 1
+            column: account_name
+          data_type: varchar(255)
+        - id: source_changed_at
+          source:
+            pos: 2
+            column: source_changed_at
+          data_type: timestamp_tz
+            """,
+        ),
+    )
+
+    assert result.errors == []
+    model_sql = (output_dir / "models" / "generated" / "account.sql").read_text(encoding="utf-8")
+    assert "cast(SOURCE_CHANGED_AT as timestamp_tz) as TMS_VALID_FROM_DATETIME_CANDIDATE" in model_sql
+    assert "row_number() over (partition by ACCOUNT_ID order by TMS_VALID_FROM_DATETIME_CANDIDATE) = 1" in model_sql
+    assert "cast('0001-01-01T00:00:00Z' as timestamp_tz)" in model_sql
+    assert "lead(VALID_FROM_DATETIME) over (partition by ACCOUNT_ID order by VALID_FROM_DATETIME)" in model_sql
+    assert "dateadd(second, -1" not in model_sql
+    assert "cast('9999-12-31T23:59:59Z' as timestamp_tz)" in model_sql
+    assert "then 'Y'" in model_sql
+    assert "else 'N'" in model_sql
+    assert "end as IS_CURRENT_FLAG" in model_sql
+    assert "'N' as IS_DELETED_FLAG" in model_sql
+
+
+def test_scd2_generation_uses_field_delete_detection(tmp_path: Path) -> None:
+    result, output_dir = generate(
+        tmp_path,
+        csv_generation_spec(
+            extra_control="""
+            control_data:
+              change_type: scd2
+              scd:
+                business_key:
+                  - account_id
+                delete_detection:
+                  mode: field
+                  field: account_status
+                  value: DELETED
+            """,
+            fields="""
+        - id: account_id
+          source:
+            pos: 0
+            column: account_id
+          data_type: varchar(20)
+        - id: account_status
+          source:
+            pos: 1
+            column: account_status
+          data_type: varchar(20)
+            """,
+        ),
+    )
+
+    assert result.errors == []
+    model_sql = (output_dir / "models" / "generated" / "account.sql").read_text(encoding="utf-8")
+    assert "case when ACCOUNT_STATUS = 'DELETED' then 'Y' else 'N' end as IS_DELETED_FLAG" in model_sql
+
+
+def test_scd1_generation_hard_deletes_field_marked_rows(tmp_path: Path) -> None:
+    result, output_dir = generate(
+        tmp_path,
+        csv_generation_spec(
+            extra_control="""
+            control_data:
+              change_type: scd1
+              scd:
+                delete_detection:
+                  mode: field
+                  field: account_status
+                  value: DELETED
+            """,
+            fields="""
+        - id: account_id
+          source:
+            pos: 0
+            column: account_id
+          data_type: varchar(20)
+        - id: account_status
+          source:
+            pos: 1
+            column: account_status
+          data_type: varchar(20)
+            """,
+        ),
+    )
+
+    assert result.errors == []
+    model_sql = (output_dir / "models" / "generated" / "account.sql").read_text(encoding="utf-8")
+    assert "where not (ACCOUNT_STATUS = 'DELETED')" in model_sql
+
+
+def test_scd2_missing_from_source_queries_existing_target(tmp_path: Path) -> None:
+    result, output_dir = generate(
+        tmp_path,
+        csv_generation_spec(
+            extra_control="""
+            control_data:
+              change_type: scd2
+              scd:
+                business_key:
+                  - account_id
+                delete_detection:
+                  mode: missing_from_source
+                valid_from_datetime:
+                  valid_from_datetime_selection: load_datetime
+            """,
+            fields="""
+        - id: account_id
+          source:
+            pos: 0
+            column: account_id
+          data_type: varchar(20)
+        - id: account_name
+          source:
+            pos: 1
+            column: account_name
+          data_type: varchar(255)
+            """,
+        ),
+    )
+
+    assert result.errors == []
+    model_sql = (output_dir / "models" / "generated" / "account.sql").read_text(encoding="utf-8")
+    assert "materialized='incremental'" in model_sql
+    assert "incremental_strategy='merge'" in model_sql
+    assert "unique_key=['ACCOUNT_ID', 'VALID_FROM_DATETIME']" in model_sql
+    assert "from {{ this }}" in model_sql
+    assert "current_target_rows as (" in model_sql
+    assert "where IS_CURRENT_FLAG = 'Y'" in model_sql
+    assert "source_change_rows as (" in model_sql
+    assert "current_target.BUSINESS_DATA_HASH = typed_rows.BUSINESS_DATA_HASH" in model_sql
+    assert "missing_from_source_delete_rows as (" in model_sql
+    assert "'Y' as TMS_IS_DELETED_FLAG_CANDIDATE" in model_sql
+    assert "where coalesce(current_target.IS_DELETED_FLAG, 'N') <> 'Y'" in model_sql
+    assert "from incoming_key_rows as incoming_key" in model_sql
+    assert "existing_target.VALID_FROM_DATETIME as TMS_VALID_FROM_DATETIME_CANDIDATE" in model_sql
+
+
+def test_scd2_generation_rejects_sparse_validity_mode(tmp_path: Path) -> None:
+    result, _ = generate(
+        tmp_path,
+        csv_generation_spec(
+            extra_control="""
+            control_data:
+              change_type: scd2
+              scd:
+                business_key:
+                  - account_id
+                valid_from_to_mode: sparse
+            """
+        ),
+    )
+
+    assert diagnostic_messages(result.errors) == ["valid_from_to_mode `sparse` is not implemented yet"]
+    assert result.errors[0].location == "$.control_data.scd.valid_from_to_mode"
+
+
+def test_scd2_generation_rejects_missing_from_source_with_field_valid_from(tmp_path: Path) -> None:
+    result, _ = generate(
+        tmp_path,
+        csv_generation_spec(
+            extra_control="""
+            control_data:
+              change_type: scd2
+              scd:
+                business_key:
+                  - account_id
+                delete_detection:
+                  mode: missing_from_source
+                valid_from_datetime:
+                  valid_from_datetime_selection: field
+                  field: account_id
+            """
+        ),
+    )
+
+    assert diagnostic_messages(result.errors) == [
+        "delete_detection.mode `missing_from_source` is invalid when valid_from_datetime_selection is field"
+    ]
+    assert result.errors[0].location == "$.control_data.scd.delete_detection.mode"
+
+
+def test_scd2_unit_tests_include_business_data_hash_expectation(tmp_path: Path) -> None:
+    csv_path = tmp_path / "account.csv"
+    csv_path.write_text("account_id,account_name\nACCT000000000001, Acme Trading \n", encoding="utf-8")
+    result, output_dir = generate(
+        tmp_path,
+        csv_generation_spec(
+            extra_control="""
+            control_data:
+              change_type: scd2
+              scd:
+                business_key:
+                  - account_id
+                business_data_hash:
+                  mode: include
+                  fields:
+                    - account_name
+            """,
+            fields="""
+        - id: account_id
+          source:
+            pos: 0
+            column: account_id
+          data_type: varchar(20)
+        - id: account_name
+          source:
+            pos: 1
+            column: account_name
+          data_type: varchar(255)
+          transforms:
+            - type: trim
+            """,
+        ),
+        unit_test_csv=csv_path,
+    )
+
+    assert result.errors == []
+    unit_test_yaml = load_yaml(output_dir / "models" / "generated" / "account_unit_tests.yml")
+    expected_row = unit_test_yaml["unit_tests"][0]["expect"]["rows"][0]
+    assert expected_row["ACCOUNT_NAME"] == "Acme Trading"
+    assert expected_row["BUSINESS_DATA_HASH"] == hashlib.sha256(b"Acme Trading").hexdigest()
+
+
+def test_scd2_unit_tests_include_continuous_validity_windows(tmp_path: Path) -> None:
+    csv_path = tmp_path / "account.csv"
+    csv_path.write_text(
+        "\n".join(
+            [
+                "account_id,account_name,source_changed_at",
+                "ACCT000000000001,Acme Trading,2026-07-01T00:00:00Z",
+                "ACCT000000000001,Acme Trading Plus,2026-07-05T00:00:00Z",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    result, output_dir = generate(
+        tmp_path,
+        csv_generation_spec(
+            extra_control="""
+            control_data:
+              change_type: scd2
+              scd:
+                business_key:
+                  - account_id
+                valid_from_datetime:
+                  valid_from_datetime_selection: field
+                  field: source_changed_at
+                valid_to_datetime:
+                  valid_to_datetime_selection: next
+            """,
+            fields="""
+        - id: account_id
+          source:
+            pos: 0
+            column: account_id
+          data_type: varchar(20)
+        - id: account_name
+          source:
+            pos: 1
+            column: account_name
+          data_type: varchar(255)
+        - id: source_changed_at
+          source:
+            pos: 2
+            column: source_changed_at
+          data_type: timestamp_tz
+            """,
+        ),
+        unit_test_csv=csv_path,
+    )
+
+    assert result.errors == []
+    unit_test_yaml = load_yaml(output_dir / "models" / "generated" / "account_unit_tests.yml")
+    expected_rows = unit_test_yaml["unit_tests"][0]["expect"]["rows"]
+    assert expected_rows[0]["VALID_FROM_DATETIME"] == "0001-01-01T00:00:00Z"
+    assert expected_rows[0]["VALID_TO_DATETIME"] == "2026-07-05T00:00:00Z"
+    assert expected_rows[0]["IS_CURRENT_FLAG"] == "N"
+    assert expected_rows[0]["IS_DELETED_FLAG"] == "N"
+    assert expected_rows[1]["VALID_FROM_DATETIME"] == "2026-07-05T00:00:00Z"
+    assert expected_rows[1]["VALID_TO_DATETIME"] == "9999-12-31T23:59:59Z"
+    assert expected_rows[1]["IS_CURRENT_FLAG"] == "Y"
+    assert expected_rows[1]["IS_DELETED_FLAG"] == "N"
+
+
+def test_scd2_unit_tests_reject_timestamp_fixtures_without_timezone(tmp_path: Path) -> None:
+    # Generated dbt unit-test fixtures should follow the same timestamp contract as source data.
+    csv_path = tmp_path / "account.csv"
+    csv_path.write_text(
+        "\n".join(
+            [
+                "account_id,account_name,source_changed_at",
+                "ACCT000000000001,Acme Trading,2026-07-01 00:00:00",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    result, _ = generate(
+        tmp_path,
+        csv_generation_spec(
+            extra_control="""
+            control_data:
+              change_type: scd2
+              scd:
+                business_key:
+                  - account_id
+                valid_from_datetime:
+                  valid_from_datetime_selection: field
+                  field: source_changed_at
+            """,
+            fields="""
+        - id: account_id
+          source:
+            pos: 0
+            column: account_id
+          data_type: varchar(20)
+        - id: account_name
+          source:
+            pos: 1
+            column: account_name
+          data_type: varchar(255)
+        - id: source_changed_at
+          source:
+            pos: 2
+            column: source_changed_at
+          data_type: timestamp_tz
+            """,
+        ),
+        unit_test_csv=csv_path,
+    )
+
+    assert diagnostic_messages(result.errors) == ["unit-test timestamp value must include a timezone"]
+    assert result.errors[0].location == str(csv_path)
+
+
+def test_scd2_unit_tests_include_field_delete_detection_flag(tmp_path: Path) -> None:
+    csv_path = tmp_path / "account.csv"
+    csv_path.write_text("account_id,account_status\nACCT000000000001,DELETED\n", encoding="utf-8")
+    result, output_dir = generate(
+        tmp_path,
+        csv_generation_spec(
+            extra_control="""
+            control_data:
+              change_type: scd2
+              scd:
+                business_key:
+                  - account_id
+                delete_detection:
+                  mode: field
+                  field: account_status
+                  value: DELETED
+            """,
+            fields="""
+        - id: account_id
+          source:
+            pos: 0
+            column: account_id
+          data_type: varchar(20)
+        - id: account_status
+          source:
+            pos: 1
+            column: account_status
+          data_type: varchar(20)
+            """,
+        ),
+        unit_test_csv=csv_path,
+    )
+
+    assert result.errors == []
+    unit_test_yaml = load_yaml(output_dir / "models" / "generated" / "account_unit_tests.yml")
+    expected_row = unit_test_yaml["unit_tests"][0]["expect"]["rows"][0]
+    assert expected_row["IS_DELETED_FLAG"] == "Y"
 
 
 def test_custom_macro_files_are_generated(tmp_path: Path) -> None:

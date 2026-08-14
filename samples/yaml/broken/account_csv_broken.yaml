@@ -3,6 +3,7 @@ id: 1_broken_account_csv
 description: Intentionally broken sample for parser diagnostics.
 control_data:
   materialisation_type: table
+  change_type: scd1
   failure_mode: quarantine_row
 source:
   format: csv

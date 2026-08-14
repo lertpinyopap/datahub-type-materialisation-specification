@@ -28,6 +28,9 @@ def diagnostic_locations(diagnostics: list[Diagnostic]) -> list[str | None]:
 def csv_spec(*, fields: list[dict[str, Any]], source: dict[str, Any] | None = None) -> dict[str, Any]:
     return {
         "id": "test_spec",
+        "control_data": {
+            "change_type": "scd1",
+        },
         "source": {
             "format": "csv",
             "header": True,

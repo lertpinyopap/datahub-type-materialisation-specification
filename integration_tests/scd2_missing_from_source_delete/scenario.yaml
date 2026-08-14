@@ -1,0 +1,21 @@
+name: scd2_missing_from_source_delete
+description: Missing current target key creates a logical SCD2 delete version.
+spec: spec/account.yaml
+dbt:
+  unit_test_csv: data/load_001_source.csv
+initial_target: data/initial_target.csv
+target:
+  expected_columns:
+    - ACCOUNT_ID
+    - ACCOUNT_NAME
+    - IS_CURRENT_FLAG
+    - IS_DELETED_FLAG
+    - VALID_FROM_DATETIME
+    - VALID_TO_DATETIME
+  order_by:
+    - ACCOUNT_ID
+    - VALID_FROM_DATETIME
+loads:
+  - name: load_001
+    source_csv: data/load_001_source.csv
+    expected_target: data/expected_after_load_001.csv

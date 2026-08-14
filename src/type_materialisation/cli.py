@@ -1,6 +1,7 @@
 import argparse
+import shutil
+import subprocess
 import sys
-import tempfile
 from pathlib import Path
 
 from .csv_validate import validate_csv_file
@@ -21,6 +22,8 @@ def main(argv: list[str] | None = None) -> int:
             return _validate(args)
         if args.command == "generate-dbt":
             return _generate_dbt(args)
+        if args.command == "dbt-build":
+            return _dbt_build(args)
     except DependencyError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
@@ -80,7 +83,7 @@ def _build_parser() -> argparse.ArgumentParser:
     generate_parser.add_argument(
         "--output-dir",
         type=Path,
-        help="directory for the generated dbt project; defaults to a fresh temp directory",
+        help="directory for the generated dbt project; defaults to ./tmp/<spec file stem>",
     )
     generate_parser.add_argument(
         "--csv-stage",
@@ -98,6 +101,16 @@ def _build_parser() -> argparse.ArgumentParser:
         type=Path,
         help="path containing Python macro modules; may be provided more than once",
     )
+
+    build_parser = subparsers.add_parser("dbt-build", help="build a generated dbt project for a spec")
+    build_parser.add_argument("--spec", required=True, type=Path, help="path to a concrete specification YAML file")
+    build_parser.add_argument(
+        "--project-dir",
+        type=Path,
+        help="generated dbt project directory; defaults to ./tmp/<spec file stem>",
+    )
+    build_parser.add_argument("--target", required=True, help="dbt target name passed through to dbt build")
+    build_parser.add_argument("--vars", help="dbt vars YAML/JSON string passed through to dbt build")
     return parser
 
 
@@ -141,7 +154,7 @@ def _generate_dbt(args: argparse.Namespace) -> int:
     if diagnostics:
         _print_diagnostics("spec parse failed", diagnostics)
         return 1
-    output_dir = args.output_dir or Path(tempfile.mkdtemp(prefix="tms-dbt-"))
+    output_dir = args.output_dir or _default_dbt_project_dir(args.spec)
     result = generate_dbt_project(
         GenerateDbtOptions(
             spec_path=args.spec,
@@ -163,6 +176,27 @@ def _generate_dbt(args: argparse.Namespace) -> int:
     for path in result.files:
         _console().print(f"  [dim]{path}[/dim]")
     return 0
+
+
+def _dbt_build(args: argparse.Namespace) -> int:
+    if not args.spec.exists():
+        _print_diagnostics("dbt build failed", [Diagnostic("spec file does not exist", str(args.spec))])
+        return 1
+    executable = shutil.which("dbt")
+    if executable is None:
+        raise DependencyError("dbt executable was not found on PATH.")
+    project_dir = args.project_dir or _default_dbt_project_dir(args.spec)
+    command_args = ["--project-dir", str(project_dir)]
+    if args.target:
+        command_args.extend(["--target", args.target])
+    if args.vars:
+        command_args.extend(["--vars", args.vars])
+    completed = subprocess.run([executable, "build", *command_args], check=False)
+    return completed.returncode
+
+
+def _default_dbt_project_dir(spec_path: Path) -> Path:
+    return Path("tmp") / spec_path.stem
 
 
 def parse_spec(spec_path: Path, *, abstract: bool, spec_paths: list[Path] | None = None) -> list[Diagnostic]:

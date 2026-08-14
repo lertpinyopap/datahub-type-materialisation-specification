@@ -1,0 +1,21 @@
+name: scd2_continuous_field_validity
+description: Continuous SCD2 windows from source field timestamps.
+spec: spec/account.yaml
+dbt:
+  unit_test_csv: data/load_001_source.csv
+target:
+  expected_columns:
+    - ACCOUNT_ID
+    - ACCOUNT_NAME
+    - SOURCE_CHANGED_AT
+    - IS_CURRENT_FLAG
+    - IS_DELETED_FLAG
+    - VALID_FROM_DATETIME
+    - VALID_TO_DATETIME
+  order_by:
+    - ACCOUNT_ID
+    - VALID_FROM_DATETIME
+loads:
+  - name: load_001
+    source_csv: data/load_001_source.csv
+    expected_target: data/expected_after_load_001.csv

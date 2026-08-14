@@ -3,6 +3,7 @@ id: account_quarantine_sample_positional
 description: Demonstrates a headerless positional CSV that evolves the quarantine table shape.
 control_data:
   materialisation_type: table
+  change_type: scd1
   failure_mode: quarantine_row
   quarantine:
     table: account_QUARANTINE_SAMPLE_QUARANTINE

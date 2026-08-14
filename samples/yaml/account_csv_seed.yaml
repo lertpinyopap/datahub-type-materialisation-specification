@@ -3,6 +3,7 @@ id: account_csv_seed
 description: Maps a local account CSV through dbt seed loading into a typed account table.
 control_data:
   materialisation_type: table
+  change_type: scd1
   failure_mode: quarantine_row
   quarantine:
     table: account_seed_QUARANTINE

@@ -14,8 +14,12 @@ from tests.helpers import diagnostic_messages, write_spec
 
 def complete_spec(extra: str = "", field_id: str = "account_id") -> str:
     extra_block = indent(extra.strip(), "    ") if extra.strip() else ""
+    control_block = ""
+    if "control_data:" not in extra:
+        control_block = "    control_data:\n      change_type: scd1\n"
     return f"""
     id: account_spec
+{control_block.rstrip()}
 {extra_block}
     source:
       format: csv
@@ -64,6 +68,8 @@ def test_source_column_names_are_rejected_case_insensitively(tmp_path: Path) -> 
         tmp_path,
         """
         id: account_spec
+        control_data:
+          change_type: scd1
         source:
           format: csv
           header: true
@@ -93,6 +99,8 @@ def test_csv_source_uses_python_dialect_names(tmp_path: Path) -> None:
         tmp_path,
         """
         id: account_spec
+        control_data:
+          change_type: scd1
         source:
           format: csv
           header: true
@@ -120,6 +128,8 @@ def test_csv_source_rejects_legacy_dialect_names(tmp_path: Path) -> None:
         tmp_path,
         """
         id: account_spec
+        control_data:
+          change_type: scd1
         source:
           format: csv
           header: true
@@ -147,6 +157,8 @@ def test_csv_source_rejects_unsupported_quoting_values(tmp_path: Path) -> None:
         tmp_path,
         """
         id: account_spec
+        control_data:
+          change_type: scd1
         source:
           format: csv
           header: true
@@ -166,11 +178,38 @@ def test_csv_source_rejects_unsupported_quoting_values(tmp_path: Path) -> None:
     assert any("'none' is not one of ['minimal', 'all']" in message for message in diagnostic_messages(diagnostics))
 
 
+def test_concrete_control_data_requires_change_type(tmp_path: Path) -> None:
+    _, diagnostics = parse_yaml(
+        tmp_path,
+        """
+        id: account_spec
+        control_data:
+          materialisation_type: table
+        source:
+          format: csv
+          header: true
+        target:
+          id: account
+          schema: business
+          fields:
+            - id: account_id
+              source:
+                pos: 0
+                column: account_id
+              data_type: varchar(20)
+        """,
+    )
+
+    assert any("'change_type' is a required property" in message for message in diagnostic_messages(diagnostics))
+
+
 def test_csv_dbt_seed_without_header_accepts_position_only_fields(tmp_path: Path) -> None:
     _, diagnostics = parse_yaml(
         tmp_path,
         """
         id: account_spec
+        control_data:
+          change_type: scd1
         source:
           format: csv
           header: false
@@ -196,6 +235,8 @@ def test_csv_dbt_seed_with_header_requires_source_columns(tmp_path: Path) -> Non
         tmp_path,
         """
         id: account_spec
+        control_data:
+          change_type: scd1
         source:
           format: csv
           header: true
@@ -223,6 +264,8 @@ def test_csv_seed_block_requires_dbt_seed_load_method(tmp_path: Path) -> None:
         tmp_path,
         """
         id: account_spec
+        control_data:
+          change_type: scd1
         source:
           format: csv
           header: true
@@ -241,6 +284,67 @@ def test_csv_seed_block_requires_dbt_seed_load_method(tmp_path: Path) -> None:
     )
 
     assert any("'load_method' is a required property" in message for message in diagnostic_messages(diagnostics))
+
+
+def test_parse_timestamp_accepts_timezone_if_missing(tmp_path: Path) -> None:
+    # Naive timestamp source strings need an explicit policy before they can become timestamp_tz values.
+    _, diagnostics = parse_yaml(
+        tmp_path,
+        """
+        id: account_spec
+        control_data:
+          change_type: scd1
+        source:
+          format: csv
+          header: true
+        target:
+          id: account
+          schema: business
+          fields:
+            - id: opened_at
+              source:
+                pos: 0
+                column: opened_at
+              data_type: timestamp_tz
+              transforms:
+                - type: parse_timestamp
+                  format: "%Y-%m-%d %H:%M:%S"
+                  timezone_if_missing: UTC
+        """,
+    )
+
+    assert diagnostics == []
+
+
+def test_parse_date_rejects_timezone_if_missing(tmp_path: Path) -> None:
+    # The missing-timezone policy is only valid for parse_timestamp.
+    _, diagnostics = parse_yaml(
+        tmp_path,
+        """
+        id: account_spec
+        control_data:
+          change_type: scd1
+        source:
+          format: csv
+          header: true
+        target:
+          id: account
+          schema: business
+          fields:
+            - id: opened_on
+              source:
+                pos: 0
+                column: opened_on
+              data_type: date
+              transforms:
+                - type: parse_date
+                  format: "%Y-%m-%d"
+                  timezone_if_missing: UTC
+        """,
+    )
+
+    assert diagnostics
+    assert diagnostics[0].location == "$.target.fields.0.transforms.0"
 
 
 def test_scd_business_key_must_reference_a_target_field(tmp_path: Path) -> None:
@@ -280,11 +384,134 @@ def test_scd_business_data_hash_include_requires_fields(tmp_path: Path) -> None:
     assert diagnostic_messages(diagnostics) == ["include mode requires at least one field"]
 
 
+def test_scd_sparse_validity_mode_is_reserved_but_not_implemented(tmp_path: Path) -> None:
+    _, diagnostics = parse_yaml(
+        tmp_path,
+        complete_spec(
+            """
+            control_data:
+              change_type: scd2
+              scd:
+                business_key:
+                  - account_id
+                valid_from_to_mode: sparse
+            """
+        ),
+    )
+
+    assert diagnostic_messages(diagnostics) == ["valid_from_to_mode `sparse` is not implemented yet"]
+
+
+def test_scd_rejects_legacy_effective_from_key(tmp_path: Path) -> None:
+    _, diagnostics = parse_yaml(
+        tmp_path,
+        complete_spec(
+            """
+            control_data:
+              change_type: scd2
+              scd:
+                business_key:
+                  - account_id
+                effective_from:
+                  mode: field
+                  field: account_id
+            """
+        ),
+    )
+
+    assert any("Additional properties are not allowed" in message for message in diagnostic_messages(diagnostics))
+
+
+def test_scd_delete_detection_never_is_valid(tmp_path: Path) -> None:
+    _, diagnostics = parse_yaml(
+        tmp_path,
+        complete_spec(
+            """
+            control_data:
+              change_type: scd2
+              scd:
+                business_key:
+                  - account_id
+                delete_detection:
+                  mode: never
+            """
+        ),
+    )
+
+    assert diagnostics == []
+
+
+def test_scd_delete_detection_field_uses_single_value(tmp_path: Path) -> None:
+    _, diagnostics = parse_yaml(
+        tmp_path,
+        complete_spec(
+            """
+            control_data:
+              change_type: scd2
+              scd:
+                business_key:
+                  - account_id
+                delete_detection:
+                  mode: field
+                  field: account_id
+                  value: DELETED
+            """
+        ),
+    )
+
+    assert diagnostics == []
+
+
+def test_scd_missing_from_source_rejects_field_valid_from_selection(tmp_path: Path) -> None:
+    _, diagnostics = parse_yaml(
+        tmp_path,
+        complete_spec(
+            """
+            control_data:
+              change_type: scd2
+              scd:
+                business_key:
+                  - account_id
+                delete_detection:
+                  mode: missing_from_source
+                valid_from_datetime:
+                  valid_from_datetime_selection: field
+                  field: account_id
+            """
+        ),
+    )
+
+    assert diagnostic_messages(diagnostics) == [
+        "delete_detection.mode `missing_from_source` is invalid when valid_from_datetime_selection is field"
+    ]
+
+
+def test_scd1_delete_detection_field_must_reference_target_field(tmp_path: Path) -> None:
+    _, diagnostics = parse_yaml(
+        tmp_path,
+        complete_spec(
+            """
+            control_data:
+              change_type: scd1
+              scd:
+                delete_detection:
+                  mode: field
+                  field: missing_status
+                  value: DELETED
+            """
+        ),
+    )
+
+    assert diagnostic_messages(diagnostics) == ["referenced field does not exist in target.fields"]
+
+
 def test_invalid_regex_validation_is_caught_at_parse_time(tmp_path: Path) -> None:
     _, diagnostics = parse_yaml(
         tmp_path,
         """
         id: account_spec
+        control_data:
+          change_type: scd1
         source:
           format: csv
           header: true
@@ -311,6 +538,8 @@ def test_unsupported_jinja_expression_is_caught_at_parse_time(tmp_path: Path) ->
         tmp_path,
         """
         id: table_spec
+        control_data:
+          change_type: scd1
         source:
           format: table
           schema: landing

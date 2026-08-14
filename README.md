@@ -92,14 +92,23 @@ tms validate --spec path/to/child.yaml --spec-path path/to/parents --input-file 
 Generate a dbt project:
 
 ```bash
+tms generate-dbt --spec samples/yaml/account_csv.yaml
 tms generate-dbt --spec samples/yaml/account_csv.yaml --unit-test-csv samples/csv/account_csv.csv --output-dir tmp/dbt-account
 tms generate-dbt --spec samples/yaml/account_csv.yaml --output-dir tmp/dbt-account --csv-stage RAW.PUBLIC.ACCOUNT_STAGE
 tms generate-dbt --spec samples/yaml/account_csv_seed.yaml --output-dir tmp/dbt-account-seed
 tms generate-dbt --spec path/to/child.yaml --spec-path path/to/parents
 ```
 
-If `--output-dir` is omitted, `tms generate-dbt` writes to a fresh temporary
-directory. If `--output-dir` is supplied, it must either not exist or be empty;
+Run a generated dbt project:
+
+```bash
+tms dbt-build --spec samples/yaml/account_csv.yaml --target dev --vars '{target_schema: TMP, tms_job_schema: TMP}'
+tms dbt-build --spec samples/yaml/account_csv_seed.yaml --project-dir tmp/dbt-account-seed --target dev
+```
+
+If `--output-dir` is omitted, `tms generate-dbt` writes to
+`./tmp/<spec file stem>`, the same default project directory used by
+`tms dbt-build`. The output directory must either not exist or be empty;
 generation fails rather than mixing stale dbt artifacts with newly generated
 ones. CSV stage details come from `source.location` in the spec unless
 `--csv-stage` is supplied. Any omitted database is resolved by the active dbt
@@ -116,6 +125,9 @@ Generated dbt projects refer to a local user-managed dbt profile named
 `datahub_type_materialisation`. The reference implementation does not generate
 `profiles.yml`, because connection details must come from the operator's normal
 dbt environment.
+
+Use `--project-dir` to run a project from another directory. The command streams
+dbt output directly to the console.
 
 ```bash
 cd tmp/dbt-account
@@ -143,6 +155,7 @@ id: account_file_format
 description: Account file mapping.
 control_data:
   materialisation_type: table
+  change_type: scd1
   failure_mode: quarantine_row
   quarantine:
     table: account_QUARANTINE

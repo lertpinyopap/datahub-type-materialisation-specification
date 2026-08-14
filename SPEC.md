@@ -86,7 +86,7 @@ extending_spec ::=
   id
   description?
   extends  # see section 15, Inheritance
-  control_data?
+  control_data
   source?
   target?
 ```
@@ -98,6 +98,7 @@ id: account_file_format
 description: Maps raw account CSV data into a typed account table.
 control_data:
   materialisation_type: table
+  change_type: scd1
   failure_mode: quarantine_row
 source:
   format: csv
@@ -179,9 +180,9 @@ extends: abstract_reference_code_data
 
 ```text
 control_data ::=
+  change_type
   materialisation_type?
   failure_mode?
-  change_type?
   scd?
   quarantine?
   job?
@@ -202,10 +203,11 @@ implementations should default to `table`.
 `failure_mode` defines how validation or conversion failures are handled. If
 omitted, implementations should default to `fail_file`.
 
-`change_type` optionally describes slowly changing dimension behavior. If
-omitted, implementations should materialise records without SCD merge behavior.
+`change_type` explicitly declares the change-handling behavior. It is required
+for complete specifications and has no default.
 
-`scd` configures SCD behavior when `change_type` is `scd1` or `scd2`.
+`scd` configures delete detection for SCD1 and SCD2 history behavior when
+`change_type` is `scd2`.
 
 `quarantine` optionally describes the quarantine table used when
 `failure_mode` is `quarantine_row`.
@@ -228,7 +230,7 @@ omitted, implementations should materialise records without SCD merge behavior.
 
 `change_type` values:
 
-- `scd1`: update the current target row for a business entity in place.
+- `scd1`: materialise the current typed state without SCD2 history metadata.
 - `scd2`: preserve historical versions for a business entity.
 
 Sample: control data.
@@ -243,12 +245,12 @@ control_data:
       - account_id
     delete_detection:
       mode: missing_from_source
-    effective_from:
-      mode: field
-      field: source_changed_at
-      truncate_to_day: true
-    effective_to:
-      mode: next_effective_from
+    valid_from_datetime:
+      valid_from_datetime_selection: load_datetime
+    valid_to_datetime:
+      valid_to_datetime_selection: next
+    valid_from_to_mode: continuous
+    business_data_hash_duplicate_mode: skip
     business_data_hash:
       mode: exclude
       fields:
@@ -316,6 +318,7 @@ Sample: quarantine table configuration.
 
 ```yaml
 control_data:
+  change_type: scd1
   failure_mode: quarantine_row
   quarantine:
     database: ops
@@ -430,6 +433,7 @@ Sample: job table configuration.
 
 ```yaml
 control_data:
+  change_type: scd1
   job:
     database: ops
     schema: BUSINESS
@@ -442,41 +446,43 @@ control_data:
 scd_config ::=
   business_key[]
   delete_detection?
-  effective_from?
-  effective_to?
+  valid_from_datetime?
+  valid_to_datetime?
+  valid_from_to_mode?
+  business_data_hash_duplicate_mode?
   business_data_hash?
 
 business_key ::= target field id
 
 delete_detection ::=
   mode: missing_from_source
+  | mode: never
   | mode: field
     field
-    deleted_values[]
+    value
 
-delete_detection_mode ::= missing_from_source | field
-deleted_values[] ::= scalar values
+delete_detection_mode ::= missing_from_source | field | never
 
-effective_from ::=
-  mode: start_of_time
-  | mode: load_datetime
-  | mode: field
+valid_from_datetime ::=
+  valid_from_datetime_selection: load_datetime
+  | valid_from_datetime_selection: field
     field
-  | mode: explicit
+  | valid_from_datetime_selection: explicit
     value
   truncate_to_day?
 
-effective_from_mode ::= start_of_time | load_datetime | field | explicit
+valid_from_datetime_selection ::= load_datetime | field | explicit
 
-effective_to ::=
-  mode: next_effective_from
-  | mode: field
+valid_to_datetime ::=
+  valid_to_datetime_selection: next
+  | valid_to_datetime_selection: field
     field
-  | mode: explicit
+  | valid_to_datetime_selection: explicit
     value
-  end_of_time?
 
-effective_to_mode ::= next_effective_from | field | explicit
+valid_to_datetime_selection ::= next | field | explicit
+valid_from_to_mode ::= continuous | sparse
+business_data_hash_duplicate_mode ::= skip | update
 
 business_data_hash ::=
   mode
@@ -486,17 +492,17 @@ business_data_hash_mode ::= include | exclude
 field ::= target field id
 value ::= scalar
 truncate_to_day ::= true | false
-end_of_time ::= timezone-aware timestamp value
 ```
 
-SCD configuration is used when `change_type` is `scd1` or `scd2`.
+SCD configuration is used for delete detection when `change_type` is `scd1` and
+for history management when `change_type` is `scd2`.
 
 `business_key` identifies the target field ids that uniquely identify a
-business entity. `business_key` is required for `scd1` and `scd2`.
+business entity. `business_key` is required for `scd2`.
 
-For `scd1`, implementations should use `business_key` to match existing target
-rows and update changed business attributes in place. SCD1 behavior is otherwise
-intentionally simple in this version of the specification.
+For `scd1`, implementations materialise the current typed state without SCD2
+history metadata. SCD1 behavior is intentionally simple in this version of the
+specification.
 
 For `scd2`, implementations must preserve historical versions and generate the
 following target metadata columns:
@@ -520,43 +526,76 @@ ids must not use generated SCD metadata column names.
 - `missing_from_source`: treat the source as a current-state snapshot. A current
   target business key that is missing from the load is treated as logically
   deleted.
-- `field`: treat the record as deleted when the configured `field` has one of
-  the configured `deleted_values`.
+- `never`: do not mark records as deleted.
+- `field`: treat the record as deleted when the configured `field` equals the
+  configured `value`.
 
 Delete detection modes may be extended as implementation experience reveals new
 source patterns.
 
-Deletes do not physically remove records. For SCD2, a delete creates a new
+For SCD2, deletes do not physically remove records. A delete creates a new
 current version with `is_deleted_flag = 'Y'` and `is_current_flag = 'Y'`; the
-previous current version is expired.
+previous current version is expired. For SCD1, delete detection physically
+removes the current-state record from the generated output.
 
-`effective_from.mode` values:
+`valid_from_datetime.valid_from_datetime_selection` values:
 
-- `start_of_time`: use the platform-defined start-of-time timestamp, with time
-  set to `00:00:00`.
 - `load_datetime`: use the load timestamp.
 - `field`: use the timezone-aware timestamp value from the configured target
   field id.
 - `explicit`: use the configured scalar or templated `value`, often a dbt
   variable.
 
-If `effective_from.truncate_to_day` is `true`, implementations must preserve the
-value as a timezone-aware timestamp while setting the time component to
-`00:00:00`.
+If `valid_from_datetime.truncate_to_day` is `true`, implementations must
+preserve the value as a timezone-aware timestamp while setting the time
+component to `00:00:00`.
 
-`effective_to.mode` values:
+If `valid_from_datetime` is omitted for SCD2, implementations should default to
+`valid_from_datetime_selection: load_datetime`.
 
-- `next_effective_from`: set `valid_to_datetime` to the next newer version's
+`valid_to_datetime.valid_to_datetime_selection` values:
+
+- `next`: set `valid_to_datetime` to the next newer version's
   `valid_from_datetime`. If no newer version exists, set `valid_to_datetime` to
-  the configured `end_of_time` value or the platform maximum timestamp.
+  the platform end-of-time timestamp.
 - `field`: use the timezone-aware timestamp value from the configured target
   field id.
 - `explicit`: use the configured scalar or templated `value`.
 
-If `effective_to` is omitted for SCD2, implementations should default to
-`mode: next_effective_from`. This default supports loading data older than the
-current target version because older versions can be end-dated at the start of
-the next newer version.
+If `valid_to_datetime` is omitted for SCD2, implementations should default to
+`valid_to_datetime_selection: next`. This default supports loading data older
+than the current target version because older versions can be end-dated at the
+start of the next newer version.
+
+For generated continuous windows, `valid_to_datetime` is the exclusive upper
+bound of the validity interval. When `valid_to_datetime_selection` is `next`,
+the stored `valid_to_datetime` value must equal the next version's
+`valid_from_datetime`.
+
+`valid_from_to_mode` values:
+
+- `continuous`: recalculate SCD2 windows for each business key so the first
+  version starts at the platform start-of-time timestamp, each following version
+  begins at its selected `valid_from_datetime`, each prior version ends
+  immediately before the following version begins, and the final version ends at
+  the platform end-of-time timestamp.
+- `sparse`: allow gaps between versions for a business key.
+
+If `valid_from_to_mode` is omitted for SCD2, implementations should default to
+`continuous`. The reference implementation accepts `sparse` in the grammar but
+does not implement it yet.
+
+The reference platform start-of-time timestamp is `0001-01-01T00:00:00Z`. The
+reference platform end-of-time timestamp is `9999-12-31T23:59:59Z`.
+
+`business_data_hash_duplicate_mode` values:
+
+- `skip`: skip duplicate business data hash windows when applying SCD2 history.
+- `update`: allow adjacent duplicate business data hash windows to extend an
+  existing matching version's validity range.
+
+If `business_data_hash_duplicate_mode` is omitted for SCD2, implementations
+should default to `skip`.
 
 `business_data_hash.mode` values:
 
@@ -568,8 +607,12 @@ target field id. For `business_data_hash.mode = exclude`, omitted `fields`
 means no additional business fields are excluded.
 
 If `business_data_hash` is omitted for SCD2, implementations should default to
-`mode: exclude` with no listed fields. Generated audit metadata and generated
-SCD metadata fields are always excluded from `business_data_hash`.
+`mode: exclude` with no listed fields. Implementations calculate
+`business_data_hash` as a SHA2-256 hash over the selected source-derived
+business values joined with a `|` separator; the physical output is a
+`varchar(64)` hexadecimal value. Generated audit metadata and generated SCD
+metadata fields are always excluded from `business_data_hash`. Only values
+derived from declared source fields may be included in the hash.
 
 SCD2 change detection compares the incoming `business_data_hash` with the
 current target row for the same `business_key` where `is_current_flag = 'Y'`.
@@ -594,13 +637,12 @@ control_data:
       - account_id
     delete_detection:
       mode: missing_from_source
-    effective_from:
-      mode: field
-      field: source_changed_at
-      truncate_to_day: true
-    effective_to:
-      mode: next_effective_from
-      end_of_time: "9999-12-31 23:59:59.999999"
+    valid_from_datetime:
+      valid_from_datetime_selection: load_datetime
+    valid_to_datetime:
+      valid_to_datetime_selection: next
+    valid_from_to_mode: continuous
+    business_data_hash_duplicate_mode: skip
     business_data_hash:
       mode: exclude
       fields:
@@ -1419,6 +1461,7 @@ failures use `FAILED_TO_COMPILE`.
 
 Parse-time rules:
 
+- Complete concrete specifications must declare `control_data.change_type`.
 - `source.format ::= csv | table`.
 - For `source.format = csv`, each field source must specify at least one of
   `pos` or `column`.
@@ -1439,14 +1482,20 @@ Parse-time rules:
 - Target field ids must not use generated SCD metadata column names:
   `is_current_flag`, `is_deleted_flag`, `valid_from_datetime`,
   `valid_to_datetime`, or `business_data_hash`.
-- For `change_type = scd1` or `change_type = scd2`, `scd.business_key` is
-  required and each listed field id must exist in `target.fields`.
-- For `change_type = scd2`, `delete_detection.mode = field` requires `field`
-  and at least one `deleted_values` entry.
-- For `change_type = scd2`, `effective_from.mode = field` requires `field`, and
-  `effective_from.mode = explicit` requires `value`.
-- For `change_type = scd2`, `effective_to.mode = field` requires `field`, and
-  `effective_to.mode = explicit` requires `value`.
+- For `change_type = scd2`, `scd.business_key` is required and each listed
+  field id must exist in `target.fields`.
+- For `change_type = scd1` or `change_type = scd2`,
+  `delete_detection.mode = field` requires `field` and `value`.
+- For `change_type = scd2`, `delete_detection.mode = missing_from_source` is
+  invalid when `valid_from_datetime.valid_from_datetime_selection = field`.
+- For `change_type = scd2`, `valid_from_datetime.valid_from_datetime_selection
+  = field` requires `field`, and `valid_from_datetime_selection = explicit`
+  requires `value`.
+- For `change_type = scd2`, `valid_to_datetime.valid_to_datetime_selection =
+  field` requires `field`, and `valid_to_datetime_selection = explicit`
+  requires `value`.
+- For `change_type = scd2`, `valid_from_to_mode = sparse` is reserved but not
+  implemented by the reference implementation.
 - For `change_type = scd2`, `business_data_hash.mode = include` requires at
   least one `fields` entry.
 
@@ -1528,6 +1577,7 @@ id: abstract_reference_code_data
 description: Shared shape for reference code data tables.
 control_data:
   materialisation_type: table
+  change_type: scd1
   failure_mode: quarantine_row
 source:
   format: table

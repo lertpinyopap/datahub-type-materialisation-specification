@@ -28,8 +28,11 @@
   },
   "allOf": [
     {
-      "required": ["source", "target"],
+      "required": ["control_data", "source", "target"],
       "properties": {
+        "control_data": {
+          "required": ["change_type"]
+        },
         "source": {
           "oneOf": [
             {
@@ -266,11 +269,19 @@
         "delete_detection": {
           "$ref": "#/$defs/scdDeleteDetection"
         },
-        "effective_from": {
-          "$ref": "#/$defs/scdEffectiveFrom"
+        "valid_from_datetime": {
+          "$ref": "#/$defs/scdValidFromDatetime"
         },
-        "effective_to": {
-          "$ref": "#/$defs/scdEffectiveTo"
+        "valid_to_datetime": {
+          "$ref": "#/$defs/scdValidToDatetime"
+        },
+        "valid_from_to_mode": {
+          "type": "string",
+          "enum": ["continuous", "sparse"]
+        },
+        "business_data_hash_duplicate_mode": {
+          "type": "string",
+          "enum": ["skip", "update"]
         },
         "business_data_hash": {
           "$ref": "#/$defs/scdBusinessDataHash"
@@ -292,7 +303,17 @@
         {
           "type": "object",
           "additionalProperties": false,
-          "required": ["mode", "field", "deleted_values"],
+          "required": ["mode"],
+          "properties": {
+            "mode": {
+              "const": "never"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["mode", "field", "value"],
           "properties": {
             "mode": {
               "const": "field"
@@ -300,26 +321,22 @@
             "field": {
               "$ref": "#/$defs/specificationId"
             },
-            "deleted_values": {
-              "type": "array",
-              "minItems": 1,
-              "items": {
-                "$ref": "#/$defs/scalarValue"
-              }
+            "value": {
+              "$ref": "#/$defs/scalarValue"
             }
           }
         }
       ]
     },
-    "scdEffectiveFrom": {
+    "scdValidFromDatetime": {
       "oneOf": [
         {
           "type": "object",
           "additionalProperties": false,
-          "required": ["mode"],
+          "required": ["valid_from_datetime_selection"],
           "properties": {
-            "mode": {
-              "enum": ["start_of_time", "load_datetime"]
+            "valid_from_datetime_selection": {
+              "const": "load_datetime"
             },
             "truncate_to_day": {
               "type": "boolean"
@@ -329,9 +346,9 @@
         {
           "type": "object",
           "additionalProperties": false,
-          "required": ["mode", "field"],
+          "required": ["valid_from_datetime_selection", "field"],
           "properties": {
-            "mode": {
+            "valid_from_datetime_selection": {
               "const": "field"
             },
             "field": {
@@ -345,9 +362,9 @@
         {
           "type": "object",
           "additionalProperties": false,
-          "required": ["mode", "value"],
+          "required": ["valid_from_datetime_selection", "value"],
           "properties": {
-            "mode": {
+            "valid_from_datetime_selection": {
               "const": "explicit"
             },
             "value": {
@@ -360,49 +377,40 @@
         }
       ]
     },
-    "scdEffectiveTo": {
+    "scdValidToDatetime": {
       "oneOf": [
         {
           "type": "object",
           "additionalProperties": false,
-          "required": ["mode"],
+          "required": ["valid_to_datetime_selection"],
           "properties": {
-            "mode": {
-              "const": "next_effective_from"
-            },
-            "end_of_time": {
-              "$ref": "#/$defs/scalarValue"
+            "valid_to_datetime_selection": {
+              "const": "next"
             }
           }
         },
         {
           "type": "object",
           "additionalProperties": false,
-          "required": ["mode", "field"],
+          "required": ["valid_to_datetime_selection", "field"],
           "properties": {
-            "mode": {
+            "valid_to_datetime_selection": {
               "const": "field"
             },
             "field": {
               "$ref": "#/$defs/specificationId"
-            },
-            "end_of_time": {
-              "$ref": "#/$defs/scalarValue"
             }
           }
         },
         {
           "type": "object",
           "additionalProperties": false,
-          "required": ["mode", "value"],
+          "required": ["valid_to_datetime_selection", "value"],
           "properties": {
-            "mode": {
+            "valid_to_datetime_selection": {
               "const": "explicit"
             },
             "value": {
-              "$ref": "#/$defs/scalarValue"
-            },
-            "end_of_time": {
               "$ref": "#/$defs/scalarValue"
             }
           }
@@ -824,10 +832,6 @@
         },
         "format": {
           "$ref": "#/$defs/templatedString"
-        },
-        "timezone_if_missing": {
-          "type": "string",
-          "enum": ["Z", "UTC", "local"]
         }
       }
     },
@@ -841,6 +845,10 @@
         },
         "format": {
           "$ref": "#/$defs/templatedString"
+        },
+        "timezone_if_missing": {
+          "type": "string",
+          "enum": ["Z", "UTC", "local"]
         }
       }
     },

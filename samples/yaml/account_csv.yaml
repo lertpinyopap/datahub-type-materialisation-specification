@@ -3,6 +3,7 @@ id: account_csv
 description: Maps raw account CSV data into a typed account table.
 control_data:
   materialisation_type: table
+  change_type: scd1
   failure_mode: quarantine_row
   quarantine:
     table: account_QUARANTINE

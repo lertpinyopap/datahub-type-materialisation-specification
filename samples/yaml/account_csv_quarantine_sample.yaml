@@ -3,6 +3,7 @@ id: account_csv_quarantine_sample
 description: Demonstrates five accepted CSV rows and two rows written to quarantine.
 control_data:
   materialisation_type: table
+  change_type: scd1
   failure_mode: quarantine_row
   quarantine:
     table: account_quarantine_sample_QUARANTINE
