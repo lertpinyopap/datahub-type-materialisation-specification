@@ -113,9 +113,9 @@ The normal `tms` flow is:
 ```mermaid
 flowchart LR
     spec([<b>Inputs</b><br/>YAML spec<br/>ONLY source of truth])
-    parse["<div style='width: 190px; height: 56px; text-align: center;'><b>tms parse</b><br/>Optional early error check</div>"]
-    generate["<div style='width: 190px; height: 56px; text-align: center;'><b>tms generate-dbt</b><br/>Write ephemeral dbt project</div>"]
-    build["<div style='width: 190px; height: 56px; text-align: center;'><b>tms dbt-build</b><br/>Run dbt build</div>"]
+    parse["<div style='width: 190px; height: 56px; text-align: center;'><b>1. parse</b><br/>Optional early error check</div>"]
+    generate["<div style='width: 190px; height: 56px; text-align: center;'><b>2. generate-dbt</b><br/>Write ephemeral dbt project</div>"]
+    build["<div style='width: 190px; height: 56px; text-align: center;'><b>3. dbt-build</b><br/>Run dbt build</div>"]
     output([<b>Outputs</b><br/>Typed target tables<br/>quarantine tables<br/>job details])
 
     spec -.-> parse
@@ -124,7 +124,7 @@ flowchart LR
     generate --> build
     build -.-> output
 
-    classDef io fill:#eef7ff,stroke:#2563eb,stroke-width:2px,stroke-dasharray: 5 4,color:#111827;
+    classDef io fill:#eef7ff,stroke:#2563eb,stroke-width:2px,color:#111827;
     classDef step fill:#ffffff,stroke:#6b7280,stroke-width:1px,color:#111827;
     class spec,output io;
     class parse,generate,build step;
@@ -143,6 +143,36 @@ preflight step when you want early errors without creating dbt artifacts.
 The generated dbt project is ephemeral: it is written to a tmp directory and
 can be deleted and recreated from the specification. Do not treat generated dbt
 files as durable project state. The YAML spec is the ONLY source of truth.
+
+### Job Status Events
+
+Generated dbt projects write load lifecycle events to the job details table.
+The default table name is `TYPE_MATERIALISATION_JOBS`; the default schema is
+`BUSINESS`, and generated projects allow the schema to be overridden at runtime
+with the `tms_job_schema` dbt variable. See
+[SPEC.md §5.2 Job Table](./SPEC.md#52-job-table) for the full column contract.
+
+Each load writes one `JOB_START` row and one `JOB_END` row with the same
+`job_id`. `JOB_END` records the final result, optional diagnostic details,
+loaded row count, quarantine row count, and the audit process key.
+
+Example: successful load with quarantined rows.
+
+```text
+EVENT_TYPE  RESULT                     DETAILS                                      LOADED_COUNT  QUARANTINE_COUNT
+JOB_START
+JOB_END     COMPLETED_WITH_QUARANTINE  validation errors written to quarantine output  3             1
+```
+
+Example: failed load caused by validation guard failure.
+
+```text
+EVENT_TYPE  RESULT  DETAILS
+JOB_START
+JOB_END     FAILED  validation errors failed the load
+```
+
+### Generated dbt Project Defaults
 
 If `--output-dir` is omitted, `tms generate-dbt` writes to
 `./tmp/<spec file stem>`, the same default project directory used by
@@ -223,3 +253,66 @@ target:
         - type: max_length
           value: 20
 ```
+
+## Running Tests
+
+Run the Python unit test suite from the repository root:
+
+```bash
+.venv/bin/python -m pytest
+```
+
+These tests cover parsing, schema semantics, CSV validation, dbt project
+generation, CLI behavior, and the offline integration-test framework. See
+[tests/](./tests) for the test modules.
+
+Generated dbt unit tests are created when `tms generate-dbt` is given a sample
+CSV fixture:
+
+```bash
+tms generate-dbt --spec samples/yaml/account_csv.yaml --unit-test-csv samples/csv/account_csv.csv --output-dir tmp/dbt-account
+cd tmp/dbt-account
+dbt test --select "test_type:unit" --vars '{tms_job_schema: TMP}'
+```
+
+These run inside the generated dbt project and validate first-load model
+behavior using dbt's unit-test runner. The generated project remains ephemeral;
+regenerate it from the YAML spec whenever the spec changes.
+
+Live integration tests run generated dbt against Snowflake and are opt-in:
+
+```bash
+TMS_RUN_INTEGRATION=1 .venv/bin/python -m pytest integration_tests
+```
+
+By default they use Snowflake connection profile `[connections.tms_int]` from
+`~/.snowflake/config.toml`, run in schema `TMP`, and prefix generated relations
+and stages with `TMS_INT__`. The runner never creates or drops schemas. It
+cleans up the scenario's prefixed objects before each run, and cleans them up
+again at the end unless instructed to keep them.
+
+Common overrides:
+
+```bash
+TMS_RUN_INTEGRATION=1 \
+TMS_SNOWFLAKE_CONNECTION=lfsprod \
+TMS_INTEGRATION_SCHEMA=BUSINESS \
+TMS_INTEGRATION_TABLE_PREFIX=TMS_INT__ \
+.venv/bin/python -m pytest integration_tests
+```
+
+Keep generated database objects for inspection:
+
+```bash
+TMS_RUN_INTEGRATION=1 TMS_INTEGRATION_KEEP_TABLES=1 .venv/bin/python -m pytest integration_tests
+```
+
+Run one integration scenario:
+
+```bash
+TMS_RUN_INTEGRATION=1 .venv/bin/python -m pytest integration_tests -k scd2_hash_skip_current_duplicate
+```
+
+See [integration_tests/README.md](./integration_tests/README.md) for the full
+scenario-folder structure, live-run workflow, progress output, connection
+settings, and custom assertion hooks.
