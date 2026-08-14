@@ -16,6 +16,7 @@ class LoadStep:
     name: str
     source_csv: Path
     expected_target_csv: Path
+    dbt_vars: dict[str, Any]
 
 
 @dataclass(frozen=True)
@@ -94,7 +95,15 @@ def _load_steps(root: Path, manifest: dict[str, Any], manifest_path: Path) -> li
         name = _required_string(raw_step, "name", manifest_path)
         source_csv = _required_file(root, _required_string(raw_step, "source_csv", manifest_path))
         expected_target_csv = _required_file(root, _required_string(raw_step, "expected_target", manifest_path))
-        steps.append(LoadStep(name=name, source_csv=source_csv, expected_target_csv=expected_target_csv))
+        dbt_vars = _optional_mapping(raw_step.get("dbt_vars"), manifest_path, f"loads[{index}].dbt_vars")
+        steps.append(
+            LoadStep(
+                name=name,
+                source_csv=source_csv,
+                expected_target_csv=expected_target_csv,
+                dbt_vars=dbt_vars,
+            )
+        )
     return steps
 
 
@@ -123,6 +132,14 @@ def _optional_string_list(value: Any, path: Path, key: str) -> list[str]:
     if not isinstance(value, list) or not all(isinstance(item, str) and item for item in value):
         raise ScenarioError(f"{path}: `{key}` must be a list of non-empty strings")
     return value
+
+
+def _optional_mapping(value: Any, path: Path, key: str) -> dict[str, Any]:
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise ScenarioError(f"{path}: `{key}` must be a mapping")
+    return {str(mapping_key): mapping_value for mapping_key, mapping_value in value.items()}
 
 
 def _required_file(root: Path, relative_path: str) -> Path:

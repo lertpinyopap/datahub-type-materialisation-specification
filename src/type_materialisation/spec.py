@@ -20,7 +20,7 @@ RESERVED_GENERATED_FIELDS = set(GENERATED_METADATA_FIELD_TYPES)
 SUPPORTED_TYPE_RE = re.compile(r"^\s*([A-Za-z][A-Za-z0-9_]*)(?:\(([^)]*)\))?\s*$")
 JINJA_EXPR_RE = re.compile(r"{{.*?}}")
 SUPPORTED_JINJA_EXPR_RE = re.compile(
-    r"^\s*{{\s*(var|env_var)\(\s*'[^']+'\s*(,\s*'[^']*'\s*)?\)\s*}}\s*$"
+    r"""^\s*{{\s*(var|env_var)\(\s*(['"])[^'"]+\2\s*(,\s*(['"])[^'"]*\4\s*)?\)\s*}}\s*$"""
 )
 
 

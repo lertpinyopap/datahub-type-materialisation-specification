@@ -582,3 +582,28 @@ def test_unsupported_jinja_expression_is_caught_at_parse_time(tmp_path: Path) ->
     )
 
     assert diagnostic_messages(diagnostics) == ["unsupported Jinja expression `{{ ref('not_allowed_here') }}`"]
+
+
+def test_supported_jinja_var_expression_accepts_double_quoted_arguments(tmp_path: Path) -> None:
+    _, diagnostics = parse_yaml(
+        tmp_path,
+        """
+        id: table_spec
+        control_data:
+          change_type: scd1
+        source:
+          format: table
+          schema: landing
+          table: '{{ var("source_table", "ACCOUNT_SOURCE") }}'
+        target:
+          id: account
+          schema: business
+          fields:
+            - id: account_id
+              source:
+                column: account_id
+              data_type: varchar(20)
+        """,
+    )
+
+    assert diagnostic_messages(diagnostics) == []

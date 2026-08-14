@@ -73,6 +73,7 @@ def test_integration_scenarios_are_discoverable_and_self_contained() -> None:
         "scd1_csv_transforms",
         "scd1_table_source_varchar_load",
         "scd2_continuous_field_validity",
+        "scd2_hash_skip_current_duplicate",
         "scd2_missing_from_source_delete",
     ]
     for scenario_root in scenario_roots:
@@ -87,6 +88,7 @@ def test_integration_scenarios_are_discoverable_and_self_contained() -> None:
         for step in scenario.loads:
             assert step.source_csv.exists()
             assert step.expected_target_csv.exists()
+            assert isinstance(step.dbt_vars, dict)
 
 
 def test_integration_scenarios_generate_dbt_unit_tests(tmp_path: Path) -> None:
@@ -278,7 +280,12 @@ def test_integration_dbt_runner_uses_tms_dbt_build(monkeypatch, tmp_path: Path) 
 
     monkeypatch.setattr(dbt_runner.subprocess, "run", fake_run)
 
-    dbt_runner.run_tms_dbt_project(spec_path=spec_path, project_dir=project_dir, target_schema="TMP")
+    dbt_runner.run_tms_dbt_project(
+        spec_path=spec_path,
+        project_dir=project_dir,
+        target_schema="TMP",
+        dbt_vars={"valid_from_datetime": "2026-09-02T00:00:00Z"},
+    )
 
     assert commands == [
         [
@@ -291,7 +298,13 @@ def test_integration_dbt_runner_uses_tms_dbt_build(monkeypatch, tmp_path: Path) 
             "--target",
             "dev",
             "--vars",
-            json.dumps({"target_schema": "TMP", "tms_job_schema": "TMP"}),
+            json.dumps(
+                {
+                    "target_schema": "TMP",
+                    "tms_job_schema": "TMP",
+                    "valid_from_datetime": "2026-09-02T00:00:00Z",
+                }
+            ),
         ]
     ]
 
@@ -491,6 +504,19 @@ def test_csv_transform_scenario_generates_transform_sql(tmp_path: Path) -> None:
     assert "cast(ltrim(LEFT_TRIM_CODE) as varchar(50)) as LEFT_TRIM_CODE" in model_sql
     assert "cast(rtrim(RIGHT_TRIM_CODE) as varchar(50)) as RIGHT_TRIM_CODE" in model_sql
     assert "cast(round(ROUNDED_AMOUNT, 2) as number(10,2)) as ROUNDED_AMOUNT" in model_sql
+
+
+def test_hash_skip_scenario_generates_business_hash_skip_sql(tmp_path: Path) -> None:
+    scenario = load_scenario(INTEGRATION_ROOT / "scd2_hash_skip_current_duplicate")
+    output_dir = tmp_path / scenario.name
+
+    generate_project_for_scenario(scenario, output_dir)
+
+    model_sql = (output_dir / "models" / "generated" / "tms_int__account.sql").read_text(encoding="utf-8")
+    assert "sha2(concat_ws('|', coalesce(cast(cast(ACCOUNT_VALUE as number(10,0)) as varchar), '')), 256)" in model_sql
+    assert "cast('{{ var(\"valid_from_datetime\") }}' as timestamp_tz)" in model_sql
+    assert "current_target.BUSINESS_DATA_HASH = typed_rows.BUSINESS_DATA_HASH" in model_sql
+    assert "coalesce(current_target.IS_DELETED_FLAG, 'N') = typed_rows.TMS_IS_DELETED_FLAG_CANDIDATE" in model_sql
 
 
 def test_continuous_scd2_scenario_dbt_unit_test_uses_exact_next_boundary(tmp_path: Path) -> None:

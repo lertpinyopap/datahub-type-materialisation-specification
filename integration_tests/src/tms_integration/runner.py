@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import shutil
 from dataclasses import dataclass
@@ -98,11 +99,14 @@ def _run_live_scenario(
                 else:
                     reporter.step("Replacing generated seed data", step.source_csv.name)
                     _replace_seed(project_dir, step.source_csv)
+                if step.dbt_vars:
+                    reporter.step("Applying dbt vars", json.dumps(step.dbt_vars, sort_keys=True))
                 reporter.step("Running tms dbt-build")
                 run_tms_dbt_project(
                     spec_path=generated_project.spec_path,
                     project_dir=project_dir,
                     target_schema=target_schema,
+                    dbt_vars=step.dbt_vars,
                 )
                 reporter.ok("dbt build completed")
                 expected_rows = read_csv_rows(step.expected_target_csv)
