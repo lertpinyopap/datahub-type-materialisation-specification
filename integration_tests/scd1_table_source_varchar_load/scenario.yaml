@@ -1,0 +1,19 @@
+name: scd1_table_source_varchar_load
+description: SCD1 load from a prefixed VARCHAR source table.
+spec: spec/account.yaml
+target:
+  expected_columns:
+    - ACCOUNT_ID
+    - ACCOUNT_NAME
+    - ACCOUNT_PRIORITY
+  order_by:
+    - ACCOUNT_ID
+checks:
+  - The source table is created with the TMS integration table prefix.
+  - The generated dbt source model reads from the live source table.
+  - Both source rows are materialised into the typed target table.
+  - account_priority is loaded from a VARCHAR source column into a numeric target column.
+loads:
+  - name: load_001
+    source_csv: data/load_001_source.csv
+    expected_target: data/expected_after_load_001.csv

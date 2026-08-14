@@ -204,7 +204,7 @@
       "properties": {
         "materialisation_type": {
           "type": "string",
-          "enum": ["view", "materialised_view", "table"]
+          "enum": ["table"]
         },
         "failure_mode": {
           "type": "string",

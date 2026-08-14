@@ -1,0 +1,53 @@
+id: scd1_csv_transforms
+control_data:
+  materialisation_type: table
+  change_type: scd1
+source:
+  format: csv
+  header: true
+  load_method: dbt_seed
+  seed:
+    file: ../data/load_001_source.csv
+    name: account_transform_source_seed
+target:
+  id: account
+  schema: business
+  fields:
+    - id: account_id
+      source:
+        pos: 0
+        column: account_id
+      data_type: varchar(20)
+      transforms:
+        - type: trim
+    - id: account_name
+      source:
+        pos: 1
+        column: account_name
+      data_type: varchar(255)
+      transforms:
+        - type: trim
+    - id: left_trim_code
+      source:
+        pos: 2
+        column: left_trim_code
+      data_type: varchar(50)
+      transforms:
+        - type: trim
+          side: left
+    - id: right_trim_code
+      source:
+        pos: 3
+        column: right_trim_code
+      data_type: varchar(50)
+      transforms:
+        - type: trim
+          side: right
+    - id: rounded_amount
+      source:
+        pos: 4
+        column: rounded_amount
+      data_type: number(10,2)
+      transforms:
+        - type: round
+          scale: 2

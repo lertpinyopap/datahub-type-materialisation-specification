@@ -16,25 +16,49 @@ Run live integration scenarios explicitly:
 TMS_RUN_INTEGRATION=1 .venv/bin/python -m pytest integration_tests
 ```
 
-Required live environment variables:
+## What Gets Tested
 
-- `TMS_SNOWFLAKE_ACCOUNT`
-- `TMS_SNOWFLAKE_USER`
-- `TMS_SNOWFLAKE_WAREHOUSE`
-- `TMS_SNOWFLAKE_DATABASE`
+The normal unit suite exercises the integration framework without connecting to
+Snowflake. It checks that scenarios are discoverable, generated projects are
+well formed, prefixed relation names are used, generated dbt unit tests contain
+the expected fixtures, and runner safeguards such as cleanup and prefix
+validation behave as intended.
 
-Authentication can use either:
+The live integration suite executes each scenario against Snowflake. For each
+scenario, the runner:
 
-- `TMS_SNOWFLAKE_PASSWORD`
-- `TMS_SNOWFLAKE_AUTHENTICATOR`, for example `externalbrowser`
+1. Generates a transient dbt project from the scenario spec.
+2. Prefixes all generated live relations with `TMS_INTEGRATION_TABLE_PREFIX`.
+3. Cleans up the scenario's prefixed relations before the test starts.
+4. Creates any declared initial target table and rows.
+5. Replaces the generated seed with each load fixture.
+6. Runs `tms dbt-build`.
+7. Reads the target table and compares it with the expected CSV.
+8. Cleans up generated relations unless `TMS_INTEGRATION_KEEP_TABLES=1`.
+
+The generated dbt unit tests validate first-load transformation behavior inside
+the generated dbt project. Live scenario assertions validate database end state
+after dbt has run, including incremental behavior that depends on existing
+target rows.
+
+Live runs print Rich-formatted progress directly to the terminal, including the
+scenario name, setup steps, dbt generation/build steps, target-row checks, and
+cleanup behavior. Set `TMS_INTEGRATION_PROGRESS=0` to silence this progress
+output.
+
+Live database connection settings are read from `~/.snowflake/config.toml`.
+The runner reads Snowflake CLI-style `[connections.<name>]` entries and defaults
+to `[connections.tms_int]`.
 
 Optional variables:
 
-- `TMS_SNOWFLAKE_ROLE`
+- `TMS_SNOWFLAKE_CONNECTION`, to use a profile other than `tms_int`.
 - `TMS_INTEGRATION_SCHEMA`, default `TMP`
-- `TMS_INTEGRATION_TABLE_PREFIX`, default `TMS_INT__`
+- `TMS_INTEGRATION_TABLE_PREFIX`, default `TMS_INT__`; must be at least three
+  characters long and end with `__`.
 - `TMS_INTEGRATION_KEEP_TABLES=1` keeps generated relations after a successful
   or failed run for inspection.
+- `TMS_INTEGRATION_PROGRESS=0` disables live progress output.
 - `DBT_PROFILES_DIR`, if the generated project should use a non-default dbt
   profiles directory.
 

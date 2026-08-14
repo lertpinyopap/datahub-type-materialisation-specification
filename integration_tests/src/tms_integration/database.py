@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import csv
 import os
+import tomllib
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
@@ -11,6 +12,8 @@ import snowflake.connector
 import yaml
 
 from type_materialisation.spec import GENERATED_METADATA_FIELD_TYPES
+
+DEFAULT_SNOWFLAKE_CONNECTION = "tms_int"
 
 
 class IntegrationConfigError(RuntimeError):
@@ -23,32 +26,46 @@ def live_database_enabled() -> bool:
 
 @contextmanager
 def snowflake_connection() -> Iterator[Any]:
-    required = [
-        "TMS_SNOWFLAKE_ACCOUNT",
-        "TMS_SNOWFLAKE_USER",
-        "TMS_SNOWFLAKE_WAREHOUSE",
-        "TMS_SNOWFLAKE_DATABASE",
-    ]
-    missing = [name for name in required if not os.environ.get(name)]
-    if missing:
-        raise IntegrationConfigError(f"missing live integration environment variables: {', '.join(missing)}")
-    connect_kwargs: dict[str, Any] = {
-        "account": os.environ["TMS_SNOWFLAKE_ACCOUNT"],
-        "user": os.environ["TMS_SNOWFLAKE_USER"],
-        "warehouse": os.environ["TMS_SNOWFLAKE_WAREHOUSE"],
-        "database": os.environ["TMS_SNOWFLAKE_DATABASE"],
-    }
-    if os.environ.get("TMS_SNOWFLAKE_PASSWORD"):
-        connect_kwargs["password"] = os.environ["TMS_SNOWFLAKE_PASSWORD"]
-    if os.environ.get("TMS_SNOWFLAKE_AUTHENTICATOR"):
-        connect_kwargs["authenticator"] = os.environ["TMS_SNOWFLAKE_AUTHENTICATOR"]
-    if os.environ.get("TMS_SNOWFLAKE_ROLE"):
-        connect_kwargs["role"] = os.environ["TMS_SNOWFLAKE_ROLE"]
+    connect_kwargs = load_snowflake_connection_config()
     connection = snowflake.connector.connect(**connect_kwargs)
     try:
         yield connection
     finally:
         connection.close()
+
+
+def load_snowflake_connection_config(
+    *,
+    config_path: Path | None = None,
+    connection_name: str | None = None,
+) -> dict[str, Any]:
+    path = config_path or Path.home() / ".snowflake" / "config.toml"
+    if not path.exists():
+        raise IntegrationConfigError(
+            f"Snowflake config file was not found at {path}. "
+            "Create it with a [connections.tms_int] profile, or set "
+            "TMS_SNOWFLAKE_CONNECTION to a profile that exists in that file."
+        )
+    with path.open("rb") as handle:
+        config = tomllib.load(handle)
+    connections = config.get("connections")
+    if not isinstance(connections, dict) or not connections:
+        raise IntegrationConfigError(f"Snowflake config has no [connections.<name>] entries: {path}")
+    selected_name = connection_name or os.environ.get("TMS_SNOWFLAKE_CONNECTION") or _default_connection_name(config, connections)
+    raw_connection = connections.get(selected_name)
+    if not isinstance(raw_connection, dict):
+        available = ", ".join(sorted(str(name) for name in connections))
+        raise IntegrationConfigError(
+            f"Snowflake connection profile `{selected_name}` was not found in {path}. "
+            f"Add [connections.{selected_name}] or set TMS_SNOWFLAKE_CONNECTION to one of: {available}"
+        )
+    connect_kwargs = _normalise_snowflake_connection(raw_connection)
+    missing = [name for name in ("account", "user", "warehouse", "database") if not connect_kwargs.get(name)]
+    if missing:
+        raise IntegrationConfigError(
+            f"Snowflake connection `{selected_name}` is missing required keys: {', '.join(missing)}"
+        )
+    return connect_kwargs
 
 
 def create_schema(connection: Any, schema: str) -> None:
@@ -58,8 +75,8 @@ def create_schema(connection: Any, schema: str) -> None:
 def drop_relations(connection: Any, schema: str, relation_names: list[str]) -> None:
     for relation_name in relation_names:
         qualified_name = f"{quote_identifier(schema)}.{quote_identifier(relation_name)}"
-        _execute(connection, f"drop view if exists {qualified_name}")
-        _execute(connection, f"drop table if exists {qualified_name}")
+        _drop_relation_if_exists(connection, "view", qualified_name)
+        _drop_relation_if_exists(connection, "table", qualified_name)
 
 
 def create_target_table_from_spec(connection: Any, spec_path: Path, schema: str) -> str:
@@ -74,6 +91,34 @@ def create_target_table_from_spec(connection: Any, spec_path: Path, schema: str)
     ddl = f"create or replace table {quote_identifier(schema)}.{quote_identifier(table)} ({', '.join(columns)})"
     _execute(connection, ddl)
     return table
+
+
+def replace_source_table_from_csv(connection: Any, schema: str, table: str, csv_path: Path) -> None:
+    with csv_path.open("r", encoding="utf-8", newline="") as handle:
+        rows = list(csv.DictReader(handle))
+    if not rows:
+        raise IntegrationConfigError(f"source table CSV must contain at least one row: {csv_path}")
+    raw_columns = [str(column) for column in rows[0]]
+    columns = [column.upper() for column in raw_columns]
+    column_definitions = ", ".join(
+        f"{quote_identifier(column)} varchar"
+        for column in columns
+    )
+    _execute(
+        connection,
+        f"create or replace table {quote_identifier(schema)}.{quote_identifier(table)} ({column_definitions})",
+    )
+    sql = (
+        f"insert into {quote_identifier(schema)}.{quote_identifier(table)} "
+        f"({', '.join(quote_identifier(column) for column in columns)}) "
+        f"values ({', '.join('%s' for _ in columns)})"
+    )
+    cursor = connection.cursor()
+    try:
+        for row in rows:
+            cursor.execute(sql, tuple(row[column] for column in raw_columns))
+    finally:
+        cursor.close()
 
 
 def insert_csv_rows(connection: Any, schema: str, table: str, csv_path: Path, spec_path: Path) -> None:
@@ -92,10 +137,10 @@ def insert_csv_rows(connection: Any, schema: str, table: str, csv_path: Path, sp
         f"({', '.join(quote_identifier(column) for column in columns)}) "
         f"select {select_list}"
     )
-    values = [tuple(row[column] for column in row) for row in rows]
     cursor = connection.cursor()
     try:
-        cursor.executemany(sql, values)
+        for row in rows:
+            cursor.execute(sql, tuple(row[column] for column in columns))
     finally:
         cursor.close()
 
@@ -155,9 +200,69 @@ def _physical_name(value: Any) -> str:
     return str(value).upper()
 
 
+def _default_connection_name(config: dict[str, Any], connections: dict[str, Any]) -> str:
+    del config
+    if DEFAULT_SNOWFLAKE_CONNECTION in connections:
+        return DEFAULT_SNOWFLAKE_CONNECTION
+    available = ", ".join(sorted(str(name) for name in connections))
+    raise IntegrationConfigError(
+        f"Snowflake connection profile `{DEFAULT_SNOWFLAKE_CONNECTION}` was not found. "
+        f"Add [connections.{DEFAULT_SNOWFLAKE_CONNECTION}] to ~/.snowflake/config.toml, "
+        f"or set TMS_SNOWFLAKE_CONNECTION to one of: {available}"
+    )
+
+
+def _normalise_snowflake_connection(raw_connection: dict[str, Any]) -> dict[str, Any]:
+    aliases = {
+        "accountname": "account",
+        "username": "user",
+        "dbname": "database",
+        "warehousename": "warehouse",
+        "rolename": "role",
+    }
+    allowed_keys = {
+        "account",
+        "user",
+        "password",
+        "warehouse",
+        "database",
+        "schema",
+        "role",
+        "authenticator",
+        "host",
+        "port",
+        "protocol",
+        "region",
+        "passcode",
+        "passcode_in_password",
+        "private_key_file",
+        "private_key_file_pwd",
+        "token",
+        "client_store_temporary_credential",
+        "client_request_mfa_token",
+        "login_timeout",
+        "network_timeout",
+        "session_parameters",
+    }
+    normalised: dict[str, Any] = {}
+    for key, value in raw_connection.items():
+        connector_key = aliases.get(str(key), str(key))
+        if connector_key in allowed_keys:
+            normalised[connector_key] = value
+    return normalised
+
+
 def _execute(connection: Any, sql: str) -> None:
     cursor = connection.cursor()
     try:
         cursor.execute(sql)
     finally:
         cursor.close()
+
+
+def _drop_relation_if_exists(connection: Any, relation_type: str, qualified_name: str) -> None:
+    try:
+        _execute(connection, f"drop {relation_type} if exists {qualified_name}")
+    except snowflake.connector.errors.ProgrammingError as exc:
+        if getattr(exc, "errno", None) != 2203:
+            raise

@@ -187,7 +187,7 @@ control_data ::=
   quarantine?
   job?
 
-materialisation_type ::= view | materialised_view | table
+materialisation_type ::= table
 failure_mode ::= fail_file | quarantine_row
 change_type ::= scd1 | scd2
 scd ::= scd_config
@@ -198,7 +198,8 @@ job ::= job_table
 `control_data` defines behavior for the whole materialisation.
 
 `materialisation_type` defines the kind of typed output to produce. If omitted,
-implementations should default to `table`.
+implementations should default to `table`. The current specification only
+supports table materialisations.
 
 `failure_mode` defines how validation or conversion failures are handled. If
 omitted, implementations should default to `fail_file`.
@@ -216,9 +217,6 @@ for complete specifications and has no default.
 
 `materialisation_type` values:
 
-- `view`: produce a typed view over the source data.
-- `materialised_view`: produce a persisted or incrementally refreshed typed
-  view.
 - `table`: produce a typed table populated from the source data.
 
 `failure_mode` values:

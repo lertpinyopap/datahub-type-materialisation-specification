@@ -203,6 +203,32 @@ def test_concrete_control_data_requires_change_type(tmp_path: Path) -> None:
     assert any("'change_type' is a required property" in message for message in diagnostic_messages(diagnostics))
 
 
+def test_materialisation_type_only_supports_table(tmp_path: Path) -> None:
+    _, diagnostics = parse_yaml(
+        tmp_path,
+        """
+        id: account_spec
+        control_data:
+          materialisation_type: view
+          change_type: scd1
+        source:
+          format: csv
+          header: true
+        target:
+          id: account
+          schema: business
+          fields:
+            - id: account_id
+              source:
+                pos: 0
+                column: account_id
+              data_type: varchar(20)
+        """,
+    )
+
+    assert any("'view' is not one of ['table']" in message for message in diagnostic_messages(diagnostics))
+
+
 def test_csv_dbt_seed_without_header_accepts_position_only_fields(tmp_path: Path) -> None:
     _, diagnostics = parse_yaml(
         tmp_path,

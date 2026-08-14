@@ -68,6 +68,22 @@ def test_generation_fails_for_non_empty_output_directory(tmp_path: Path) -> None
     assert "output directory already exists and is not empty" in result.errors[0].message
 
 
+def test_generation_rejects_non_table_materialisation_type(tmp_path: Path) -> None:
+    result, _ = generate(
+        tmp_path,
+        csv_generation_spec(
+            extra_control="""
+            control_data:
+              materialisation_type: view
+              change_type: scd1
+            """
+        ),
+    )
+
+    assert diagnostic_messages(result.errors) == ["dbt generation supports materialisation_type = table"]
+    assert result.errors[0].location == "$.control_data.materialisation_type"
+
+
 def test_csv_stage_location_omits_database_when_not_supplied(tmp_path: Path) -> None:
     # Omitted databases are resolved by dbt/Snowflake context, not by the generator.
     result, output_dir = generate(tmp_path, csv_generation_spec())
@@ -381,9 +397,31 @@ def test_unique_fields_generate_dbt_validation_sql(tmp_path: Path) -> None:
     assert result.errors == []
     guard_sql = (output_dir / "models" / "generated" / "account__validation_guard.sql").read_text(encoding="utf-8")
     not_implemented = (output_dir / "NOT_IMPLEMENTED.md").read_text(encoding="utf-8")
-    assert "count(*) over (partition by try_cast(ACCOUNT_ID as varchar(20))) > 1" in guard_sql
+    assert "count(*) over (partition by try_cast(cast(ACCOUNT_ID as varchar) as varchar(20))) > 1" in guard_sql
     assert "field `account_id` duplicates a value for a unique field" in guard_sql
     assert "uniqueness checks in generated dbt SQL" not in not_implemented
+
+
+def test_numeric_transform_validation_casts_via_varchar_for_snowflake(tmp_path: Path) -> None:
+    result, output_dir = generate(
+        tmp_path,
+        csv_generation_spec(
+            fields="""
+        - id: rounded_amount
+          source:
+            pos: 0
+            column: rounded_amount
+          data_type: number(10,2)
+          transforms:
+            - type: round
+              scale: 2
+            """
+        ),
+    )
+
+    assert result.errors == []
+    guard_sql = (output_dir / "models" / "generated" / "account__validation_guard.sql").read_text(encoding="utf-8")
+    assert "try_cast(cast(round(ROUNDED_AMOUNT, 2) as varchar) as number(10,2)) is null" in guard_sql
 
 
 def test_table_source_generation_reads_from_configured_relation(tmp_path: Path) -> None:
@@ -541,7 +579,7 @@ def test_quarantine_model_uses_generated_uniqueness_validation(tmp_path: Path) -
 
     assert result.errors == []
     quarantine_sql = (output_dir / "models" / "generated" / "account__quarantine.sql").read_text(encoding="utf-8")
-    assert "count(*) over (partition by try_cast(ACCOUNT_ID as varchar(20))) > 1" in quarantine_sql
+    assert "count(*) over (partition by try_cast(cast(ACCOUNT_ID as varchar) as varchar(20))) > 1" in quarantine_sql
     assert "from validation_rows" in quarantine_sql
 
 
@@ -817,6 +855,44 @@ def test_scd2_missing_from_source_queries_existing_target(tmp_path: Path) -> Non
     assert "where coalesce(current_target.IS_DELETED_FLAG, 'N') <> 'Y'" in model_sql
     assert "from incoming_key_rows as incoming_key" in model_sql
     assert "existing_target.VALID_FROM_DATETIME as TMS_VALID_FROM_DATETIME_CANDIDATE" in model_sql
+
+
+def test_scd2_missing_from_source_unit_tests_override_is_incremental(tmp_path: Path) -> None:
+    csv_path = tmp_path / "account.csv"
+    csv_path.write_text("account_id,account_name\nACCT000000000001,Acme Trading\n", encoding="utf-8")
+    result, output_dir = generate(
+        tmp_path,
+        csv_generation_spec(
+            extra_control="""
+            control_data:
+              change_type: scd2
+              scd:
+                business_key:
+                  - account_id
+                delete_detection:
+                  mode: missing_from_source
+                valid_from_datetime:
+                  valid_from_datetime_selection: load_datetime
+            """,
+            fields="""
+        - id: account_id
+          source:
+            pos: 0
+            column: account_id
+          data_type: varchar(20)
+        - id: account_name
+          source:
+            pos: 1
+            column: account_name
+          data_type: varchar(255)
+            """,
+        ),
+        unit_test_csv=csv_path,
+    )
+
+    assert result.errors == []
+    unit_test_yaml = load_yaml(output_dir / "models" / "generated" / "account_unit_tests.yml")
+    assert unit_test_yaml["unit_tests"][0]["overrides"] == {"macros": {"is_incremental": False}}
 
 
 def test_scd2_generation_rejects_sparse_validity_mode(tmp_path: Path) -> None:

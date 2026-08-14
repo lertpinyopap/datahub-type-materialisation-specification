@@ -1,0 +1,24 @@
+id: scd1_table_source_varchar_load
+control_data:
+  materialisation_type: table
+  change_type: scd1
+source:
+  format: table
+  schema: TMP
+  table: account_source_table
+target:
+  id: account
+  schema: business
+  fields:
+    - id: account_id
+      source:
+        column: account_id
+      data_type: varchar(20)
+    - id: account_name
+      source:
+        column: account_name
+      data_type: varchar(255)
+    - id: account_priority
+      source:
+        column: account_priority
+      data_type: number(10,0)

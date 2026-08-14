@@ -16,9 +16,11 @@ from .database import (
     drop_relations,
     fetch_rows,
     insert_csv_rows,
+    replace_source_table_from_csv,
     snowflake_connection,
 )
 from .dbt_runner import run_tms_dbt_project
+from .reporting import IntegrationReporter
 from .scenario import Scenario
 
 
@@ -43,28 +45,69 @@ def generate_project_for_scenario(scenario: Scenario, output_dir: Path) -> Gener
     return GeneratedScenarioProject(project_dir=output_dir, spec_path=spec_path)
 
 
-def run_live_scenario(scenario: Scenario, work_dir: Path) -> None:
+def run_live_scenario(
+    scenario: Scenario,
+    work_dir: Path,
+    reporter: IntegrationReporter | None = None,
+) -> None:
+    if reporter is not None:
+        _run_live_scenario(scenario, work_dir, reporter)
+        return
+    with IntegrationReporter() as owned_reporter:
+        _run_live_scenario(scenario, work_dir, owned_reporter)
+
+
+def _run_live_scenario(
+    scenario: Scenario,
+    work_dir: Path,
+    reporter: IntegrationReporter,
+) -> None:
     target_schema = _target_schema_name()
+    table_prefix = _table_prefix()
+    reporter.scenario_start(scenario, schema=target_schema, prefix=table_prefix)
+
     project_dir = work_dir / "dbt_project"
+    reporter.step("Generating dbt project", str(project_dir))
     generated_project = generate_project_for_scenario(scenario, project_dir)
+    reporter.ok("Generated dbt project", str(generated_project.project_dir))
+
+    reporter.step("Connecting to Snowflake")
     with snowflake_connection() as connection:
+        reporter.ok("Connected to Snowflake")
+        reporter.step("Ensuring target schema exists", target_schema)
         create_schema(connection, target_schema)
         relation_names = _generated_relation_names(generated_project.spec_path)
+        reporter.step("Pre-run cleanup of scenario relations", ", ".join(relation_names))
         drop_relations(connection, target_schema, relation_names)
         try:
             table = _target_table_name(generated_project.spec_path)
             if scenario.initial_target_csv is not None:
+                reporter.step("Setting up initial target table", scenario.initial_target_csv.name)
                 table = create_target_table_from_spec(connection, generated_project.spec_path, target_schema)
                 insert_csv_rows(connection, target_schema, table, scenario.initial_target_csv, generated_project.spec_path)
+                reporter.ok("Initial target data loaded", table)
+            else:
+                reporter.step("Starting without an existing target table", table)
             for step in scenario.loads:
-                _replace_seed(project_dir, step.source_csv)
+                reporter.load_start(step)
+                if _source_format(generated_project.spec_path) == "table":
+                    source_table = _source_table_name(generated_project.spec_path)
+                    reporter.step("Creating source table from VARCHAR CSV", source_table)
+                    replace_source_table_from_csv(connection, target_schema, source_table, step.source_csv)
+                    reporter.ok("Source table loaded", step.source_csv.name)
+                else:
+                    reporter.step("Replacing generated seed data", step.source_csv.name)
+                    _replace_seed(project_dir, step.source_csv)
+                reporter.step("Running tms dbt-build")
                 run_tms_dbt_project(
                     spec_path=generated_project.spec_path,
                     project_dir=project_dir,
                     target_schema=target_schema,
                 )
+                reporter.ok("dbt build completed")
                 expected_rows = read_csv_rows(step.expected_target_csv)
                 columns = scenario.expected_columns or list(expected_rows[0])
+                reporter.step("Reading target rows", table)
                 actual_rows = fetch_rows(
                     connection,
                     target_schema,
@@ -73,10 +116,21 @@ def run_live_scenario(scenario: Scenario, work_dir: Path) -> None:
                     generated_project.spec_path,
                     scenario.order_by,
                 )
-                assert_rows_equal(actual_rows, expected_rows)
+                reporter.checks(scenario.checks)
+                assert_rows_equal(
+                    actual_rows,
+                    expected_rows,
+                    preserve_whitespace=scenario.preserve_whitespace,
+                )
+                reporter.ok("Expected target rows matched", f"{len(actual_rows)} rows")
         finally:
             if not _keep_tables_enabled():
+                reporter.step("Final cleanup of scenario relations", ", ".join(relation_names))
                 drop_relations(connection, target_schema, relation_names)
+                reporter.ok("Cleanup completed")
+            else:
+                reporter.step("Keeping generated relations for inspection", ", ".join(relation_names))
+    reporter.scenario_passed(scenario)
 
 
 def _replace_seed(project_dir: Path, source_csv: Path) -> None:
@@ -92,7 +146,12 @@ def _target_schema_name() -> str:
 
 
 def _table_prefix() -> str:
-    return os.environ.get("TMS_INTEGRATION_TABLE_PREFIX", "TMS_INT__").upper()
+    prefix = os.environ.get("TMS_INTEGRATION_TABLE_PREFIX", "TMS_INT__").upper()
+    if len(prefix) < 3 or not prefix.endswith("__"):
+        raise AssertionError(
+            "TMS_INTEGRATION_TABLE_PREFIX must be at least 3 characters long and end with `__`"
+        )
+    return prefix
 
 
 def _keep_tables_enabled() -> bool:
@@ -130,6 +189,9 @@ def _prefix_spec_relations(spec: dict, original_spec_path: Path) -> None:
             if not seed_file.is_absolute():
                 seed_file = original_spec_path.parent / seed_file
             seed["file"] = str(seed_file)
+    elif isinstance(source, dict) and source.get("format") == "table":
+        source["schema"] = "{{ var('target_schema', 'TMP') }}"
+        source["table"] = _prefixed_logical_name(str(source["table"]))
 
     control_data = spec.setdefault("control_data", {})
     if isinstance(control_data, dict):
@@ -151,6 +213,20 @@ def _target_table_name(spec_path: Path) -> str:
     return str(spec["target"].get("table_name", spec["target"]["id"])).upper()
 
 
+def _source_format(spec_path: Path) -> str:
+    spec = _load_spec(spec_path)
+    source = spec.get("source", {})
+    return str(source.get("format", "")) if isinstance(source, dict) else ""
+
+
+def _source_table_name(spec_path: Path) -> str:
+    spec = _load_spec(spec_path)
+    source = spec.get("source", {})
+    if not isinstance(source, dict) or source.get("format") != "table":
+        raise AssertionError(f"scenario spec does not define a table source: {spec_path}")
+    return str(source["table"]).upper()
+
+
 def _generated_relation_names(spec_path: Path) -> list[str]:
     spec = _load_spec(spec_path)
     target_id = str(spec["target"]["id"])
@@ -168,6 +244,8 @@ def _generated_relation_names(spec_path: Path) -> list[str]:
         f"{target_id}__validation_guard",
         str(job_table),
     ]
+    if isinstance(source, dict) and source.get("format") == "table":
+        relation_names.append(str(source["table"]))
     return sorted({relation_name.upper() for relation_name in relation_names})
 
 

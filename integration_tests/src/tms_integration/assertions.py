@@ -13,24 +13,32 @@ def read_csv_rows(path: Path) -> list[dict[str, str]]:
         ]
 
 
-def normalise_rows(rows: list[dict[str, Any]]) -> list[dict[str, str]]:
+def normalise_rows(rows: list[dict[str, Any]], *, preserve_whitespace: bool = False) -> list[dict[str, str]]:
     normalised = [
-        {str(key).upper(): _normalise_value(value) for key, value in row.items()}
+        {str(key).upper(): _normalise_value(value, preserve_whitespace=preserve_whitespace) for key, value in row.items()}
         for row in rows
     ]
     return sorted(normalised, key=lambda row: tuple(row.get(column, "") for column in sorted(row)))
 
 
-def assert_rows_equal(actual_rows: list[dict[str, Any]], expected_rows: list[dict[str, Any]]) -> None:
-    actual = normalise_rows(actual_rows)
-    expected = normalise_rows(expected_rows)
+def assert_rows_equal(
+    actual_rows: list[dict[str, Any]],
+    expected_rows: list[dict[str, Any]],
+    *,
+    preserve_whitespace: bool = False,
+) -> None:
+    actual = normalise_rows(actual_rows, preserve_whitespace=preserve_whitespace)
+    expected = normalise_rows(expected_rows, preserve_whitespace=preserve_whitespace)
     assert actual == expected
 
 
-def _normalise_value(value: Any) -> str:
+def _normalise_value(value: Any, *, preserve_whitespace: bool) -> str:
     if value is None:
         return ""
-    text = str(value).strip()
+    text = str(value)
     if text.endswith("+00:00"):
         text = text.removesuffix("+00:00").strip()
+    if preserve_whitespace:
+        return text
+    text = text.strip()
     return " ".join(text.split())

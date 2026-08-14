@@ -15,6 +15,11 @@ target:
   order_by:
     - ACCOUNT_ID
     - VALID_FROM_DATETIME
+checks:
+  - A1 was present in the current target but absent from the incoming source.
+  - The previous active A1 row is end dated at the delete valid_from_datetime.
+  - A1 has a new current row with is_deleted_flag = Y.
+  - A2 remains current, active, and open-ended because it is still present with the same business hash.
 loads:
   - name: load_001
     source_csv: data/load_001_source.csv

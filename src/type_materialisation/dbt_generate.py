@@ -125,8 +125,13 @@ def generate_dbt_project(options: GenerateDbtOptions) -> DbtGenerationResult:
 
 def _unsupported_for_initial_dbt_generation(spec: dict[str, Any]) -> list[Diagnostic]:
     diagnostics: list[Diagnostic] = []
+    materialisation_type = spec.get("control_data", {}).get("materialisation_type", "table")
     source = spec.get("source", {})
     scd = _scd_config(spec)
+    if materialisation_type != "table":
+        diagnostics.append(
+            Diagnostic("dbt generation supports materialisation_type = table", "$.control_data.materialisation_type")
+        )
     if not isinstance(source, dict) or source.get("format") not in {"csv", "table"}:
         diagnostics.append(Diagnostic("dbt generation supports source.format = csv or table", "$.source.format"))
     if _change_type(spec) == "scd2" and scd.get("valid_from_to_mode", "continuous") == "sparse":
@@ -330,7 +335,7 @@ def _write_table_source_model(spec: dict[str, Any], options: GenerateDbtOptions,
 def _write_final_model(spec: dict[str, Any], result: DbtGenerationResult) -> None:
     target = spec["target"]
     table_name = target.get("table_name", target["id"])
-    materialized = spec.get("control_data", {}).get("materialisation_type", "view")
+    materialized = spec.get("control_data", {}).get("materialisation_type", "table")
     source_model = _source_model_name(target["id"])
     quarantine_enabled = _quarantine_enabled(spec)
     fail_file_enabled = _failure_mode(spec) == "fail_file"
@@ -953,22 +958,32 @@ def _write_unit_tests(
     result.warnings.extend(warnings)
     target = spec["target"]
     source_fixture_sql = _unit_test_fixture_sql(source_rows, _source_fixture_column_types(spec))
-    unit_tests = [
+    given = [
         {
-            "name": f"{target['id']}_sample_source",
-            "model": target["id"],
-            "given": [
-                {
-                    "input": f"ref('{_source_model_name(target['id'])}')",
-                    "format": "sql",
-                    "rows": source_fixture_sql,
-                }
-            ],
-            "expect": {
-                "rows": expected_rows,
-            },
+            "input": f"ref('{_source_model_name(target['id'])}')",
+            "format": "sql",
+            "rows": source_fixture_sql,
         }
     ]
+    if _failure_mode(spec) == "fail_file":
+        given.append(
+            {
+                "input": f"ref('{_validation_guard_model_name(target['id'])}')",
+                "format": "sql",
+                "rows": _unit_test_validation_guard_fixture_sql(),
+            }
+        )
+    unit_test = {
+        "name": f"{target['id']}_sample_source",
+        "model": target["id"],
+        "given": given,
+        "expect": {
+            "rows": expected_rows,
+        },
+    }
+    if _scd2_uses_target_merge(spec):
+        unit_test["overrides"] = _unit_test_non_incremental_overrides()
+    unit_tests = [unit_test]
     if _quarantine_enabled(spec):
         unit_tests.append(
             {
@@ -989,6 +1004,19 @@ def _write_unit_tests(
     data = {"unit_tests": unit_tests}
     content = yaml.safe_dump(data, sort_keys=False)
     _write(result.output_dir / "models" / "generated" / f"{target['id']}_unit_tests.yml", content, result)
+
+
+def _unit_test_validation_guard_fixture_sql() -> str:
+    return "\n".join(
+        [
+            "select",
+            "    cast(0 as number) as VALIDATION_FAILURE_GUARD",
+        ]
+    )
+
+
+def _unit_test_non_incremental_overrides() -> dict[str, dict[str, bool]]:
+    return {"macros": {"is_incremental": False}}
 
 
 def _unit_test_fixture_sql(rows: list[dict[str, Any]], column_types: dict[str, str]) -> str:
@@ -1331,9 +1359,10 @@ def _field_failure_expressions(field: dict[str, Any]) -> list[str]:
             "end"
         )
     elif sql_type.name not in {"text"}:
+        typed_expression = _try_cast_expression(expression, data_type)
         failures.append(
             "case "
-            f"when {expression} is not null and try_cast({expression} as {data_type}) is null "
+            f"when {expression} is not null and {typed_expression} is null "
             f"then {_sql_string(f'field `{field_id}` does not match data_type `{data_type}`')} "
             "end"
         )
@@ -1372,25 +1401,28 @@ def _field_failure_expressions(field: dict[str, Any]) -> list[str]:
                 "end"
             )
         elif rule_type == "min_value":
+            numeric_expression = _try_cast_expression(expression, "number")
             failures.append(
                 "case "
-                f"when {expression} is not null and try_cast({expression} as number) < {rule['value']} "
+                f"when {expression} is not null and {numeric_expression} < {rule['value']} "
                 f"then {_sql_string(f'field `{field_id}` is less than {rule['value']}')} "
                 "end"
             )
         elif rule_type == "max_value":
+            numeric_expression = _try_cast_expression(expression, "number")
             failures.append(
                 "case "
-                f"when {expression} is not null and try_cast({expression} as number) > {rule['value']} "
+                f"when {expression} is not null and {numeric_expression} > {rule['value']} "
                 f"then {_sql_string(f'field `{field_id}` is greater than {rule['value']}')} "
                 "end"
             )
         elif rule_type == "precision":
             precision = int(rule["precision"])
             scale = int(rule["scale"]) if "scale" in rule else 0
+            typed_expression = _try_cast_expression(expression, f"number({precision}, {scale})")
             failures.append(
                 "case "
-                f"when {expression} is not null and try_cast({expression} as number({precision}, {scale})) is null "
+                f"when {expression} is not null and {typed_expression} is null "
                 f"then {_sql_string(f'field `{field_id}` does not fit validation precision/scale')} "
                 "end"
             )
@@ -1405,7 +1437,7 @@ def _field_uniqueness_failure_expressions(field: dict[str, Any]) -> list[str]:
         return []
     field_id = field["id"]
     expression = _field_expression(field)
-    typed_expression = f"try_cast({expression} as {field['data_type']})"
+    typed_expression = _try_cast_expression(expression, field["data_type"])
     return [
         "case "
         f"when {typed_expression} is not null "
@@ -1413,6 +1445,10 @@ def _field_uniqueness_failure_expressions(field: dict[str, Any]) -> list[str]:
         f"then {_sql_string(f'field `{field_id}` duplicates a value for a unique field')} "
         "end"
     ]
+
+
+def _try_cast_expression(expression: str, data_type: str) -> str:
+    return f"try_cast(cast({expression} as varchar) as {data_type})"
 
 
 def _validation_rows_cte(spec: dict[str, Any], *, trailing_comma: bool) -> list[str]:

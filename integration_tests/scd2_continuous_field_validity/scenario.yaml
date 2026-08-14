@@ -15,6 +15,12 @@ target:
   order_by:
     - ACCOUNT_ID
     - VALID_FROM_DATETIME
+checks:
+  - A1 has two SCD2 versions after one source load.
+  - The first A1 version starts at platform start of time.
+  - The first A1 version is end dated exactly at the second version's valid_from_datetime.
+  - The latest A1 version is current and open-ended at platform end of time.
+  - No A1 version is marked as deleted.
 loads:
   - name: load_001
     source_csv: data/load_001_source.csv

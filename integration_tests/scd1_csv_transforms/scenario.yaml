@@ -1,0 +1,22 @@
+name: scd1_csv_transforms
+description: SCD1 CSV load applying trim and round transforms.
+spec: spec/account.yaml
+target:
+  preserve_whitespace: true
+  expected_columns:
+    - ACCOUNT_ID
+    - ACCOUNT_NAME
+    - LEFT_TRIM_CODE
+    - RIGHT_TRIM_CODE
+    - ROUNDED_AMOUNT
+  order_by:
+    - ACCOUNT_ID
+checks:
+  - account_id and account_name are trimmed on both sides.
+  - left_trim_code removes leading whitespace.
+  - right_trim_code removes trailing whitespace.
+  - rounded_amount is rounded to two decimal places.
+loads:
+  - name: load_001
+    source_csv: data/load_001_source.csv
+    expected_target: data/expected_after_load_001.csv

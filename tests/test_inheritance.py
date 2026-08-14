@@ -538,7 +538,7 @@ def test_dbt_generation_resolves_inheritance_before_generating(tmp_path: Path) -
         """
         id: base
         control_data:
-          materialisation_type: view
+          materialisation_type: table
           change_type: scd1
         source:
           format: csv

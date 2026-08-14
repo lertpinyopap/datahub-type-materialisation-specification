@@ -21,6 +21,7 @@ class LoadStep:
 @dataclass(frozen=True)
 class Scenario:
     name: str
+    description: str
     root: Path
     readme: Path
     spec_path: Path
@@ -28,6 +29,8 @@ class Scenario:
     initial_target_csv: Path | None
     expected_columns: list[str]
     order_by: list[str]
+    preserve_whitespace: bool
+    checks: list[str]
     loads: list[LoadStep]
 
 
@@ -44,6 +47,7 @@ def load_scenario(root: Path) -> Scenario:
     readme = _required_file(root, "README.md")
     manifest = _load_yaml_mapping(manifest_path)
     name = _required_string(manifest, "name", manifest_path)
+    description = _optional_string(manifest.get("description"))
     spec_path = _required_file(root, _required_string(manifest, "spec", manifest_path))
 
     dbt_config = manifest.get("dbt", {})
@@ -58,11 +62,14 @@ def load_scenario(root: Path) -> Scenario:
         raise ScenarioError(f"{manifest_path}: `target` must be a mapping")
     expected_columns = [str(column).upper() for column in target_config.get("expected_columns", [])]
     order_by = [str(column).upper() for column in target_config.get("order_by", [])]
+    preserve_whitespace = target_config.get("preserve_whitespace") is True
+    checks = _optional_string_list(manifest.get("checks"), manifest_path, "checks")
 
     initial_target_csv = _optional_file(root, manifest.get("initial_target"))
     loads = _load_steps(root, manifest, manifest_path)
     return Scenario(
         name=name,
+        description=description,
         root=root,
         readme=readme,
         spec_path=spec_path,
@@ -70,6 +77,8 @@ def load_scenario(root: Path) -> Scenario:
         initial_target_csv=initial_target_csv,
         expected_columns=expected_columns,
         order_by=order_by,
+        preserve_whitespace=preserve_whitespace,
+        checks=checks,
         loads=loads,
     )
 
@@ -101,6 +110,18 @@ def _required_string(mapping: dict[str, Any], key: str, path: Path) -> str:
     value = mapping.get(key)
     if not isinstance(value, str) or not value:
         raise ScenarioError(f"{path}: `{key}` is required")
+    return value
+
+
+def _optional_string(value: Any) -> str:
+    return value if isinstance(value, str) else ""
+
+
+def _optional_string_list(value: Any, path: Path, key: str) -> list[str]:
+    if value is None:
+        return []
+    if not isinstance(value, list) or not all(isinstance(item, str) and item for item in value):
+        raise ScenarioError(f"{path}: `{key}` must be a list of non-empty strings")
     return value
 
 
