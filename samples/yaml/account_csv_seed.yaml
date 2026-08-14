@@ -6,7 +6,7 @@ control_data:
   change_type: scd1
   failure_mode: quarantine_row
   quarantine:
-    table: account_seed_QUARANTINE
+    table: account_seed__QUARANTINE
 source:
   format: csv
   header: true

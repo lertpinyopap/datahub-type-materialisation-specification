@@ -1,0 +1,5 @@
+EVENT_TYPE,RESULT,DETAILS,LOADED_COUNT,QUARANTINE_COUNT,AUDIT_DATA_PROCESS_KEY
+JOB_END,FAILED,dbt run failed; inspect dbt artifacts for runtime details,,,manual
+JOB_END,FAILED,validation errors failed the load,,,manual
+JOB_START,,,,,manual
+JOB_START,,,,,manual

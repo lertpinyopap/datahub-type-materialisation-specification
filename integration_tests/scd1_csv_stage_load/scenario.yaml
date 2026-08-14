@@ -1,0 +1,19 @@
+name: scd1_csv_stage_load
+description: SCD1 load from a CSV file already available in a Snowflake stage.
+spec: spec/account.yaml
+target:
+  expected_columns:
+    - ACCOUNT_ID
+    - ACCOUNT_NAME
+    - ACCOUNT_PRIORITY
+  order_by:
+    - ACCOUNT_ID
+checks:
+  - The integration runner creates the prefixed CSV stage for test setup.
+  - The source spec points at a staged CSV file rather than a dbt seed.
+  - The generated dbt source model reads from the prefixed stage and filename.
+  - Both staged source rows are materialised into the typed target table.
+loads:
+  - name: load_001
+    source_csv: data/load_001_source.csv
+    expected_target: data/expected_after_load_001.csv

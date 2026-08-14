@@ -106,6 +106,44 @@ tms dbt-build --spec samples/yaml/account_csv.yaml --target dev --vars '{target_
 tms dbt-build --spec samples/yaml/account_csv_seed.yaml --project-dir tmp/dbt-account-seed --target dev
 ```
 
+### Expected Build Flow
+
+The normal `tms` flow is:
+
+```mermaid
+flowchart LR
+    spec([<b>Inputs</b><br/>YAML spec<br/>ONLY source of truth])
+    parse["<div style='width: 190px; height: 56px; text-align: center;'><b>tms parse</b><br/>Optional early error check</div>"]
+    generate["<div style='width: 190px; height: 56px; text-align: center;'><b>tms generate-dbt</b><br/>Write ephemeral dbt project</div>"]
+    build["<div style='width: 190px; height: 56px; text-align: center;'><b>tms dbt-build</b><br/>Run dbt build</div>"]
+    output([<b>Outputs</b><br/>Typed target tables<br/>quarantine tables<br/>job details])
+
+    spec -.-> parse
+    parse --> generate
+    spec -.-> generate
+    generate --> build
+    build -.-> output
+
+    classDef io fill:#eef7ff,stroke:#2563eb,stroke-width:2px,stroke-dasharray: 5 4,color:#111827;
+    classDef step fill:#ffffff,stroke:#6b7280,stroke-width:1px,color:#111827;
+    class spec,output io;
+    class parse,generate,build step;
+```
+
+```bash
+tms parse --spec samples/yaml/account_csv.yaml
+tms generate-dbt --spec samples/yaml/account_csv.yaml
+tms dbt-build --spec samples/yaml/account_csv.yaml --target dev --vars '{target_schema: TMP, tms_job_schema: TMP}'
+```
+
+`tms parse` is not required before generation, because `tms generate-dbt`
+also parses and validates the spec before writing files. It is useful as a fast
+preflight step when you want early errors without creating dbt artifacts.
+
+The generated dbt project is ephemeral: it is written to a tmp directory and
+can be deleted and recreated from the specification. Do not treat generated dbt
+files as durable project state. The YAML spec is the ONLY source of truth.
+
 If `--output-dir` is omitted, `tms generate-dbt` writes to
 `./tmp/<spec file stem>`, the same default project directory used by
 `tms dbt-build`. The output directory must either not exist or be empty;
@@ -158,7 +196,7 @@ control_data:
   change_type: scd1
   failure_mode: quarantine_row
   quarantine:
-    table: account_QUARANTINE
+    table: account__QUARANTINE
 source:
   format: csv
   header: true

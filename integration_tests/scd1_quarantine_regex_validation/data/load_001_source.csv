@@ -1,0 +1,5 @@
+account_id,account_name,account_status
+A001,Acme Trading,ACTIVE
+A002,Beta Banking,INACTIVE
+BAD3,Malformed Account,ACTIVE
+A004,Delta Finance,ACTIVE

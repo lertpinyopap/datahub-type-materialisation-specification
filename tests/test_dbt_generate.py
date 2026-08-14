@@ -352,7 +352,7 @@ def test_generated_project_uses_named_local_user_profile(tmp_path: Path) -> None
     assert output_dir / "profiles.yml" not in result.files
 
 
-def test_fail_file_generates_validation_guard_model(tmp_path: Path) -> None:
+def test_fail_load_generates_validation_guard_model(tmp_path: Path) -> None:
     result, output_dir = generate(
         tmp_path,
         csv_generation_spec(
@@ -376,7 +376,7 @@ def test_fail_file_generates_validation_guard_model(tmp_path: Path) -> None:
     assert "field `account_id` is null but not nullable" in guard_sql
     assert "cast('TYPE_MATERIALISATION_VALIDATION_FAILED' as number)" in guard_sql
     assert "where FAILURE_DETAILS is not null" in guard_sql
-    assert "fail_file validation failure enforcement" not in not_implemented
+    assert "fail_load validation failure enforcement" not in not_implemented
 
 
 def test_unique_fields_generate_dbt_validation_sql(tmp_path: Path) -> None:
@@ -487,6 +487,9 @@ def test_job_event_hooks_are_generated_at_project_run_level(tmp_path: Path) -> N
     assert 'var("job_id"' not in project["on-run-end"][1]
     assert 'var("job_result", "COMPLETED")' not in project["on-run-end"][1]
     assert 'var("job_details", none)' in project["on-run-end"][1]
+    assert "validation_guard_failed.value" in project["on-run-end"][1]
+    assert "'validation errors failed the load'" in project["on-run-end"][1]
+    assert "'dbt run failed; inspect dbt artifacts for runtime details'" in project["on-run-end"][1]
     assert "case when quarantine_counts.QUARANTINE_COUNT > 0 then 'COMPLETED_WITH_QUARANTINE' else 'COMPLETED' end" in project["on-run-end"][1]
     assert "'COMPLETED_WITH_QUARANTINE'" in project["on-run-end"][1]
     assert "case when quarantine_counts.QUARANTINE_COUNT > 0 then 'validation errors written to quarantine output' else null end" in project["on-run-end"][1]
@@ -513,6 +516,15 @@ def test_generated_schema_name_macro_supports_runtime_schema_override(tmp_path: 
     assert "{{ override_schema | trim | upper }}" in macro_sql
 
 
+def test_generated_project_never_creates_schemas(tmp_path: Path) -> None:
+    result, output_dir = generate(tmp_path, csv_generation_spec())
+
+    assert result.errors == []
+    macro_sql = (output_dir / "macros" / "generated" / "create_schema.sql").read_text(encoding="utf-8")
+    assert "{% macro create_schema(relation) -%}" in macro_sql
+    assert "create schema" not in macro_sql.lower()
+
+
 def test_job_event_hooks_include_quarantine_relation_when_enabled(tmp_path: Path) -> None:
     result, output_dir = generate(
         tmp_path,
@@ -527,10 +539,10 @@ def test_job_event_hooks_include_quarantine_relation_when_enabled(tmp_path: Path
 
     assert result.errors == []
     project = load_yaml(output_dir / "dbt_project.yml")
-    expected_quarantine = "cast('{{ target.database | upper }}.{{ var(\"target_schema\", \"BUSINESS\") | upper }}.ACCOUNT_QUARANTINE' as varchar(1024))"
+    expected_quarantine = "cast('{{ target.database | upper }}.{{ var(\"target_schema\", \"BUSINESS\") | upper }}.ACCOUNT__QUARANTINE' as varchar(1024))"
     assert expected_quarantine in project["on-run-start"][1]
     assert expected_quarantine in project["on-run-end"][1]
-    assert 'adapter.get_relation(database=(target.database | upper), schema=(var("target_schema", "BUSINESS") | upper), identifier=\'ACCOUNT_QUARANTINE\')' in project["on-run-end"][1]
+    assert 'adapter.get_relation(database=(target.database | upper), schema=(var("target_schema", "BUSINESS") | upper), identifier=\'ACCOUNT__QUARANTINE\')' in project["on-run-end"][1]
 
 
 def test_quarantine_model_is_incremental_and_append_only(tmp_path: Path) -> None:
@@ -551,7 +563,7 @@ def test_quarantine_model_is_incremental_and_append_only(tmp_path: Path) -> None
     assert "materialized='incremental'" in quarantine_sql
     assert "incremental_strategy='append'" in quarantine_sql
     assert "on_schema_change='append_new_columns'" in quarantine_sql
-    assert "alias='ACCOUNT_QUARANTINE'" in quarantine_sql
+    assert "alias='ACCOUNT__QUARANTINE'" in quarantine_sql
     assert "cast('{{ invocation_id }}' as varchar(64)) as JOB_ID" in quarantine_sql
     assert 'var("job_id"' not in quarantine_sql
     assert "FAILURE_DETAILS" in quarantine_sql

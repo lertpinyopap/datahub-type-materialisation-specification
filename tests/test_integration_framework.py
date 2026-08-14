@@ -21,14 +21,23 @@ from tms_integration.database import (  # noqa: E402
     DEFAULT_SNOWFLAKE_CONNECTION,
     IntegrationConfigError,
     drop_relations,
+    drop_stages,
+    fetch_relation_rows,
     insert_csv_rows,
     load_snowflake_connection_config,
+    replace_csv_stage_from_file,
     replace_source_table_from_csv,
 )
 from tms_integration.runner import (  # noqa: E402
+    CustomAssertionContext,
+    _force_runtime_failure_model,
     _generated_relation_names,
+    _generated_stage_names,
     _keep_tables_enabled,
+    _load_custom_assertions,
+    _source_csv_stage_name,
     _source_format,
+    _source_load_method,
     _source_table_name,
     _table_prefix,
     _target_schema_name,
@@ -54,6 +63,8 @@ class RecordingCursor:
         self.executed: list[tuple[str, tuple[str, ...]]] = []
         self.executemany_called = False
         self.closed = False
+        self.description = []
+        self.rows = []
 
     def execute(self, sql, values=None):
         self.executed.append((sql, values))
@@ -65,12 +76,21 @@ class RecordingCursor:
     def close(self):
         self.closed = True
 
+    def fetchall(self):
+        return self.rows
+
+    def fetchone(self):
+        return self.rows[0]
+
 
 def test_integration_scenarios_are_discoverable_and_self_contained() -> None:
     scenario_roots = discover_scenarios(INTEGRATION_ROOT)
 
     assert [path.name for path in scenario_roots] == [
+        "job_details_failure_modes",
+        "scd1_csv_stage_load",
         "scd1_csv_transforms",
+        "scd1_quarantine_regex_validation",
         "scd1_table_source_varchar_load",
         "scd2_continuous_field_validity",
         "scd2_hash_skip_current_duplicate",
@@ -87,8 +107,16 @@ def test_integration_scenarios_are_discoverable_and_self_contained() -> None:
         assert (scenario.root / "src").is_dir()
         for step in scenario.loads:
             assert step.source_csv.exists()
-            assert step.expected_target_csv.exists()
+            assert isinstance(step.force_runtime_failure, bool)
+            if step.expect_dbt_success:
+                assert step.expected_target_csv is not None
+            if step.expected_target_csv is not None:
+                assert step.expected_target_csv.exists()
             assert isinstance(step.dbt_vars, dict)
+            for expected_relation in step.expected_relations:
+                assert expected_relation.expected_csv.exists()
+                assert expected_relation.columns
+    assert (INTEGRATION_ROOT / "scd1_csv_stage_load" / "src" / "assertions.py").is_file()
 
 
 def test_integration_scenarios_generate_dbt_unit_tests(tmp_path: Path) -> None:
@@ -128,6 +156,23 @@ def test_live_reporter_prints_scenario_steps_and_checks() -> None:
     assert "Setting up initial target table" in text
     assert "The previous active A1 row is end dated at the delete valid_from_datetime." in text
     assert "Expected target rows matched" in text
+
+
+def test_live_reporter_prints_clear_failure_panel() -> None:
+    scenario = load_scenario(INTEGRATION_ROOT / "scd2_missing_from_source_delete")
+    output = StringIO()
+    reporter = IntegrationReporter(Console(file=output, force_terminal=False), enabled=True)
+
+    reporter.scenario_start(scenario, schema="TMP", prefix="TMS_INT__")
+    reporter.step("Running tms dbt-build")
+    reporter.scenario_failed(scenario, RuntimeError("dbt build failed\nextra details later"))
+
+    text = output.getvalue()
+    assert "TMS integration failed" in text
+    assert "scd2_missing_from_source_delete" in text
+    assert "last step: Running tms dbt-build" in text
+    assert "RuntimeError: dbt build failed" in text
+    assert "pytest traceback follows below" in text
 
 
 def test_live_reporter_closes_owned_output(monkeypatch) -> None:
@@ -209,6 +254,15 @@ def test_live_runner_cleanup_ignores_snowflake_relation_type_mismatch(monkeypatc
     ]
 
 
+def test_live_runner_drops_stage_relations(monkeypatch) -> None:
+    commands: list[str] = []
+    monkeypatch.setattr(integration_database, "_execute", lambda connection, sql: commands.append(sql))
+
+    drop_stages(object(), "TMP", ["TMS_INT__CSV_STAGE"])
+
+    assert commands == ["drop stage if exists TMP.TMS_INT__CSV_STAGE"]
+
+
 def test_initial_target_load_uses_single_row_inserts(tmp_path: Path) -> None:
     spec_path = tmp_path / "spec.yaml"
     spec_path.write_text(
@@ -263,6 +317,49 @@ def test_source_table_load_creates_varchar_table_from_csv(monkeypatch, tmp_path:
     assert cursor.closed is True
 
 
+def test_csv_stage_load_creates_stage_and_puts_file(monkeypatch, tmp_path: Path) -> None:
+    csv_path = tmp_path / "load_001_source.csv"
+    csv_path.write_text("A1,One\n", encoding="utf-8")
+    commands: list[str] = []
+    monkeypatch.setattr(integration_database, "_execute", lambda connection, sql: commands.append(sql))
+
+    replace_csv_stage_from_file(object(), "TMP", "TMS_INT__CSV_STAGE", csv_path)
+
+    assert commands == [
+        (
+            "create or replace stage TMP.TMS_INT__CSV_STAGE "
+            "file_format = (type = csv field_delimiter = ',' skip_header = 0 "
+            "field_optionally_enclosed_by = '\"')"
+        ),
+        f"put '{csv_path.resolve().as_uri()}' @TMP.TMS_INT__CSV_STAGE auto_compress=false overwrite=true",
+    ]
+
+
+def test_fetch_relation_rows_casts_requested_columns_to_varchar() -> None:
+    cursor = RecordingCursor()
+    cursor.description = [("FAILURE_DETAILS",), ("ACCOUNT_ID",)]
+    cursor.rows = [("field `account_id` does not match regex", "BAD3")]
+
+    rows = fetch_relation_rows(
+        RecordingConnection(cursor),
+        "TMP",
+        "TMS_INT__ACCOUNT__QUARANTINE",
+        ["FAILURE_DETAILS", "ACCOUNT_ID"],
+        ["ACCOUNT_ID"],
+    )
+
+    assert rows == [{"FAILURE_DETAILS": "field `account_id` does not match regex", "ACCOUNT_ID": "BAD3"}]
+    assert cursor.executed == [
+        (
+            "select cast(FAILURE_DETAILS as varchar) as FAILURE_DETAILS, "
+            "cast(ACCOUNT_ID as varchar) as ACCOUNT_ID "
+            "from TMP.TMS_INT__ACCOUNT__QUARANTINE order by ACCOUNT_ID",
+            None,
+        )
+    ]
+    assert cursor.closed is True
+
+
 def test_integration_dbt_runner_uses_tms_dbt_build(monkeypatch, tmp_path: Path) -> None:
     commands: list[list[str]] = []
     spec_path = tmp_path / "spec.yaml"
@@ -307,6 +404,34 @@ def test_integration_dbt_runner_uses_tms_dbt_build(monkeypatch, tmp_path: Path) 
             ),
         ]
     ]
+
+
+def test_integration_dbt_runner_can_return_expected_failure(monkeypatch, tmp_path: Path) -> None:
+    spec_path = tmp_path / "spec.yaml"
+    project_dir = tmp_path / "project"
+    spec_path.write_text("id: account\n", encoding="utf-8")
+
+    monkeypatch.setattr(dbt_runner.shutil, "which", lambda executable: "/venv/bin/tms" if executable == "tms" else None)
+    monkeypatch.setattr(
+        dbt_runner.subprocess,
+        "run",
+        lambda command, *, check, capture_output, text: subprocess.CompletedProcess(
+            command,
+            1,
+            stdout="dbt failed",
+            stderr="",
+        ),
+    )
+
+    result = dbt_runner.run_tms_dbt_project(
+        spec_path=spec_path,
+        project_dir=project_dir,
+        target_schema="TMP",
+        require_success=False,
+    )
+
+    assert result.returncode == 1
+    assert result.stdout == "dbt failed"
 
 
 def test_snowflake_connection_config_defaults_to_tms_int(tmp_path: Path) -> None:
@@ -470,6 +595,7 @@ def test_live_runner_identifies_generated_relations_for_cleanup(tmp_path: Path) 
     assert "TMS_INT__ACCOUNT" in relation_names
     assert "TMS_INT__ACCOUNT__SOURCE" in relation_names
     assert "TMS_INT__ACCOUNT_SOURCE_SEED" in relation_names
+    assert "TMS_INT__ACCOUNT__QUARANTINE" in relation_names
     assert "TMS_INT__TYPE_MATERIALISATION_JOBS" in relation_names
 
 
@@ -492,6 +618,56 @@ def test_table_source_scenario_prefixes_source_table_and_adds_it_to_cleanup(tmp_
     assert "from {{ var('target_schema', 'TMP') }}.TMS_INT__ACCOUNT_SOURCE_TABLE" in source_sql
 
 
+def test_csv_stage_scenario_prefixes_stage_and_adds_it_to_cleanup(tmp_path: Path) -> None:
+    scenario = load_scenario(INTEGRATION_ROOT / "scd1_csv_stage_load")
+    output_dir = tmp_path / scenario.name
+
+    generated_project = generate_project_for_scenario(scenario, output_dir)
+
+    spec = load_yaml(generated_project.spec_path)
+    stage_names = _generated_stage_names(generated_project.spec_path)
+    source_sql = (
+        output_dir / "models" / "generated" / "tms_int__account__source.sql"
+    ).read_text(encoding="utf-8")
+    assert spec["source"]["location"]["schema"] == "{{ var('target_schema', 'TMP') }}"
+    assert spec["source"]["location"]["stage"] == "tms_int__csv_stage"
+    assert _source_format(generated_project.spec_path) == "csv"
+    assert _source_load_method(generated_project.spec_path) == "stage"
+    assert _source_csv_stage_name(generated_project.spec_path) == "TMS_INT__CSV_STAGE"
+    assert stage_names == ["TMS_INT__CSV_STAGE"]
+    assert "from @{{ var('target_schema', 'TMP') }}.TMS_INT__CSV_STAGE/load_001_source.csv" in source_sql
+
+
+def test_csv_stage_scenario_custom_src_assertion_runs() -> None:
+    scenario = load_scenario(INTEGRATION_ROOT / "scd1_csv_stage_load")
+    assertions = _load_custom_assertions(scenario.root)
+    cursor = RecordingCursor()
+    cursor.rows = [(2, 30)]
+
+    assertions.assert_after_load(
+        CustomAssertionContext(
+            connection=RecordingConnection(cursor),
+            scenario_name=scenario.name,
+            load_name="load_001",
+            target_schema="TMP",
+            table_prefix="TMS_INT__",
+            target_table="TMS_INT__ACCOUNT",
+            project_dir=INTEGRATION_ROOT,
+            spec_path=scenario.spec_path,
+            source_csv=scenario.loads[0].source_csv,
+        )
+    )
+
+    assert cursor.executed == [
+        (
+            "select count(*) as ROW_COUNT, sum(ACCOUNT_PRIORITY) as PRIORITY_TOTAL "
+            "from TMP.TMS_INT__ACCOUNT",
+            None,
+        )
+    ]
+    assert cursor.closed is True
+
+
 def test_csv_transform_scenario_generates_transform_sql(tmp_path: Path) -> None:
     scenario = load_scenario(INTEGRATION_ROOT / "scd1_csv_transforms")
     output_dir = tmp_path / scenario.name
@@ -504,6 +680,49 @@ def test_csv_transform_scenario_generates_transform_sql(tmp_path: Path) -> None:
     assert "cast(ltrim(LEFT_TRIM_CODE) as varchar(50)) as LEFT_TRIM_CODE" in model_sql
     assert "cast(rtrim(RIGHT_TRIM_CODE) as varchar(50)) as RIGHT_TRIM_CODE" in model_sql
     assert "cast(round(ROUNDED_AMOUNT, 2) as number(10,2)) as ROUNDED_AMOUNT" in model_sql
+
+
+def test_quarantine_scenario_generates_regex_validation_and_quarantine_alias(tmp_path: Path) -> None:
+    scenario = load_scenario(INTEGRATION_ROOT / "scd1_quarantine_regex_validation")
+    output_dir = tmp_path / scenario.name
+
+    generate_project_for_scenario(scenario, output_dir)
+
+    model_sql = (output_dir / "models" / "generated" / "tms_int__account.sql").read_text(encoding="utf-8")
+    quarantine_sql = (
+        output_dir / "models" / "generated" / "tms_int__account__quarantine.sql"
+    ).read_text(encoding="utf-8")
+    assert "regexp_like(ACCOUNT_ID, '^A[0-9]{3}$')" in model_sql
+    assert "where FAILURE_DETAILS is null" in model_sql
+    assert "alias='TMS_INT__ACCOUNT__QUARANTINE'" in quarantine_sql
+    assert "where FAILURE_DETAILS is not null" in quarantine_sql
+
+
+def test_job_failure_scenario_generates_fail_load_validation_guard(tmp_path: Path) -> None:
+    scenario = load_scenario(INTEGRATION_ROOT / "job_details_failure_modes")
+    output_dir = tmp_path / scenario.name
+
+    generate_project_for_scenario(scenario, output_dir)
+
+    model_sql = (output_dir / "models" / "generated" / "tms_int__account.sql").read_text(encoding="utf-8")
+    guard_sql = (
+        output_dir / "models" / "generated" / "tms_int__account__validation_guard.sql"
+    ).read_text(encoding="utf-8")
+    assert "ref('tms_int__account__validation_guard')" in model_sql
+    assert "cast('TYPE_MATERIALISATION_VALIDATION_FAILED' as number)" in guard_sql
+    assert "field `account_id` does not match regex" in guard_sql
+
+
+def test_job_failure_scenario_can_force_runtime_model_failure(tmp_path: Path) -> None:
+    scenario = load_scenario(INTEGRATION_ROOT / "job_details_failure_modes")
+    output_dir = tmp_path / scenario.name
+    generated_project = generate_project_for_scenario(scenario, output_dir)
+
+    _force_runtime_failure_model(output_dir, generated_project.spec_path)
+
+    model_sql = (output_dir / "models" / "generated" / "tms_int__account.sql").read_text(encoding="utf-8")
+    assert "TMS_INT__RELATION_THAT_DOES_NOT_EXIST_FOR_RUNTIME_FAILURE" in model_sql
+    assert "{{ config(materialized='table') }}" in model_sql
 
 
 def test_hash_skip_scenario_generates_business_hash_skip_sql(tmp_path: Path) -> None:

@@ -31,10 +31,13 @@ scenario, the runner:
 2. Prefixes all generated live relations with `TMS_INTEGRATION_TABLE_PREFIX`.
 3. Cleans up the scenario's prefixed relations before the test starts.
 4. Creates any declared initial target table and rows.
-5. Replaces the generated seed with each load fixture.
+5. Replaces the generated seed with each load fixture, creates table-source
+   fixtures, or uploads staged CSV fixtures depending on the scenario source.
 6. Runs `tms dbt-build`.
 7. Reads the target table and compares it with the expected CSV.
-8. Cleans up generated relations unless `TMS_INTEGRATION_KEEP_TABLES=1`.
+8. Reads any extra expected relations, such as quarantine or job-detail tables,
+   and compares them with their expected CSVs.
+9. Cleans up generated relations unless `TMS_INTEGRATION_KEEP_TABLES=1`.
 
 The generated dbt unit tests validate first-load transformation behavior inside
 the generated dbt project. Live scenario assertions validate database end state
@@ -62,13 +65,14 @@ Optional variables:
 - `DBT_PROFILES_DIR`, if the generated project should use a non-default dbt
   profiles directory.
 
-The live runner creates the target schema when needed but does not drop it.
-Cleanup is relation-scoped within `TMS_INTEGRATION_SCHEMA`. A pre-run cleanup
-always removes the scenario's prefixed relations so reruns start from a clean
-state, even if a previous run used `TMS_INTEGRATION_KEEP_TABLES=1`. Final cleanup
-runs by default and is skipped only when `TMS_INTEGRATION_KEEP_TABLES=1`.
-Generated live relations are prefixed with `TMS_INTEGRATION_TABLE_PREFIX` to
-reduce the chance of clashing with other objects in `TMP`.
+The live runner assumes `TMS_INTEGRATION_SCHEMA` already exists and never
+creates or drops schemas. Cleanup is relation-scoped within
+`TMS_INTEGRATION_SCHEMA`. A pre-run cleanup always removes the scenario's
+prefixed relations and stages so reruns start from a clean state, even if a
+previous run used `TMS_INTEGRATION_KEEP_TABLES=1`. Final cleanup runs by
+default and is skipped only when `TMS_INTEGRATION_KEEP_TABLES=1`. Generated live
+relations and stages are prefixed with `TMS_INTEGRATION_TABLE_PREFIX` to reduce
+the chance of clashing with other objects in `TMP`.
 
 Scenario folders follow this structure:
 
@@ -81,6 +85,8 @@ integration_tests/<scenario_name>/
   data/
     load_001_source.csv
     expected_after_load_001.csv
+    expected_quarantine_after_load_001.csv
+    expected_jobs_after_load_001.csv
   src/
     README.md
 ```
@@ -88,3 +94,15 @@ integration_tests/<scenario_name>/
 `integration_tests/src/tms_integration/` contains the reusable Python runner.
 Scenario `src/` folders are reserved for scenario-specific SQL, Python, or notes
 when a case needs custom setup or assertions.
+
+## Custom Assertions
+
+If a scenario contains `src/assertions.py`, the live runner imports it and calls
+`assert_after_load(context)` after the normal expected-CSV checks for each load.
+The context includes the Snowflake connection, scenario and load names, target
+schema, table prefix, generated target table, generated dbt project directory,
+prefixed spec path, and load source CSV path.
+
+Use this for assertions that are clearer as focused SQL checks than as another
+expected CSV. For example, `scd1_csv_stage_load/src/assertions.py` checks an
+aggregate over the loaded target table.

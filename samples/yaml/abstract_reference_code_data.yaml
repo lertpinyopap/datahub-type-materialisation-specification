@@ -7,7 +7,7 @@ control_data:
   failure_mode: quarantine_row
   quarantine:
     schema: TMP
-    table: reference_code_QUARANTINE
+    table: reference_code__QUARANTINE
 source:
   format: table
   schema: TMP

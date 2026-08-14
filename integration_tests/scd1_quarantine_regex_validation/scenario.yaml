@@ -1,0 +1,43 @@
+name: scd1_quarantine_regex_validation
+description: SCD1 quarantine row mode loads valid rows and quarantines regex failures.
+spec: spec/account.yaml
+target:
+  expected_columns:
+    - ACCOUNT_ID
+    - ACCOUNT_NAME
+    - ACCOUNT_STATUS
+  order_by:
+    - ACCOUNT_ID
+checks:
+  - Valid rows are written to the typed target table.
+  - The account_id regex validation rejects the malformed source row.
+  - The rejected row is written to the default quarantine table.
+  - Quarantine processing does not fail the whole load.
+loads:
+  - name: load_001
+    source_csv: data/load_001_source.csv
+    expected_target: data/expected_after_load_001.csv
+    expected_relations:
+      - name: quarantine
+        table: account__quarantine
+        expected_csv: data/expected_quarantine_after_load_001.csv
+        columns:
+          - FAILURE_DETAILS
+          - ACCOUNT_ID
+          - ACCOUNT_NAME
+          - ACCOUNT_STATUS
+        order_by:
+          - ACCOUNT_ID
+      - name: job details
+        table: type_materialisation_jobs
+        expected_csv: data/expected_jobs_after_load_001.csv
+        columns:
+          - EVENT_TYPE
+          - RESULT
+          - DETAILS
+          - LOADED_COUNT
+          - QUARANTINE_COUNT
+          - AUDIT_DATA_PROCESS_KEY
+        order_by:
+          - EVENT_TYPE
+          - DETAILS

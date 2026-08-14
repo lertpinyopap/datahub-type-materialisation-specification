@@ -68,15 +68,37 @@ def load_snowflake_connection_config(
     return connect_kwargs
 
 
-def create_schema(connection: Any, schema: str) -> None:
-    _execute(connection, f"create schema if not exists {quote_identifier(schema)}")
-
-
 def drop_relations(connection: Any, schema: str, relation_names: list[str]) -> None:
     for relation_name in relation_names:
         qualified_name = f"{quote_identifier(schema)}.{quote_identifier(relation_name)}"
         _drop_relation_if_exists(connection, "view", qualified_name)
         _drop_relation_if_exists(connection, "table", qualified_name)
+
+
+def drop_stages(connection: Any, schema: str, stage_names: list[str]) -> None:
+    for stage_name in stage_names:
+        qualified_name = f"{quote_identifier(schema)}.{quote_identifier(stage_name)}"
+        _drop_relation_if_exists(connection, "stage", qualified_name)
+
+
+def replace_csv_stage_from_file(connection: Any, schema: str, stage: str, csv_path: Path) -> None:
+    qualified_stage = f"{quote_identifier(schema)}.{quote_identifier(stage)}"
+    _execute(
+        connection,
+        (
+            f"create or replace stage {qualified_stage} "
+            "file_format = ("
+            "type = csv "
+            "field_delimiter = ',' "
+            "skip_header = 0 "
+            "field_optionally_enclosed_by = '\"'"
+            ")"
+        ),
+    )
+    _execute(
+        connection,
+        f"put '{csv_path.resolve().as_uri()}' @{qualified_stage} auto_compress=false overwrite=true",
+    )
 
 
 def create_target_table_from_spec(connection: Any, spec_path: Path, schema: str) -> str:
@@ -155,6 +177,29 @@ def fetch_rows(
 ) -> list[dict[str, Any]]:
     column_types = _target_column_types(spec_path)
     select_list = ", ".join(_format_column(column, column_types[column]) for column in columns)
+    order_clause = ""
+    if order_by:
+        order_clause = " order by " + ", ".join(quote_identifier(column) for column in order_by)
+    cursor = connection.cursor()
+    try:
+        cursor.execute(f"select {select_list} from {quote_identifier(schema)}.{quote_identifier(table)}{order_clause}")
+        names = [column[0].upper() for column in cursor.description]
+        return [dict(zip(names, row, strict=True)) for row in cursor.fetchall()]
+    finally:
+        cursor.close()
+
+
+def fetch_relation_rows(
+    connection: Any,
+    schema: str,
+    table: str,
+    columns: list[str],
+    order_by: list[str],
+) -> list[dict[str, Any]]:
+    select_list = ", ".join(
+        f"cast({quote_identifier(column)} as varchar) as {quote_identifier(column)}"
+        for column in columns
+    )
     order_clause = ""
     if order_by:
         order_clause = " order by " + ", ".join(quote_identifier(column) for column in order_by)

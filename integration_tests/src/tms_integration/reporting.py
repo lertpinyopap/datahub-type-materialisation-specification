@@ -15,6 +15,7 @@ from .scenario import LoadStep, Scenario
 class IntegrationReporter:
     def __init__(self, console: Console | None = None, *, enabled: bool | None = None) -> None:
         self.enabled = _progress_enabled() if enabled is None else enabled
+        self._current_step: str | None = None
         self._output: TextIO | None = None
         if console is None:
             if self.enabled:
@@ -60,6 +61,7 @@ class IntegrationReporter:
         )
 
     def step(self, label: str, detail: str | None = None) -> None:
+        self._current_step = label if detail is None else f"{label}: {detail}"
         message = f"[bold cyan]->[/bold cyan] {label}"
         if detail:
             message = f"{message} [dim]{detail}[/dim]"
@@ -85,6 +87,21 @@ class IntegrationReporter:
     def scenario_passed(self, scenario: Scenario) -> None:
         self.ok("Scenario passed", scenario.name)
 
+    def scenario_failed(self, scenario: Scenario, exc: BaseException) -> None:
+        details = [
+            f"[bold]{scenario.name}[/bold]",
+            f"[dim]last step: {self._current_step or 'not started'}[/dim]",
+            f"{type(exc).__name__}: {_exception_message(exc)}",
+            "[dim]pytest traceback follows below[/dim]",
+        ]
+        self._print(
+            Panel.fit(
+                "\n".join(details),
+                title="TMS integration failed",
+                border_style="red",
+            )
+        )
+
     def _print(self, renderable: object) -> None:
         if self.enabled:
             self.console.print(renderable)
@@ -99,3 +116,11 @@ def _terminal_output() -> TextIO:
         return Path("/dev/tty").open("w", encoding="utf-8", buffering=1)
     except OSError:
         return sys.stderr
+
+
+def _exception_message(exc: BaseException) -> str:
+    message = str(exc).strip()
+    if not message:
+        return "no exception message"
+    first_line = message.splitlines()[0].strip()
+    return first_line or "no exception message"

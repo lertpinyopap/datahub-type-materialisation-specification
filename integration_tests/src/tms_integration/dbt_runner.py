@@ -28,6 +28,7 @@ def run_tms_dbt_project(
     project_dir: Path,
     target_schema: str,
     dbt_vars: dict[str, Any] | None = None,
+    require_success: bool = True,
 ) -> TmsResult:
     executable = _tms_executable()
     merged_vars = {"target_schema": target_schema, "tms_job_schema": target_schema}
@@ -47,7 +48,7 @@ def run_tms_dbt_project(
     ]
     completed = subprocess.run(command, check=False, capture_output=True, text=True)
     result = TmsResult(args=command, returncode=completed.returncode, stdout=completed.stdout, stderr=completed.stderr)
-    if completed.returncode != 0:
+    if require_success and completed.returncode != 0:
         raise TmsCommandError(
             "\n".join(
                 [

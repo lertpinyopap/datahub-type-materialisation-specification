@@ -208,7 +208,7 @@
         },
         "failure_mode": {
           "type": "string",
-          "enum": ["fail_file", "quarantine_row"]
+          "enum": ["fail_load", "quarantine_row"]
         },
         "change_type": {
           "type": "string",

@@ -188,7 +188,7 @@ control_data ::=
   job?
 
 materialisation_type ::= table
-failure_mode ::= fail_file | quarantine_row
+failure_mode ::= fail_load | quarantine_row
 change_type ::= scd1 | scd2
 scd ::= scd_config
 quarantine ::= quarantine_table
@@ -202,7 +202,7 @@ implementations should default to `table`. The current specification only
 supports table materialisations.
 
 `failure_mode` defines how validation or conversion failures are handled. If
-omitted, implementations should default to `fail_file`.
+omitted, implementations should default to `fail_load`.
 
 `change_type` explicitly declares the change-handling behavior. It is required
 for complete specifications and has no default.
@@ -221,7 +221,7 @@ for complete specifications and has no default.
 
 `failure_mode` values:
 
-- `fail_file`: fail the whole materialisation when a record fails validation or
+- `fail_load`: fail the whole materialisation load when a record fails validation or
   type conversion.
 - `quarantine_row`: write the failing record to quarantine output and continue
   processing subsequent records.
@@ -254,7 +254,7 @@ control_data:
       fields:
         - source_changed_at
   quarantine:
-    table: account_QUARANTINE
+    table: account__QUARANTINE
   job:
     schema: BUSINESS
     table: TYPE_MATERIALISATION_JOBS
@@ -289,7 +289,7 @@ If `quarantine.schema` is omitted, implementations should default it to the
 resolved target schema.
 
 If `quarantine.table` is omitted, implementations should default it to the
-resolved target table name with `_QUARANTINE` appended.
+resolved target table name with `__QUARANTINE` appended.
 
 The quarantine table must be created if it does not exist. If it already exists,
 it must be expanded to cover the number of source fields present in the source
@@ -321,7 +321,7 @@ control_data:
   quarantine:
     database: ops
     schema: data_quality
-    table: account_load_QUARANTINE
+    table: account_load__QUARANTINE
 ```
 
 ### 5.2 Job Table

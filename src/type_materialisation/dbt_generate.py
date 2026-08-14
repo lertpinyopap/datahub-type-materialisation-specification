@@ -111,7 +111,7 @@ def generate_dbt_project(options: GenerateDbtOptions) -> DbtGenerationResult:
     except ValueError as exc:
         result.errors.append(Diagnostic(str(exc), "$.target.fields"))
         return result
-    if _failure_mode(spec) == "fail_file":
+    if _failure_mode(spec) == "fail_load":
         _write_validation_guard_model(spec, result)
     _write_generated_macros(options.output_dir, generated_macros, result)
     if options.unit_test_csv is not None:
@@ -338,7 +338,7 @@ def _write_final_model(spec: dict[str, Any], result: DbtGenerationResult) -> Non
     materialized = spec.get("control_data", {}).get("materialisation_type", "table")
     source_model = _source_model_name(target["id"])
     quarantine_enabled = _quarantine_enabled(spec)
-    fail_file_enabled = _failure_mode(spec) == "fail_file"
+    fail_load_enabled = _failure_mode(spec) == "fail_load"
     field_select_lines = []
     for field in fields(spec):
         expression = _field_expression(field)
@@ -367,7 +367,7 @@ def _write_final_model(spec: dict[str, Any], result: DbtGenerationResult) -> Non
             field_select_lines,
             audit_select_lines,
             quarantine_enabled=quarantine_enabled,
-            fail_file_enabled=fail_file_enabled,
+            fail_load_enabled=fail_load_enabled,
         )
     elif quarantine_enabled:
         select_lines = [*field_select_lines, *audit_select_lines]
@@ -385,7 +385,7 @@ def _write_final_model(spec: dict[str, Any], result: DbtGenerationResult) -> Non
             *delete_filter_lines,
             "",
         ]
-    elif fail_file_enabled:
+    elif fail_load_enabled:
         select_lines = [*field_select_lines, *audit_select_lines]
         delete_filter_lines = _scd1_delete_filter_lines(spec)
         validation_guard_model = _validation_guard_model_name(target["id"])
@@ -442,7 +442,7 @@ def _scd2_final_body_lines(
     audit_select_lines: list[str],
     *,
     quarantine_enabled: bool,
-    fail_file_enabled: bool,
+    fail_load_enabled: bool,
 ) -> list[str]:
     if _scd2_uses_target_merge(spec):
         return _scd2_target_merge_body_lines(
@@ -451,7 +451,7 @@ def _scd2_final_body_lines(
             field_select_lines,
             audit_select_lines,
             quarantine_enabled=quarantine_enabled,
-            fail_file_enabled=fail_file_enabled,
+            fail_load_enabled=fail_load_enabled,
         )
 
     output_lines = [f"    {_quote_identifier(field['id'])}" for field in fields(spec)]
@@ -466,7 +466,7 @@ def _scd2_final_body_lines(
         ]
     )
     return [
-        *_scd2_valid_rows_lines(spec, source_model, quarantine_enabled, fail_file_enabled),
+        *_scd2_valid_rows_lines(spec, source_model, quarantine_enabled, fail_load_enabled),
         "typed_rows as (",
         "    select",
         ",\n".join(
@@ -520,7 +520,7 @@ def _scd2_target_merge_body_lines(
     audit_select_lines: list[str],
     *,
     quarantine_enabled: bool,
-    fail_file_enabled: bool,
+    fail_load_enabled: bool,
 ) -> list[str]:
     output_lines = [f"    {_quote_identifier(field['id'])}" for field in fields(spec)]
     output_lines.extend(
@@ -537,7 +537,7 @@ def _scd2_target_merge_body_lines(
     )
     change_row_columns = _scd2_change_row_columns(spec)
     return [
-        *_scd2_valid_rows_lines(spec, source_model, quarantine_enabled, fail_file_enabled),
+        *_scd2_valid_rows_lines(spec, source_model, quarantine_enabled, fail_load_enabled),
         "typed_rows as (",
         "    select",
         ",\n".join(
@@ -677,7 +677,7 @@ def _scd2_valid_rows_lines(
     spec: dict[str, Any],
     source_model: str,
     quarantine_enabled: bool,
-    fail_file_enabled: bool,
+    fail_load_enabled: bool,
 ) -> list[str]:
     if quarantine_enabled:
         return [
@@ -688,7 +688,7 @@ def _scd2_valid_rows_lines(
             *_valid_rows_cte(),
             ",",
         ]
-    if fail_file_enabled:
+    if fail_load_enabled:
         validation_guard_model = _validation_guard_model_name(spec["target"]["id"])
         return [
             "with source_rows as (",
@@ -924,9 +924,21 @@ def _write_quarantine_model(spec: dict[str, Any], result: DbtGenerationResult) -
 
 
 def _write_generated_macros(output_dir: Path, macros: dict[str, str], result: DbtGenerationResult) -> None:
+    _write(output_dir / "macros" / "generated" / "create_schema.sql", _create_schema_macro(), result)
     _write(output_dir / "macros" / "generated" / "generate_schema_name.sql", _generate_schema_name_macro(), result)
     for macro_name, macro_sql in sorted(macros.items()):
         _write(output_dir / "macros" / "generated" / f"{macro_name}.sql", macro_sql + "\n", result)
+
+
+def _create_schema_macro() -> str:
+    return "\n".join(
+        [
+            "{% macro create_schema(relation) -%}",
+            "    {# Schemas must be provisioned outside generated TMS dbt projects. #}",
+            "{%- endmacro %}",
+            "",
+        ]
+    )
 
 
 def _generate_schema_name_macro() -> str:
@@ -965,7 +977,7 @@ def _write_unit_tests(
             "rows": source_fixture_sql,
         }
     ]
-    if _failure_mode(spec) == "fail_file":
+    if _failure_mode(spec) == "fail_load":
         given.append(
             {
                 "input": f"ref('{_validation_guard_model_name(target['id'])}')",
@@ -1774,8 +1786,8 @@ def _quarantine_enabled(spec: dict[str, Any]) -> bool:
 def _failure_mode(spec: dict[str, Any]) -> str:
     control_data = spec.get("control_data", {})
     if not isinstance(control_data, dict):
-        return "fail_file"
-    return str(control_data.get("failure_mode", "fail_file"))
+        return "fail_load"
+    return str(control_data.get("failure_mode", "fail_load"))
 
 
 def _target_relation_config(spec: dict[str, Any]) -> RelationConfig:
@@ -1795,7 +1807,7 @@ def _quarantine_relation_config(spec: dict[str, Any]) -> RelationConfig:
     return RelationConfig(
         database=_physical_name(quarantine["database"]) if quarantine.get("database") else target.database,
         schema=_physical_name(quarantine["schema"]) if quarantine.get("schema") else target.schema,
-        table=_physical_name(quarantine.get("table", f"{target.table}_QUARANTINE")),
+        table=_physical_name(quarantine.get("table", f"{target.table}__QUARANTINE")),
     )
 
 
@@ -1929,12 +1941,22 @@ def _job_hooks(spec: dict[str, Any], spec_file_name: str) -> tuple[list[str], li
         "case when quarantine_counts.QUARANTINE_COUNT > 0 "
         "then 'COMPLETED_WITH_QUARANTINE' else 'COMPLETED' end{% endif %}"
     )
+    failed_validation_guard_expression = (
+        "{% set validation_guard_failed = namespace(value=false) %}"
+        "{% for result in results %}"
+        "{% if result.status in ['error', 'fail'] and result.node.name == "
+        + _sql_string(_validation_guard_model_name(spec["target"]["id"]))
+        + " %}{% set validation_guard_failed.value = true %}{% endif %}"
+        "{% endfor %}"
+    )
     details_expression = (
         "{% set explicit_job_details = var(\"job_details\", none) %}"
         "{% if explicit_job_details is not none %}"
         "'{{ explicit_job_details | replace(\"'\", \"''\") }}'"
+        "{% elif failed_result_count > 0 and validation_guard_failed.value %}"
+        "'validation errors failed the load'"
         "{% elif failed_result_count > 0 %}"
-        "'dbt run failed; inspect dbt artifacts and quarantine output for validation details'"
+        "'dbt run failed; inspect dbt artifacts for runtime details'"
         "{% else %}case when quarantine_counts.QUARANTINE_COUNT > 0 "
         "then 'validation errors written to quarantine output' else null end{% endif %}"
     )
@@ -1988,7 +2010,7 @@ def _job_hooks(spec: dict[str, Any], spec_file_name: str) -> tuple[list[str], li
         "'JOB_END', "
         "cast(current_timestamp() as timestamp_tz), "
         f"{result_expression}, "
-        f"{details_expression}, "
+        f"{failed_validation_guard_expression}{details_expression}, "
         f"cast({_sql_string(spec_file_name)} as varchar(1024)), "
         f"cast({_sql_string(generated_table)} as varchar(1024)), "
         f"{_nullable_sql_string(quarantine_table)}, "

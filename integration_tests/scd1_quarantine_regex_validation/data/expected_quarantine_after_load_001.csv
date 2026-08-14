@@ -1,0 +1,2 @@
+FAILURE_DETAILS,ACCOUNT_ID,ACCOUNT_NAME,ACCOUNT_STATUS
+field `account_id` does not match regex,BAD3,Malformed Account,ACTIVE

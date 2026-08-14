@@ -4,7 +4,7 @@ description: Maps landed account table data into a typed account table.
 control_data:
   materialisation_type: table
   change_type: scd1
-  failure_mode: fail_file
+  failure_mode: fail_load
 source:
   format: table
   schema: TMP

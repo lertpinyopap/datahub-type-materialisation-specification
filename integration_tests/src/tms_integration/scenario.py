@@ -12,11 +12,24 @@ class ScenarioError(ValueError):
 
 
 @dataclass(frozen=True)
+class ExpectedRelation:
+    name: str
+    table: str
+    expected_csv: Path
+    columns: list[str]
+    order_by: list[str]
+    preserve_whitespace: bool
+
+
+@dataclass(frozen=True)
 class LoadStep:
     name: str
     source_csv: Path
-    expected_target_csv: Path
+    expected_target_csv: Path | None
     dbt_vars: dict[str, Any]
+    expect_dbt_success: bool
+    force_runtime_failure: bool
+    expected_relations: list[ExpectedRelation]
 
 
 @dataclass(frozen=True)
@@ -94,17 +107,74 @@ def _load_steps(root: Path, manifest: dict[str, Any], manifest_path: Path) -> li
             raise ScenarioError(f"{manifest_path}: load step {index} must be a mapping")
         name = _required_string(raw_step, "name", manifest_path)
         source_csv = _required_file(root, _required_string(raw_step, "source_csv", manifest_path))
-        expected_target_csv = _required_file(root, _required_string(raw_step, "expected_target", manifest_path))
+        expected_target_csv = _optional_file(root, raw_step.get("expected_target"))
         dbt_vars = _optional_mapping(raw_step.get("dbt_vars"), manifest_path, f"loads[{index}].dbt_vars")
+        expect_dbt_success = raw_step.get("expect_dbt_success", True) is not False
+        force_runtime_failure = raw_step.get("force_runtime_failure") is True
+        if expected_target_csv is None and expect_dbt_success:
+            raise ScenarioError(f"{manifest_path}: load step {index} requires `expected_target`")
+        expected_relations = _load_expected_relations(
+            root,
+            raw_step.get("expected_relations"),
+            manifest_path,
+            f"loads[{index}].expected_relations",
+        )
         steps.append(
             LoadStep(
                 name=name,
                 source_csv=source_csv,
                 expected_target_csv=expected_target_csv,
                 dbt_vars=dbt_vars,
+                expect_dbt_success=expect_dbt_success,
+                force_runtime_failure=force_runtime_failure,
+                expected_relations=expected_relations,
             )
         )
     return steps
+
+
+def _load_expected_relations(
+    root: Path,
+    raw_relations: Any,
+    manifest_path: Path,
+    key: str,
+) -> list[ExpectedRelation]:
+    if raw_relations is None:
+        return []
+    if not isinstance(raw_relations, list):
+        raise ScenarioError(f"{manifest_path}: `{key}` must be a list")
+    relations: list[ExpectedRelation] = []
+    for index, raw_relation in enumerate(raw_relations):
+        relation_key = f"{key}[{index}]"
+        if not isinstance(raw_relation, dict):
+            raise ScenarioError(f"{manifest_path}: `{relation_key}` must be a mapping")
+        name = _required_string(raw_relation, "name", manifest_path)
+        table = _required_string(raw_relation, "table", manifest_path)
+        expected_csv = _required_file(root, _required_string(raw_relation, "expected_csv", manifest_path))
+        columns = [
+            str(column).upper()
+            for column in _required_string_list(raw_relation, manifest_path, relation_key, "columns")
+        ]
+        order_by = [
+            str(column).upper()
+            for column in _optional_string_list(
+                raw_relation.get("order_by"),
+                manifest_path,
+                f"{relation_key}.order_by",
+            )
+        ]
+        preserve_whitespace = raw_relation.get("preserve_whitespace") is True
+        relations.append(
+            ExpectedRelation(
+                name=name,
+                table=table,
+                expected_csv=expected_csv,
+                columns=columns,
+                order_by=order_by,
+                preserve_whitespace=preserve_whitespace,
+            )
+        )
+    return relations
 
 
 def _load_yaml_mapping(path: Path) -> dict[str, Any]:
@@ -131,6 +201,13 @@ def _optional_string_list(value: Any, path: Path, key: str) -> list[str]:
         return []
     if not isinstance(value, list) or not all(isinstance(item, str) and item for item in value):
         raise ScenarioError(f"{path}: `{key}` must be a list of non-empty strings")
+    return value
+
+
+def _required_string_list(mapping: dict[str, Any], path: Path, parent_key: str, key: str) -> list[str]:
+    value = mapping.get(key)
+    if not isinstance(value, list) or not value or not all(isinstance(item, str) and item for item in value):
+        raise ScenarioError(f"{path}: `{parent_key}.{key}` must be a non-empty list of strings")
     return value
 
 

@@ -63,6 +63,36 @@ def test_reserved_generated_field_names_are_rejected_case_insensitively(tmp_path
     assert any("reserved generated metadata field id" in message for message in diagnostic_messages(diagnostics))
 
 
+def test_failure_mode_uses_fail_load_enum(tmp_path: Path) -> None:
+    _, diagnostics = parse_yaml(
+        tmp_path,
+        complete_spec(
+            """
+            control_data:
+              change_type: scd1
+              failure_mode: fail_load
+            """
+        ),
+    )
+
+    assert diagnostic_messages(diagnostics) == []
+
+
+def test_failure_mode_rejects_old_fail_file_enum(tmp_path: Path) -> None:
+    _, diagnostics = parse_yaml(
+        tmp_path,
+        complete_spec(
+            """
+            control_data:
+              change_type: scd1
+              failure_mode: fail_file
+            """
+        ),
+    )
+
+    assert diagnostic_messages(diagnostics) == ["'fail_file' is not one of ['fail_load', 'quarantine_row']"]
+
+
 def test_source_column_names_are_rejected_case_insensitively(tmp_path: Path) -> None:
     _, diagnostics = parse_yaml(
         tmp_path,

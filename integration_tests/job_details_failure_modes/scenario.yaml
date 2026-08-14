@@ -1,0 +1,44 @@
+name: job_details_failure_modes
+description: Job detail rows distinguish validation failures from runtime dbt failures.
+spec: spec/account.yaml
+checks:
+  - Load 001 fails because validation errors are configured to fail the load.
+  - Load 001 writes a FAILED job end row with validation-specific details.
+  - Load 002 fails because the generated final model hits a serious runtime error.
+  - Load 002 writes another FAILED job end row with runtime failure details.
+loads:
+  - name: load_001_validation_failure
+    source_csv: data/load_001_source.csv
+    expect_dbt_success: false
+    expected_relations:
+      - name: job details
+        table: type_materialisation_jobs
+        expected_csv: data/expected_jobs_after_load_001.csv
+        columns:
+          - EVENT_TYPE
+          - RESULT
+          - DETAILS
+          - LOADED_COUNT
+          - QUARANTINE_COUNT
+          - AUDIT_DATA_PROCESS_KEY
+        order_by:
+          - EVENT_TYPE
+          - DETAILS
+  - name: load_002_runtime_failure
+    source_csv: data/load_002_source.csv
+    expect_dbt_success: false
+    force_runtime_failure: true
+    expected_relations:
+      - name: job details
+        table: type_materialisation_jobs
+        expected_csv: data/expected_jobs_after_load_002.csv
+        columns:
+          - EVENT_TYPE
+          - RESULT
+          - DETAILS
+          - LOADED_COUNT
+          - QUARANTINE_COUNT
+          - AUDIT_DATA_PROCESS_KEY
+        order_by:
+          - EVENT_TYPE
+          - DETAILS
