@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+import subprocess
 import sys
 from pathlib import Path
 
@@ -9,6 +11,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "integration_tests" / "src"))
 
 from tms_integration.assertions import normalise_rows, read_csv_rows  # noqa: E402
+from tms_integration import dbt_runner  # noqa: E402
 from tms_integration.runner import (  # noqa: E402
     _generated_relation_names,
     _keep_tables_enabled,
@@ -79,6 +82,41 @@ def test_live_runner_can_keep_tables_for_inspection(monkeypatch) -> None:
     monkeypatch.setenv("TMS_INTEGRATION_KEEP_TABLES", "1")
 
     assert _keep_tables_enabled() is True
+
+
+def test_integration_dbt_runner_uses_tms_dbt_build(monkeypatch, tmp_path: Path) -> None:
+    commands: list[list[str]] = []
+    spec_path = tmp_path / "spec.yaml"
+    project_dir = tmp_path / "project"
+    spec_path.write_text("id: account\n", encoding="utf-8")
+
+    monkeypatch.setattr(dbt_runner.shutil, "which", lambda executable: "/venv/bin/tms" if executable == "tms" else None)
+
+    def fake_run(command, *, check, capture_output, text):
+        commands.append(command)
+        assert check is False
+        assert capture_output is True
+        assert text is True
+        return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(dbt_runner.subprocess, "run", fake_run)
+
+    dbt_runner.run_tms_dbt_project(spec_path=spec_path, project_dir=project_dir, target_schema="TMP")
+
+    assert commands == [
+        [
+            "/venv/bin/tms",
+            "dbt-build",
+            "--spec",
+            str(spec_path),
+            "--project-dir",
+            str(project_dir),
+            "--target",
+            "dev",
+            "--vars",
+            json.dumps({"target_schema": "TMP", "tms_job_schema": "TMP"}),
+        ]
+    ]
 
 
 def test_live_runner_identifies_generated_relations_for_cleanup(tmp_path: Path) -> None:

@@ -39,7 +39,6 @@ def run_tms_dbt_project(
         os.environ.get("TMS_INTEGRATION_DBT_TARGET", "dev"),
         "--vars",
         json.dumps({"target_schema": target_schema, "tms_job_schema": target_schema}),
-        "--build",
     ]
     completed = subprocess.run(command, check=False, capture_output=True, text=True)
     result = TmsResult(args=command, returncode=completed.returncode, stdout=completed.stdout, stderr=completed.stderr)
