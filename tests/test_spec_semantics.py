@@ -562,6 +562,41 @@ def test_scd2_auto_accepts_insert_time_and_business_key(tmp_path: Path) -> None:
     assert diagnostics == []
 
 
+def test_scd1_accepts_truncate_delete_detection(tmp_path: Path) -> None:
+    _, diagnostics = parse_yaml(
+        tmp_path,
+        complete_spec(
+            """
+            control_data:
+              change_type: scd1
+              scd:
+                delete_detection:
+                  mode: truncate
+            """
+        ),
+    )
+
+    assert diagnostics == []
+
+
+def test_scd2_auto_accepts_truncate_delete_detection(tmp_path: Path) -> None:
+    _, diagnostics = parse_yaml(
+        tmp_path,
+        complete_spec(
+            """
+            control_data:
+              change_type: scd2_auto
+              scd:
+                insert_time: "{{ var('insert_time') }}"
+                delete_detection:
+                  mode: truncate
+            """
+        ),
+    )
+
+    assert diagnostics == []
+
+
 def test_scd2_validation_rejects_unknown_mode(tmp_path: Path) -> None:
     _, diagnostics = parse_yaml(
         tmp_path,
@@ -630,7 +665,7 @@ def test_scd_rejects_legacy_effective_from_key(tmp_path: Path) -> None:
     assert any("Additional properties are not allowed" in message for message in diagnostic_messages(diagnostics))
 
 
-def test_scd2_auto_rejects_delete_detection(tmp_path: Path) -> None:
+def test_scd2_auto_rejects_field_delete_detection(tmp_path: Path) -> None:
     _, diagnostics = parse_yaml(
         tmp_path,
         complete_spec(
@@ -647,7 +682,7 @@ def test_scd2_auto_rejects_delete_detection(tmp_path: Path) -> None:
         ),
     )
 
-    assert "`delete_detection` is only valid when `change_type` is scd1" in diagnostic_messages(diagnostics)
+    assert "`delete_detection.mode = field` is only valid when `change_type` is scd1" in diagnostic_messages(diagnostics)
 
 
 def test_scd2_manual_requires_copied_scd_fields(tmp_path: Path) -> None:

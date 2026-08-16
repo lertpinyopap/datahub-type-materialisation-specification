@@ -1,0 +1,32 @@
+name: scd2_validation_continuous_failure_rollback
+description: SCD2 continuous validation failure leaves the target unchanged.
+spec: spec/account.yaml
+initial_target: data/initial_target.csv
+target:
+  expected_columns:
+    - ACCOUNT_ID
+    - ACCOUNT_VALUE
+    - ACCOUNT_KEY
+    - IS_CURRENT_FLAG
+    - IS_DELETED_FLAG
+    - VALID_FROM_DATETIME
+    - VALID_TO_DATETIME
+    - BUSINESS_DATA_HASH
+    - AUDIT_DATA_PROCESS_KEY
+    - AUDIT_CREATED_DATETIME
+    - AUDIT_LAST_CHANGED_DATETIME
+  order_by:
+    - ACCOUNT_ID
+    - VALID_FROM_DATETIME
+checks:
+  - A1 starts with one valid current SCD2 version.
+  - Load 001 attempts to create a zero-length end-of-time version.
+  - Continuous SCD2 validation fails the dbt model.
+  - The target row and audit metadata remain unchanged after the failed load.
+loads:
+  - name: load_001
+    source_csv: data/load_001_source.csv
+    expect_dbt_success: false
+    expected_target: data/expected_after_load_001.csv
+    dbt_vars:
+      insert_time: "9999-12-31T23:59:59Z"

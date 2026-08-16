@@ -158,11 +158,11 @@ def _unsupported_for_initial_dbt_generation(spec: dict[str, Any]) -> list[Diagno
                     "$.control_data.scd.insert_time",
                 )
             )
-        if "delete_detection" in scd:
+        if "delete_detection" in scd and _delete_detection_mode(spec) != "truncate":
             diagnostics.append(
                 Diagnostic(
-                    "`delete_detection` is only valid when `change_type` is scd1",
-                    "$.control_data.scd.delete_detection",
+                    "`delete_detection.mode = field` is only valid when `change_type` is scd1",
+                    "$.control_data.scd.delete_detection.mode",
                 )
             )
     if _change_type(spec) == "scd1" and "scd2_auto_from_sot" in scd:
@@ -455,7 +455,20 @@ def _write_final_model(spec: dict[str, Any], result: DbtGenerationResult) -> Non
         quarantine_enabled=quarantine_enabled,
         fail_load_enabled=fail_load_enabled,
     )
-    sql = "\n".join(["{{", "  config(", *config_lines, "  )", "}}", "", *runtime_log_lines, *body_lines])
+    truncate_guard_lines = _truncate_guard_lines(spec)
+    sql = "\n".join(
+        [
+            "{{",
+            "  config(",
+            *config_lines,
+            "  )",
+            "}}",
+            "",
+            *truncate_guard_lines,
+            *runtime_log_lines,
+            *body_lines,
+        ]
+    )
     _write(result.output_dir / "models" / "generated" / f"{target['id']}.sql", sql, result)
     if quarantine_enabled:
         _write_quarantine_model(spec, result)
@@ -937,7 +950,19 @@ def _scd2_valid_rows_lines(
 
 
 def _scd2_uses_target_merge(spec: dict[str, Any]) -> bool:
-    return _change_type(spec) == "scd2_auto"
+    return _change_type(spec) == "scd2_auto" and not _truncate_delete_mode_enabled(spec)
+
+
+def _truncate_guard_lines(spec: dict[str, Any]) -> list[str]:
+    if not _truncate_delete_mode_enabled(spec):
+        return []
+    return [
+        "{% set tms_allow_truncate = var('allow_truncate', false) %}",
+        "{% if tms_allow_truncate != true and (tms_allow_truncate | string | lower) != 'true' %}",
+        '  {{ exceptions.raise_compiler_error("delete_detection.mode `truncate` requires dbt var `allow_truncate: true`") }}',
+        "{% endif %}",
+        "",
+    ]
 
 
 def _scd2_incremental_unique_key(spec: dict[str, Any]) -> str:
@@ -2046,6 +2071,10 @@ def _delete_detection_config(spec: dict[str, Any]) -> dict[str, Any]:
 
 def _delete_detection_mode(spec: dict[str, Any]) -> str:
     return str(_delete_detection_config(spec).get("mode", "never"))
+
+
+def _truncate_delete_mode_enabled(spec: dict[str, Any]) -> bool:
+    return _delete_detection_mode(spec) == "truncate"
 
 
 def _scd1_delete_filter_lines(spec: dict[str, Any]) -> list[str]:

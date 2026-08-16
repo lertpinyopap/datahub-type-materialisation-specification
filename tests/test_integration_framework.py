@@ -97,6 +97,8 @@ def test_integration_scenarios_are_discoverable_and_self_contained() -> None:
         "scd2_hash_skip_current_duplicate",
         "scd2_hash_update_historical_boundary",
         "scd2_missing_from_source_delete",
+        "scd2_validation_continuous_failure_rollback",
+        "scd2_validation_sparse_failure_rollback",
     ]
     for scenario_root in scenario_roots:
         scenario = load_scenario(scenario_root)
@@ -804,9 +806,14 @@ def test_hash_skip_scenario_generates_business_hash_skip_sql(tmp_path: Path) -> 
     scenario = load_scenario(INTEGRATION_ROOT / "scd2_hash_skip_current_duplicate")
     output_dir = tmp_path / scenario.name
 
-    generate_project_for_scenario(scenario, output_dir)
+    generated_project = generate_project_for_scenario(scenario, output_dir)
 
+    spec = load_yaml(generated_project.spec_path)
     model_sql = (output_dir / "models" / "generated" / "tms_int__account.sql").read_text(encoding="utf-8")
+    assert spec["target"]["id"] == "tms_int__account"
+    assert spec["control_data"]["business_key"]["name"] == "account_key"
+    assert "as ACCOUNT_KEY" in model_sql
+    assert "TMS_INT__ACCOUNT_KEY" not in model_sql
     assert (
         "sha2(concat_ws('|', coalesce(cast(cast(ACCOUNT_ID as varchar(20)) as varchar), ''), "
         "coalesce(cast(cast(ACCOUNT_VALUE as number(10,0)) as varchar), '')), 256)"
@@ -830,6 +837,28 @@ def test_continuous_scd2_scenario_dbt_unit_test_uses_start_and_end_of_time(tmp_p
     expected_rows = unit_test_yaml["unit_tests"][0]["expect"]["rows"]
     assert expected_rows[0]["VALID_FROM_DATETIME"] == "0001-01-01T00:00:00Z"
     assert expected_rows[0]["VALID_TO_DATETIME"] == "9999-12-31T23:59:59Z"
+
+
+def test_scd2_validation_failure_rollback_scenarios_generate_guards(tmp_path: Path) -> None:
+    scenarios = {
+        "scd2_validation_continuous_failure_rollback": True,
+        "scd2_validation_sparse_failure_rollback": False,
+    }
+    for scenario_name, expects_continuity_check in scenarios.items():
+        scenario = load_scenario(INTEGRATION_ROOT / scenario_name)
+        output_dir = tmp_path / scenario.name
+
+        generate_project_for_scenario(scenario, output_dir)
+
+        model_sql = (output_dir / "models" / "generated" / "tms_int__account.sql").read_text(encoding="utf-8")
+        assert scenario.loads[0].expect_dbt_success is False
+        assert scenario.loads[0].expected_target_csv is not None
+        assert "AUDIT_LAST_CHANGED_DATETIME" in scenario.expected_columns
+        assert "unique_key=['ACCOUNT_KEY']" in model_sql
+        assert "VALID_TO_DATETIME <= VALID_FROM_DATETIME" in model_sql
+        assert "TYPE_MATERIALISATION_SCD2_VALIDATION_FAILED" in model_sql
+        assert ("VALID_TO_DATETIME <> TMS_NEXT_VALID_FROM_DATETIME" in model_sql) is expects_continuity_check
+        assert "TMS_INT__ACCOUNT_KEY" not in model_sql
 
 
 def test_integration_row_comparison_normalises_case_order_and_whitespace(tmp_path: Path) -> None:

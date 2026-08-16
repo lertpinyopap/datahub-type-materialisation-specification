@@ -304,20 +304,34 @@
       }
     },
     "scdDeleteDetection": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["mode", "field", "value"],
-      "properties": {
-        "mode": {
-          "const": "field"
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["mode", "field", "value"],
+          "properties": {
+            "mode": {
+              "const": "field"
+            },
+            "field": {
+              "$ref": "#/$defs/specificationId"
+            },
+            "value": {
+              "$ref": "#/$defs/scalarValue"
+            }
+          }
         },
-        "field": {
-          "$ref": "#/$defs/specificationId"
-        },
-        "value": {
-          "$ref": "#/$defs/scalarValue"
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["mode"],
+          "properties": {
+            "mode": {
+              "const": "truncate"
+            }
+          }
         }
-      }
+      ]
     },
     "sourcePatch": {
       "type": "object",

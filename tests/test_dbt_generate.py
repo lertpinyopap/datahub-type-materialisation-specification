@@ -1094,6 +1094,29 @@ def test_scd1_generation_hard_deletes_field_marked_rows(tmp_path: Path) -> None:
     assert "where not (ACCOUNT_STATUS = 'DELETED')" in model_sql
 
 
+def test_scd1_truncate_delete_mode_requires_allow_truncate_var(tmp_path: Path) -> None:
+    result, output_dir = generate(
+        tmp_path,
+        csv_generation_spec(
+            extra_control="""
+            control_data:
+              change_type: scd1
+              scd:
+                delete_detection:
+                  mode: truncate
+            """,
+        ),
+    )
+
+    assert result.errors == []
+    model_sql = (output_dir / "models" / "generated" / "account.sql").read_text(encoding="utf-8")
+    assert "materialized='table'" in model_sql
+    assert "allow_truncate" in model_sql
+    assert "exceptions.raise_compiler_error" in model_sql
+    assert "delete_detection.mode `truncate` requires dbt var `allow_truncate: true`" in model_sql
+    assert "where not" not in model_sql
+
+
 def test_generation_rejects_missing_business_key(tmp_path: Path) -> None:
     result, _ = generate(
         tmp_path,
@@ -1166,6 +1189,46 @@ def test_scd2_auto_queries_existing_target(tmp_path: Path) -> None:
     assert "synthetic_delete_rows as (" in model_sql
     assert "where coalesce(current_target.IS_DELETED_FLAG, 'N') <> 'Y'" not in model_sql
     assert "existing_target.VALID_FROM_DATETIME as TMS_VALID_FROM_DATETIME_CANDIDATE" in model_sql
+
+
+def test_scd2_auto_truncate_delete_mode_rebuilds_without_existing_target(tmp_path: Path) -> None:
+    result, output_dir = generate(
+        tmp_path,
+        csv_generation_spec(
+            extra_control="""
+            control_data:
+              change_type: scd2_auto
+              scd:
+                insert_time: "{{ var('insert_time') }}"
+                delete_detection:
+                  mode: truncate
+            """,
+            fields="""
+        - id: account_id
+          source:
+            pos: 0
+            column: account_id
+          data_type: varchar(20)
+        - id: account_name
+          source:
+            pos: 1
+            column: account_name
+          data_type: varchar(255)
+            """,
+        ),
+    )
+
+    assert result.errors == []
+    model_sql = (output_dir / "models" / "generated" / "account.sql").read_text(encoding="utf-8")
+    assert "materialized='table'" in model_sql
+    assert "incremental_strategy='delete+insert'" not in model_sql
+    assert "from {{ this }}" not in model_sql
+    assert "current_target_rows as (" not in model_sql
+    assert "allow_truncate" in model_sql
+    assert "exceptions.raise_compiler_error" in model_sql
+    assert "row_number() over (partition by ACCOUNT_KEY order by TMS_VALID_FROM_DATETIME_CANDIDATE) = 1" in model_sql
+    assert "scd2_invalid_validity_rows as (" in model_sql
+    assert "cross join scd2_validation_guard" in model_sql
 
 
 def test_scd2_auto_generates_duplicate_hash_boundary_updates(tmp_path: Path) -> None:

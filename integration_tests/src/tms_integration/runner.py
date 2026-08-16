@@ -310,6 +310,11 @@ def _prefix_spec_relations(spec: dict, original_spec_path: Path) -> None:
     original_target_id = str(target["id"])
     target["id"] = _prefixed_logical_name(original_target_id)
     target["table_name"] = _prefixed_logical_name(str(target.get("table_name", original_target_id)))
+    control_data = spec.setdefault("control_data", {})
+    if isinstance(control_data, dict):
+        business_key = control_data.get("business_key")
+        if isinstance(business_key, dict) and "name" not in business_key:
+            business_key["name"] = f"{original_target_id}_key"
 
     source = spec.get("source", {})
     if isinstance(source, dict) and source.get("format") == "csv" and source.get("load_method") == "dbt_seed":
@@ -344,7 +349,6 @@ def _prefix_spec_relations(spec: dict, original_spec_path: Path) -> None:
         location["schema"] = "{{ var('target_schema', 'TMP') }}"
         location["stage"] = _prefixed_logical_name(_stage_name_from_location(location.get("stage", "csv_stage")))
 
-    control_data = spec.setdefault("control_data", {})
     if isinstance(control_data, dict):
         job = control_data.setdefault("job", {})
         if isinstance(job, dict):

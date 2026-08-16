@@ -213,8 +213,8 @@ for complete specifications and has no default.
 represented by each record. It is required for complete specifications and has
 no default.
 
-`scd` configures delete detection for SCD1 and insert-time behavior for
-`scd2_auto`.
+`scd` configures delete handling for SCD1, plus generated validity-window
+behavior and protected full-history rebuilds for `scd2_auto`.
 
 `quarantine` optionally describes the quarantine table used when
 `failure_mode` is `quarantine_row`.
@@ -504,9 +504,14 @@ control_data:
 ### 5.4 Slowly Changing Dimensions
 
 ```text
-scd_config ::=
+scd_config ::= scd1_scd_config | scd2_auto_scd_config
+
+scd1_scd_config ::=
   delete_detection?
-  insert_time?
+
+scd2_auto_scd_config ::=
+  insert_time
+  delete_detection?
   scd2_auto_from_sot?
   scd2_validation?
 
@@ -514,21 +519,25 @@ delete_detection ::=
   mode: field
     field
     value
+  | mode: truncate
 
 insert_time ::= scalar
 scd2_auto_from_sot ::= true | false
 scd2_validation ::= continuous | sparse
-delete_detection_mode ::= field
+delete_detection_mode ::= field | truncate
 field ::= target field id
 value ::= scalar
 ```
 
-SCD configuration is used for delete detection when `change_type` is `scd1` and
-for insert timing when `change_type` is `scd2_auto`.
+SCD configuration is used for delete handling when `change_type` is `scd1` and
+for generated validity-window behavior and protected full-history rebuilds when
+`change_type` is `scd2_auto`.
 
 For `scd1`, implementations materialise the current typed state without SCD2
 history metadata. SCD1 may use `delete_detection.mode: field` to physically
-remove matching records from the generated current-state output.
+remove matching records from the generated current-state output, or
+`delete_detection.mode: truncate` to fully recreate the target from the current
+source output.
 
 For `scd2_manual`, implementations do not apply special SCD2 handling. The
 source must provide SCD2 state values and the specification must declare them in
@@ -550,7 +559,7 @@ following target metadata columns:
 - `is_current_flag`: `Y` when the record is the current valid version, otherwise
   `N`. The physical data type is `varchar(1)`.
 - `is_deleted_flag`: `Y` when the business entity has been logically deleted.
-  The current specification does not define automatic delete detection for
+  The current specification does not define field-based delete detection for
   `scd2_auto`, so generated rows normally use `N`.
 - `valid_from_datetime`: the timezone-aware timestamp from which the version is
   valid. The physical data type is `timestamp_tz`.
@@ -563,14 +572,26 @@ Generated SCD metadata columns for `scd2_auto` are not declared in
 `target.fields`. Target field ids must not use generated SCD metadata column
 names.
 
-`scd2_auto` has three SCD parameters:
+`delete_detection` values:
+
+- `field`: remove rows where a target field equals the configured value. This
+  mode is only valid for `scd1`.
+- `truncate`: fully recreate the target from the generated source output. This
+  mode is valid for `scd1` and `scd2_auto`. For dbt implementations, generated
+  models must require an explicit runtime variable `allow_truncate: true`
+  before executing the rebuild.
+
+`scd2_auto` has four SCD parameters:
 
 - `insert_time`: scalar or templated timestamp value used as the proposed
   `valid_from_datetime` for incoming changes. It is typically a dbt variable.
+- `delete_detection.mode: truncate`: optional protected full-history rebuild
+  mode. When configured, implementations recreate the generated SCD2 target
+  from the current source rows and do not read the existing target history.
 - `scd2_auto_from_sot`: when `true`, the earliest version for a business key
   starts at the platform start-of-time timestamp. When `false`, the earliest
-  version starts at its selected `insert_time`. If omitted, implementations
-  should default to `true`.
+  version starts at `insert_time`. If omitted, implementations should default
+  to `true`.
 - `scd2_validation`: selects the dbt runtime validity-window validation mode.
   If omitted, implementations should default to `continuous`.
 
@@ -594,15 +615,13 @@ excluded from the hash.
 The reference platform start-of-time timestamp is `0001-01-01T00:00:00Z`. The
 reference platform end-of-time timestamp is `9999-12-31T23:59:59Z`.
 
-For `scd2_auto`, implementations must maintain continuous validity windows for
-each business key. When `scd2_auto_from_sot` is `true`, the earliest version for
-a business key must start at the platform start-of-time timestamp. When it is
-`false`, the earliest version must start at its selected `insert_time`. This
-choice applies when the incoming record is earlier than the oldest existing
-version for the business key, including first load. Each following version must
-begin at its selected `insert_time`, each prior version must end at the
-following version's `valid_from_datetime`, and the latest version must end at
-the platform end-of-time timestamp.
+For `scd2_auto`, incoming changed rows use `insert_time` as their proposed
+`valid_from_datetime`. When a generated row is the earliest known version for a
+business key, `scd2_auto_from_sot` controls whether that row starts at the
+platform start-of-time timestamp or at `insert_time`. Later versions start at
+their own `insert_time`. Generated `valid_to_datetime` values are derived from
+the next later version for the same generated business key; the latest version
+ends at the platform end-of-time timestamp.
 
 dbt implementations must validate generated `scd2_auto` windows before loading
 them into the target. Under `sparse` validation, rows are invalid when
@@ -612,7 +631,8 @@ row for the same generated business key starts before the current row's
 the current row's `valid_to_datetime` is not equal to the next row's
 `valid_from_datetime`, or when the latest row for the generated business key
 does not end at the platform end-of-time timestamp. Invalid rows must fail the
-dbt load rather than being materialised.
+dbt load rather than being materialised, leaving the existing target state
+unchanged.
 
 SCD2 change detection compares the incoming `business_data_hash` with the
 current target row for the same generated business key where
@@ -634,6 +654,21 @@ control_data:
       mode: field
       field: account_status
       value: DELETED
+```
+
+Sample: protected truncate rebuild.
+
+```yaml
+control_data:
+  change_type: scd2_auto
+  business_key:
+    mode: raw
+    fields:
+      - account_id
+  scd:
+    insert_time: "{{ var('insert_time') }}"
+    delete_detection:
+      mode: truncate
 ```
 
 Sample: SCD2 manual change handling.
@@ -1521,16 +1556,23 @@ Parse-time rules:
 - The generated business-key column name, either `<target.id>_KEY` or
   `business_key.name`, must not collide with a target field id or generated
   metadata field id.
-- For `change_type = scd1`, `delete_detection.mode = field` requires `field`
-  and `value`, and `field` must reference a target field id.
+- For `delete_detection.mode = field`, `field` and `value` are required, and
+  `field` must reference a target field id. This mode is valid only when
+  `change_type = scd1`.
+- For `delete_detection.mode = truncate`, `field` and `value` must be omitted.
+  This mode is valid when `change_type = scd1` or `change_type = scd2_auto`.
+  dbt implementations must require `allow_truncate: true` before executing the
+  rebuild.
 - For `change_type = scd2_manual`, `scd` must be omitted.
 - For `change_type = scd2_manual`, target fields must include
   `valid_from_datetime`, `valid_to_datetime`, `is_current`, and `is_deleted`.
 - For `change_type = scd2_manual`, `valid_from_datetime` and
   `valid_to_datetime` must use timestamp data types, while `is_current` and
   `is_deleted` must use `varchar(1)`.
-- For `change_type = scd2_auto`, `scd.insert_time` is required.
-- For `change_type = scd1`, `scd2_validation` must be omitted.
+- For `change_type = scd1`, `insert_time`, `scd2_auto_from_sot`, and
+  `scd2_validation` must be omitted.
+- For `change_type = scd2_auto`, `scd.insert_time` is required and
+  `delete_detection.mode = field` is invalid.
 - For `change_type = scd2_auto`, `scd2_validation` defaults to `continuous`
   when omitted.
 
