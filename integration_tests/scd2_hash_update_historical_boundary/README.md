@@ -2,14 +2,13 @@
 
 ## Purpose
 
-Proves that `business_data_hash_duplicate_mode: update` can extend an existing
-SCD2 version by moving a duplicate-hash historical boundary rather than leaving
-two contiguous versions with the same business data hash.
+Proves that SCD2 auto can extend an existing version by moving a duplicate-hash
+historical boundary rather than leaving two contiguous versions with the same
+business data hash.
 
 ## What This Test Covers
 
-- `business_data_hash.mode: include` hashes only the configured business field.
-- `business_data_hash_duplicate_mode: update` is explicit in the scenario spec.
+- Generated `business_data_hash` values drive duplicate-boundary handling.
 - An incoming historical row whose hash matches the next existing version moves
   that next version's `valid_from_datetime` backward.
 - The generated incremental model replaces all rows for the affected business
@@ -24,8 +23,8 @@ The test creates a target table with two versions for `A1`:
 
 ## Load Steps
 
-`load_001_source.csv` contains `A1` with `account_value = 2` and an explicit
-`valid_from_datetime` of `2026-09-02T00:00:00Z`.
+`load_001_source.csv` contains `A1` with `account_value = 2` and an `insert_time`
+of `2026-09-02T00:00:00Z`.
 
 ## Expected End State
 

@@ -5,6 +5,8 @@ from typing import Any, Iterable
 
 from .errors import Diagnostic
 
+BUSINESS_KEY_DATA_TYPE = "varchar"
+
 GENERATED_METADATA_FIELD_TYPES = {
     "is_current_flag": "varchar(1)",
     "is_deleted_flag": "varchar(1)",
@@ -16,6 +18,12 @@ GENERATED_METADATA_FIELD_TYPES = {
     "audit_data_process_key": "varchar(64)",
 }
 RESERVED_GENERATED_FIELDS = set(GENERATED_METADATA_FIELD_TYPES)
+SCD2_MANUAL_FIELD_TYPES = {
+    "valid_from_datetime": "timestamp",
+    "valid_to_datetime": "timestamp",
+    "is_current": "varchar(1)",
+    "is_deleted": "varchar(1)",
+}
 
 SUPPORTED_TYPE_RE = re.compile(r"^\s*([A-Za-z][A-Za-z0-9_]*)(?:\(([^)]*)\))?\s*$")
 JINJA_EXPR_RE = re.compile(r"{{.*?}}")
@@ -40,6 +48,14 @@ def fields(spec: dict[str, Any]) -> list[dict[str, Any]]:
         return []
     value = target.get("fields", [])
     return value if isinstance(value, list) else []
+
+
+def _change_type(spec: dict[str, Any]) -> str | None:
+    control_data = spec.get("control_data", {})
+    if not isinstance(control_data, dict):
+        return None
+    value = control_data.get("change_type")
+    return str(value) if value is not None else None
 
 
 def parse_sql_type(value: str) -> SqlType:
@@ -72,6 +88,9 @@ def parse_sql_type(value: str) -> SqlType:
         "smallint",
         "float",
         "double",
+        "char",
+        "varchar",
+        "character",
     }
     one_arg_types = {"char", "varchar", "character", "string"}
     two_arg_types = {"decimal", "numeric", "number"}
@@ -98,6 +117,7 @@ def validate_semantics(spec: dict[str, Any], *, abstract: bool) -> list[Diagnost
     diagnostics.extend(_validate_target_fields(spec))
     diagnostics.extend(_validate_csv_seed_source(spec))
     diagnostics.extend(_validate_table_query(spec))
+    diagnostics.extend(_validate_business_key(spec, abstract=abstract))
     diagnostics.extend(_validate_scd(spec, abstract=abstract))
     return diagnostics
 
@@ -106,6 +126,7 @@ def _validate_target_fields(spec: dict[str, Any]) -> list[Diagnostic]:
     diagnostics: list[Diagnostic] = []
     seen: dict[str, str] = {}
     seen_source_columns: dict[str, str] = {}
+    reserved_generated_fields = _reserved_generated_fields(spec)
     for index, field in enumerate(fields(spec)):
         if not isinstance(field, dict):
             continue
@@ -114,7 +135,7 @@ def _validate_target_fields(spec: dict[str, Any]) -> list[Diagnostic]:
             continue
         key = case_key(field_id)
         location = f"$.target.fields[{index}].id"
-        if key in RESERVED_GENERATED_FIELDS:
+        if key in reserved_generated_fields:
             diagnostics.append(Diagnostic("uses a reserved generated metadata field id", location))
         if key in seen:
             diagnostics.append(
@@ -139,6 +160,14 @@ def _validate_target_fields(spec: dict[str, Any]) -> list[Diagnostic]:
             )
         seen_source_columns[column_key] = column
     return diagnostics
+
+
+def _reserved_generated_fields(spec: dict[str, Any]) -> set[str]:
+    reserved = set(RESERVED_GENERATED_FIELDS)
+    if _change_type(spec) == "scd2_manual":
+        reserved.discard("valid_from_datetime")
+        reserved.discard("valid_to_datetime")
+    return reserved
 
 
 def _walk(value: Any, path: str = "$") -> Iterable[tuple[str, Any]]:
@@ -236,30 +265,50 @@ def _validate_regex_value(value: Any, location: str) -> list[Diagnostic]:
 
 
 def _validate_scd(spec: dict[str, Any], *, abstract: bool) -> list[Diagnostic]:
+    del abstract
     diagnostics: list[Diagnostic] = []
     control_data = spec.get("control_data")
     if not isinstance(control_data, dict):
         return diagnostics
     change_type = control_data.get("change_type")
     scd = control_data.get("scd")
-    field_ids = {case_key(field.get("id")) for field in fields(spec) if isinstance(field.get("id"), str)}
+    target_fields = fields(spec)
+    field_ids = {
+        case_key(field["id"])
+        for field in target_fields
+        if isinstance(field, dict) and isinstance(field.get("id"), str)
+    }
 
-    if change_type == "scd2":
-        if not isinstance(scd, dict):
-            diagnostics.append(Diagnostic("`scd` is required when `change_type` is scd2", "$.control_data"))
-            return diagnostics
-        business_key = scd.get("business_key")
-        if not isinstance(business_key, list) or not business_key:
-            diagnostics.append(Diagnostic("`business_key` must contain at least one field id", "$.control_data.scd"))
-        elif field_ids:
-            for index, key in enumerate(business_key):
-                if isinstance(key, str) and case_key(key) not in field_ids:
-                    diagnostics.append(
-                        Diagnostic("business key field does not exist in target.fields", f"$.control_data.scd.business_key[{index}]")
-                    )
+    if change_type == "scd2_auto":
+        if not isinstance(scd, dict) or "insert_time" not in scd:
+            diagnostics.append(Diagnostic("`scd.insert_time` is required when `change_type` is scd2_auto", "$.control_data.scd.insert_time"))
+
+    if change_type == "scd2_manual":
+        if isinstance(scd, dict) and scd:
+            diagnostics.append(Diagnostic("`scd` must be omitted for `change_type` scd2_manual", "$.control_data.scd"))
+        diagnostics.extend(_validate_scd2_manual_fields(spec))
 
     if not isinstance(scd, dict):
         return diagnostics
+
+    if change_type == "scd1" and "insert_time" in scd:
+        diagnostics.append(Diagnostic("`insert_time` is only valid when `change_type` is scd2_auto", "$.control_data.scd.insert_time"))
+    if change_type == "scd1" and "scd2_auto_from_sot" in scd:
+        diagnostics.append(
+            Diagnostic(
+                "`scd2_auto_from_sot` is only valid when `change_type` is scd2_auto",
+                "$.control_data.scd.scd2_auto_from_sot",
+            )
+        )
+    if change_type == "scd1" and "scd2_validation" in scd:
+        diagnostics.append(
+            Diagnostic(
+                "`scd2_validation` is only valid when `change_type` is scd2_auto",
+                "$.control_data.scd.scd2_validation",
+            )
+        )
+    if change_type == "scd2_auto" and "delete_detection" in scd:
+        diagnostics.append(Diagnostic("`delete_detection` is only valid when `change_type` is scd1", "$.control_data.scd.delete_detection"))
 
     delete_detection = scd.get("delete_detection")
     if isinstance(delete_detection, dict):
@@ -268,56 +317,111 @@ def _validate_scd(spec: dict[str, Any], *, abstract: bool) -> list[Diagnostic]:
             diagnostics.append(
                 Diagnostic("referenced field does not exist in target.fields", "$.control_data.scd.delete_detection.field")
             )
+    return diagnostics
 
-    if change_type != "scd2":
+
+def _validate_business_key(spec: dict[str, Any], *, abstract: bool) -> list[Diagnostic]:
+    diagnostics: list[Diagnostic] = []
+    control_data = spec.get("control_data")
+    if not isinstance(control_data, dict):
         return diagnostics
-
-    if scd.get("valid_from_to_mode", "continuous") == "sparse":
-        diagnostics.append(
-            Diagnostic("valid_from_to_mode `sparse` is not implemented yet", "$.control_data.scd.valid_from_to_mode")
-        )
-
-    valid_from_datetime = scd.get("valid_from_datetime")
-    valid_from_selection = "load_datetime"
-    if isinstance(valid_from_datetime, dict):
-        valid_from_selection = str(valid_from_datetime.get("valid_from_datetime_selection", valid_from_selection))
-    if (
-        isinstance(delete_detection, dict)
-        and delete_detection.get("mode") == "missing_from_source"
-        and valid_from_selection == "field"
-    ):
+    business_key = control_data.get("business_key")
+    if business_key is None:
+        if not abstract:
+            diagnostics.append(Diagnostic("`business_key` is required", "$.control_data.business_key"))
+        return diagnostics
+    if not isinstance(business_key, dict):
+        return diagnostics
+    name = business_key.get("name")
+    configured_fields = business_key.get("fields")
+    target_field_ids = {
+        case_key(field["id"])
+        for field in fields(spec)
+        if isinstance(field, dict) and isinstance(field.get("id"), str)
+    }
+    generated_name = case_key(str(name)) if isinstance(name, str) else _default_business_key_name(spec)
+    reserved = set(RESERVED_GENERATED_FIELDS)
+    if generated_name in target_field_ids or generated_name in reserved:
         diagnostics.append(
             Diagnostic(
-                "delete_detection.mode `missing_from_source` is invalid when valid_from_datetime_selection is field",
-                "$.control_data.scd.delete_detection.mode",
+                "business key name collides with a target field or generated metadata field",
+                "$.control_data.business_key.name" if isinstance(name, str) else "$.control_data.business_key",
             )
         )
-
-    for section_name in ("valid_from_datetime", "valid_to_datetime"):
-        section = scd.get(section_name)
-        if not isinstance(section, dict):
-            continue
-        field = section.get("field")
-        if isinstance(field, str) and field_ids and case_key(field) not in field_ids:
+    if not isinstance(configured_fields, list):
+        return diagnostics
+    if not target_field_ids:
+        return diagnostics
+    for index, field_id in enumerate(configured_fields):
+        if isinstance(field_id, str) and case_key(field_id) not in target_field_ids:
             diagnostics.append(
-                Diagnostic("referenced field does not exist in target.fields", f"$.control_data.scd.{section_name}.field")
+                Diagnostic(
+                    "business key field does not exist in target.fields",
+                    f"$.control_data.business_key.fields[{index}]",
+                )
             )
-
-    hash_config = scd.get("business_data_hash")
-    if isinstance(hash_config, dict):
-        mode = hash_config.get("mode")
-        hash_fields = hash_config.get("fields")
-        if mode == "include" and not hash_fields:
-            diagnostics.append(
-                Diagnostic("include mode requires at least one field", "$.control_data.scd.business_data_hash.fields")
-            )
-        if isinstance(hash_fields, list) and field_ids:
-            for index, value in enumerate(hash_fields):
-                if isinstance(value, str) and case_key(value) not in field_ids:
-                    diagnostics.append(
-                        Diagnostic("hash field does not exist in target.fields", f"$.control_data.scd.business_data_hash.fields[{index}]")
-                    )
     return diagnostics
+
+
+def _default_business_key_name(spec: dict[str, Any]) -> str:
+    target = spec.get("target")
+    if not isinstance(target, dict) or not isinstance(target.get("id"), str):
+        return "key"
+    return case_key(f"{target['id']}_key")
+
+
+def _validate_scd2_manual_fields(spec: dict[str, Any]) -> list[Diagnostic]:
+    diagnostics: list[Diagnostic] = []
+    fields_by_id = {
+        case_key(field["id"]): (index, field)
+        for index, field in enumerate(fields(spec))
+        if isinstance(field, dict) and isinstance(field.get("id"), str)
+    }
+    for required_id in SCD2_MANUAL_FIELD_TYPES:
+        if required_id not in fields_by_id:
+            diagnostics.append(
+                Diagnostic(
+                    f"`scd2_manual` requires target field `{required_id}`",
+                    "$.target.fields",
+                )
+            )
+            continue
+        index, field = fields_by_id[required_id]
+        data_type = field.get("data_type")
+        if not isinstance(data_type, str):
+            continue
+        if required_id in {"valid_from_datetime", "valid_to_datetime"}:
+            if not _is_timestamp_type(data_type):
+                diagnostics.append(
+                    Diagnostic(
+                        f"`{required_id}` must use a timestamp data type for `scd2_manual`",
+                        f"$.target.fields[{index}].data_type",
+                    )
+                )
+        elif not _is_varchar_1_type(data_type):
+            diagnostics.append(
+                Diagnostic(
+                    f"`{required_id}` must use data_type `varchar(1)` for `scd2_manual`",
+                    f"$.target.fields[{index}].data_type",
+                )
+            )
+    return diagnostics
+
+
+def _is_timestamp_type(value: str) -> bool:
+    try:
+        parsed = parse_sql_type(value)
+    except ValueError:
+        return False
+    return parsed.name in {"timestamp", "timestamp_tz", "timestamptz", "datetime"}
+
+
+def _is_varchar_1_type(value: str) -> bool:
+    try:
+        parsed = parse_sql_type(value)
+    except ValueError:
+        return False
+    return parsed.name in {"char", "varchar", "character", "string"} and parsed.args == (1,)
 
 
 def validate_field_details(spec: dict[str, Any]) -> list[Diagnostic]:

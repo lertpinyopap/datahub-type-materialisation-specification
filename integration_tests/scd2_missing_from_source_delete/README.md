@@ -1,22 +1,18 @@
-# SCD2 Missing From Source Delete
+# SCD2 Missing From Source Is Ignored
 
 ## Purpose
 
-Proves that `delete_detection.mode: missing_from_source` compares the incoming
-snapshot with current target rows and creates a logical delete version for a
-current business key absent from the load.
+Proves that simplified SCD2 auto does not infer logical deletes for current
+business keys absent from the load.
 
 ## What This Test Covers
 
-- dbt project generation for a `table` SCD2 spec using
-  `delete_detection.mode: missing_from_source`.
+- dbt project generation for a `table` SCD2 auto spec using `insert_time`.
 - Generated dbt unit-test fixtures for the source and validation guard models.
 - Generated dbt unit-test override of `is_incremental: false`, so the dbt unit
   test validates first-load transformation behavior without reading `{{ this }}`.
-- Live incremental behavior against an existing target table, including querying
-  current target rows to discover keys missing from the incoming source.
-- Logical delete behavior: the absent current key gets a new current deleted
-  version, and the previous active version is expired.
+- Live incremental behavior against an existing target table without
+  synthesizing missing-from-source delete rows.
 - Unchanged current-key behavior: a present row with the same business hash
   remains current and active.
 
@@ -29,11 +25,11 @@ The test creates a target table with two current accounts:
 
 ## Load Steps
 
-`load_001_source.csv` contains only `A2`. Since `A1` is absent from the incoming
-snapshot, the generated dbt model must expire the active `A1` row and create a
-new current deleted `A1` version.
+`load_001_source.csv` contains only `A2`. Since SCD2 auto no longer has
+missing-from-source delete detection, the generated dbt model leaves `A1`
+unchanged.
 
 ## Expected End State
 
-`A1` has one expired active row and one current deleted row. `A2` remains the
-unchanged current active row.
+`A1` remains the unchanged current active row. `A2` remains the unchanged
+current active row.

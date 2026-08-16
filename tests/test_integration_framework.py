@@ -153,10 +153,14 @@ def test_live_reporter_prints_scenario_steps_and_checks() -> None:
     reporter.ok("Expected target rows matched", "3 rows")
 
     text = output.getvalue()
+    normalized_text = " ".join(text.split())
     assert text.startswith("\n\n")
     assert "scd2_missing_from_source_delete" in text
     assert "Setting up initial target table" in text
-    assert "The previous active A1 row is end dated at the delete valid_from_datetime." in text
+    assert (
+        "A1 remains current because SCD2 auto does not infer missing-from-source deletes."
+        in normalized_text
+    )
     assert "Expected target rows matched" in text
 
 
@@ -387,7 +391,7 @@ def test_integration_dbt_runner_uses_tms_dbt_build(monkeypatch, tmp_path: Path) 
         spec_path=spec_path,
         project_dir=project_dir,
         target_schema="TMP",
-        dbt_vars={"valid_from_datetime": "2026-09-02T00:00:00Z"},
+        dbt_vars={"insert_time": "2026-09-02T00:00:00Z"},
     )
 
     assert commands == [
@@ -405,7 +409,7 @@ def test_integration_dbt_runner_uses_tms_dbt_build(monkeypatch, tmp_path: Path) 
                 {
                     "target_schema": "TMP",
                     "tms_job_schema": "TMP",
-                    "valid_from_datetime": "2026-09-02T00:00:00Z",
+                    "insert_time": "2026-09-02T00:00:00Z",
                 }
             ),
         ]
@@ -803,16 +807,20 @@ def test_hash_skip_scenario_generates_business_hash_skip_sql(tmp_path: Path) -> 
     generate_project_for_scenario(scenario, output_dir)
 
     model_sql = (output_dir / "models" / "generated" / "tms_int__account.sql").read_text(encoding="utf-8")
-    assert "sha2(concat_ws('|', coalesce(cast(cast(ACCOUNT_VALUE as number(10,0)) as varchar), '')), 256)" in model_sql
-    assert "cast('{{ var(\"valid_from_datetime\") }}' as timestamp_tz)" in model_sql
+    assert (
+        "sha2(concat_ws('|', coalesce(cast(cast(ACCOUNT_ID as varchar(20)) as varchar), ''), "
+        "coalesce(cast(cast(ACCOUNT_VALUE as number(10,0)) as varchar), '')), 256)"
+        in model_sql
+    )
+    assert "cast('{{ var(\"insert_time\") }}' as timestamp_tz)" in model_sql
     assert "current_target.BUSINESS_DATA_HASH = typed_rows.BUSINESS_DATA_HASH" in model_sql
     assert "coalesce(current_target.IS_DELETED_FLAG, 'N') = typed_rows.TMS_IS_DELETED_FLAG_CANDIDATE" in model_sql
     assert "duplicate_boundary_rows as (" in model_sql
     assert "deduplicated_version_rows as (" in model_sql
-    assert "SCD2 duplicate hash handling: historical duplicate rows skipped=" in model_sql
+    assert "SCD2 duplicate hash handling: historical duplicate boundaries updated=" in model_sql
 
 
-def test_continuous_scd2_scenario_dbt_unit_test_uses_exact_next_boundary(tmp_path: Path) -> None:
+def test_continuous_scd2_scenario_dbt_unit_test_uses_start_and_end_of_time(tmp_path: Path) -> None:
     scenario = load_scenario(INTEGRATION_ROOT / "scd2_continuous_field_validity")
     output_dir = tmp_path / scenario.name
 
@@ -820,8 +828,8 @@ def test_continuous_scd2_scenario_dbt_unit_test_uses_exact_next_boundary(tmp_pat
 
     unit_test_yaml = load_yaml(output_dir / "models" / "generated" / "tms_int__account_unit_tests.yml")
     expected_rows = unit_test_yaml["unit_tests"][0]["expect"]["rows"]
-    assert expected_rows[0]["VALID_TO_DATETIME"] == "2026-07-05T00:00:00Z"
-    assert expected_rows[1]["VALID_FROM_DATETIME"] == "2026-07-05T00:00:00Z"
+    assert expected_rows[0]["VALID_FROM_DATETIME"] == "0001-01-01T00:00:00Z"
+    assert expected_rows[0]["VALID_TO_DATETIME"] == "9999-12-31T23:59:59Z"
 
 
 def test_integration_row_comparison_normalises_case_order_and_whitespace(tmp_path: Path) -> None:

@@ -1,5 +1,5 @@
 name: scd2_continuous_field_validity
-description: Continuous SCD2 windows from source field timestamps.
+description: Continuous SCD2 auto windows from insert_time.
 spec: spec/account.yaml
 dbt:
   unit_test_csv: data/load_001_source.csv
@@ -7,7 +7,6 @@ target:
   expected_columns:
     - ACCOUNT_ID
     - ACCOUNT_NAME
-    - SOURCE_CHANGED_AT
     - IS_CURRENT_FLAG
     - IS_DELETED_FLAG
     - VALID_FROM_DATETIME
@@ -16,10 +15,9 @@ target:
     - ACCOUNT_ID
     - VALID_FROM_DATETIME
 checks:
-  - A1 has two SCD2 versions after one source load.
+  - A1 has one SCD2 auto version after the first source load.
   - The first A1 version starts at platform start of time.
-  - The first A1 version is end dated exactly at the second version's valid_from_datetime.
-  - The latest A1 version is current and open-ended at platform end of time.
+  - The A1 version is current and open-ended at platform end of time.
   - No A1 version is marked as deleted.
 loads:
   - name: load_001

@@ -4,6 +4,10 @@ description: Maps a local account CSV through dbt seed loading into a typed acco
 control_data:
   materialisation_type: table
   change_type: scd1
+  business_key:
+    mode: raw
+    fields:
+      - account_id
   failure_mode: quarantine_row
   quarantine:
     table: account__QUARANTINE

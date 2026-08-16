@@ -2,6 +2,10 @@ id: scd1_table_source_varchar_load
 control_data:
   materialisation_type: table
   change_type: scd1
+  business_key:
+    mode: raw
+    fields:
+      - account_id
 source:
   format: table
   schema: TMP

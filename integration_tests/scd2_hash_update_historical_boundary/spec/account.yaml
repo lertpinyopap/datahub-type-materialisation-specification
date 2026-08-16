@@ -1,23 +1,13 @@
 id: scd2_hash_update_historical_boundary
 control_data:
   materialisation_type: table
-  change_type: scd2
-  scd:
-    business_key:
+  change_type: scd2_auto
+  business_key:
+    mode: raw
+    fields:
       - account_id
-    delete_detection:
-      mode: missing_from_source
-    valid_from_datetime:
-      valid_from_datetime_selection: explicit
-      value: '{{ var("valid_from_datetime") }}'
-    valid_to_datetime:
-      valid_to_datetime_selection: next
-    valid_from_to_mode: continuous
-    business_data_hash:
-      mode: include
-      fields:
-        - account_value
-    business_data_hash_duplicate_mode: update
+  scd:
+    insert_time: '{{ var("insert_time") }}'
 source:
   format: csv
   header: true
@@ -34,6 +24,7 @@ target:
         pos: 0
         column: account_id
       data_type: varchar(20)
+      unique: true
     - id: account_value
       source:
         pos: 1

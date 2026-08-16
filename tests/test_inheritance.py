@@ -24,6 +24,9 @@ def test_resolves_parent_from_same_directory(tmp_path: Path) -> None:
         id: base
         control_data:
           change_type: scd1
+          business_key:
+            mode: raw
+            fields: [account_id]
         source:
           format: csv
           header: true
@@ -439,6 +442,9 @@ def test_parse_resolves_before_concrete_validation(tmp_path: Path) -> None:
         id: base
         control_data:
           change_type: scd1
+          business_key:
+            mode: raw
+            fields: [account_id]
         source:
           format: csv
           header: true
@@ -540,6 +546,9 @@ def test_dbt_generation_resolves_inheritance_before_generating(tmp_path: Path) -
         control_data:
           materialisation_type: table
           change_type: scd1
+          business_key:
+            mode: raw
+            fields: [account_id]
         source:
           format: csv
           header: true

@@ -1,14 +1,14 @@
-# SCD2 Hash Skip And Update
+# SCD2 Hash Current Skip And Historical Update
 
 ## Purpose
 
-Proves that continuous SCD2 history uses the configured business data hash to
-skip an incoming current duplicate while still versioning real changes.
+Proves that continuous SCD2 auto history uses the generated business data hash
+to skip an incoming current duplicate while still versioning real changes and
+updating historical duplicate boundaries.
 
 ## What This Test Covers
 
-- `business_data_hash.mode: include` hashes only the configured business field.
-- `business_data_hash_duplicate_mode: skip` is explicit in the scenario spec.
+- Generated `business_data_hash` values drive current duplicate detection.
 - The generated incremental model compares the incoming hash with the current
   target row hash.
 - An incoming row with the same business key and same business hash does not
@@ -35,14 +35,13 @@ The test creates a target table with one current active account:
   create another new SCD2 version because the current value is `2`, even though
   the hash matches the original historical row.
 - `load_004_source.csv` contains `A1` with `account_value = 1` and a historical
-  `valid_from_datetime` between the value `2` and final value `1` versions. In
-  skip mode this should be skipped because it duplicates the next historical
-  business hash.
+  `insert_time` between the value `2` and final value `1` versions. This should
+  move the final value `1` boundary backward because it duplicates the next
+  historical business hash.
 
 ## Expected End State
 
 The target table contains three `A1` versions ordered by
-`valid_from_datetime`: value `1`, value `2`, then value `1` again. The final
-row is current, active, and open-ended.
-
-The fourth load leaves that state unchanged.
+`valid_from_datetime`: value `1`, value `2`, then value `1` again. The fourth
+load moves the final value `1` row back to `2026-09-02 12:00:00`; the final row
+is current, active, and open-ended.

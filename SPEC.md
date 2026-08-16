@@ -181,6 +181,7 @@ extends: abstract_reference_code_data
 ```text
 control_data ::=
   change_type
+  business_key
   materialisation_type?
   failure_mode?
   scd?
@@ -189,7 +190,8 @@ control_data ::=
 
 materialisation_type ::= table
 failure_mode ::= fail_load | quarantine_row
-change_type ::= scd1 | scd2
+change_type ::= scd1 | scd2_manual | scd2_auto
+business_key ::= business_key_config
 scd ::= scd_config
 quarantine ::= quarantine_table
 job ::= job_table
@@ -207,8 +209,12 @@ omitted, implementations should default to `fail_load`.
 `change_type` explicitly declares the change-handling behavior. It is required
 for complete specifications and has no default.
 
-`scd` configures delete detection for SCD1 and SCD2 history behavior when
-`change_type` is `scd2`.
+`business_key` declares the stable key used to identify the business entity
+represented by each record. It is required for complete specifications and has
+no default.
+
+`scd` configures delete detection for SCD1 and insert-time behavior for
+`scd2_auto`.
 
 `quarantine` optionally describes the quarantine table used when
 `failure_mode` is `quarantine_row`.
@@ -229,7 +235,9 @@ for complete specifications and has no default.
 `change_type` values:
 
 - `scd1`: materialise the current typed state without SCD2 history metadata.
-- `scd2`: preserve historical versions for a business entity.
+- `scd2_manual`: copy SCD2 validity and state fields directly from the source.
+- `scd2_auto`: preserve historical versions using implementation-managed
+  validity windows.
 
 Sample: control data.
 
@@ -237,22 +245,13 @@ Sample: control data.
 control_data:
   materialisation_type: table
   failure_mode: quarantine_row
-  change_type: scd2
-  scd:
-    business_key:
+  change_type: scd2_auto
+  business_key:
+    mode: raw
+    fields:
       - account_id
-    delete_detection:
-      mode: missing_from_source
-    valid_from_datetime:
-      valid_from_datetime_selection: load_datetime
-    valid_to_datetime:
-      valid_to_datetime_selection: next
-    valid_from_to_mode: continuous
-    business_data_hash_duplicate_mode: skip
-    business_data_hash:
-      mode: exclude
-      fields:
-        - source_changed_at
+  scd:
+    insert_time: "{{ var('insert_time') }}"
   quarantine:
     table: account__QUARANTINE
   job:
@@ -260,7 +259,71 @@ control_data:
     table: TYPE_MATERIALISATION_JOBS
 ```
 
-### 5.1 Quarantine Table
+### 5.1 Business Key
+
+```text
+business_key_config ::=
+  mode
+  fields[]
+  separator?
+  name?
+
+business_key_mode ::= hash | raw
+fields ::= target field id
+separator ::= string
+name ::= generated field id
+```
+
+`business_key` is required for all complete specifications. It declares how the
+implementation builds the generated business-key column stored on the target
+record.
+
+The generated business-key column is physically stored as `varchar`. By default
+the generated column name is `<target.id>_KEY`, using the implementation's
+normal physical identifier casing. For example, a target id of
+`customer_mapping` produces `CUSTOMER_MAPPING_KEY`. `business_key.name` may be
+provided to override this generated column name.
+
+`business_key.mode` values:
+
+- `raw`: concatenate the configured field values using `separator` and store the
+  resulting string.
+- `hash`: concatenate the configured field values using `separator`, calculate a
+  SHA2-256 hash of that string, and store the hash string.
+
+`business_key.fields` is the ordered list of target field ids used to build the
+key. Every field id must exist in `target.fields`.
+
+`business_key.separator` is the string placed between field values before raw
+storage or hashing. If omitted, it defaults to `|`. It may be the empty string
+`""`, meaning values are concatenated without a separator.
+
+Sample: raw business key.
+
+```yaml
+control_data:
+  change_type: scd1
+  business_key:
+    mode: raw
+    fields:
+      - account_id
+```
+
+Sample: hashed business key with an overridden column name.
+
+```yaml
+control_data:
+  change_type: scd2_auto
+  business_key:
+    mode: hash
+    name: customer_mapping_key
+    fields:
+      - customer_id
+      - source_system_code
+    separator: ""
+```
+
+### 5.2 Quarantine Table
 
 ```text
 quarantine_table ::=
@@ -324,7 +387,7 @@ control_data:
     table: account_load__QUARANTINE
 ```
 
-### 5.2 Job Table
+### 5.3 Job Table
 
 ```text
 job_table ::=
@@ -438,77 +501,57 @@ control_data:
     table: TYPE_MATERIALISATION_JOBS
 ```
 
-### 5.3 Slowly Changing Dimensions
+### 5.4 Slowly Changing Dimensions
 
 ```text
 scd_config ::=
-  business_key[]
   delete_detection?
-  valid_from_datetime?
-  valid_to_datetime?
-  valid_from_to_mode?
-  business_data_hash_duplicate_mode?
-  business_data_hash?
-
-business_key ::= target field id
+  insert_time?
+  scd2_auto_from_sot?
+  scd2_validation?
 
 delete_detection ::=
-  mode: missing_from_source
-  | mode: never
-  | mode: field
+  mode: field
     field
     value
 
-delete_detection_mode ::= missing_from_source | field | never
-
-valid_from_datetime ::=
-  valid_from_datetime_selection: load_datetime
-  | valid_from_datetime_selection: field
-    field
-  | valid_from_datetime_selection: explicit
-    value
-  truncate_to_day?
-
-valid_from_datetime_selection ::= load_datetime | field | explicit
-
-valid_to_datetime ::=
-  valid_to_datetime_selection: next
-  | valid_to_datetime_selection: field
-    field
-  | valid_to_datetime_selection: explicit
-    value
-
-valid_to_datetime_selection ::= next | field | explicit
-valid_from_to_mode ::= continuous | sparse
-business_data_hash_duplicate_mode ::= skip | update
-
-business_data_hash ::=
-  mode
-  fields[]?
-
-business_data_hash_mode ::= include | exclude
+insert_time ::= scalar
+scd2_auto_from_sot ::= true | false
+scd2_validation ::= continuous | sparse
+delete_detection_mode ::= field
 field ::= target field id
 value ::= scalar
-truncate_to_day ::= true | false
 ```
 
 SCD configuration is used for delete detection when `change_type` is `scd1` and
-for history management when `change_type` is `scd2`.
-
-`business_key` identifies the target field ids that uniquely identify a
-business entity. `business_key` is required for `scd2`.
+for insert timing when `change_type` is `scd2_auto`.
 
 For `scd1`, implementations materialise the current typed state without SCD2
-history metadata. SCD1 behavior is intentionally simple in this version of the
-specification.
+history metadata. SCD1 may use `delete_detection.mode: field` to physically
+remove matching records from the generated current-state output.
 
-For `scd2`, implementations must preserve historical versions and generate the
+For `scd2_manual`, implementations do not apply special SCD2 handling. The
+source must provide SCD2 state values and the specification must declare them in
+`target.fields` as ordinary fields:
+
+- `valid_from_datetime`: timestamp value from which the row is valid.
+- `valid_to_datetime`: timestamp value until which the row is valid.
+- `is_current`: `Y` when the row is current, otherwise `N`.
+- `is_deleted`: `Y` when the row represents a delete, otherwise `N`.
+
+The `valid_from_datetime` and `valid_to_datetime` fields must use a timestamp
+data type. The `is_current` and `is_deleted` fields must use `varchar(1)`.
+These fields are typed, transformed, validated, and copied like any other target
+field. `scd2_manual` must not declare `scd` parameters.
+
+For `scd2_auto`, implementations preserve historical versions and generate the
 following target metadata columns:
 
 - `is_current_flag`: `Y` when the record is the current valid version, otherwise
   `N`. The physical data type is `varchar(1)`.
-- `is_deleted_flag`: `Y` when the business entity has been logically deleted,
-  otherwise `N`. The physical data type is `varchar(1)`.
+- `is_deleted_flag`: `Y` when the business entity has been logically deleted.
+  The current specification does not define automatic delete detection for
+  `scd2_auto`, so generated rows normally use `N`.
 - `valid_from_datetime`: the timezone-aware timestamp from which the version is
   valid. The physical data type is `timestamp_tz`.
 - `valid_to_datetime`: the timezone-aware timestamp until which the version is
@@ -516,135 +559,103 @@ following target metadata columns:
 - `business_data_hash`: a hash of business-relevant values used to detect
   changes. The physical data type is `varchar(64)`.
 
-Generated SCD metadata columns are not declared in `target.fields`. Target field
-ids must not use generated SCD metadata column names.
+Generated SCD metadata columns for `scd2_auto` are not declared in
+`target.fields`. Target field ids must not use generated SCD metadata column
+names.
 
-`delete_detection.mode` values:
+`scd2_auto` has three SCD parameters:
 
-- `missing_from_source`: treat the source as a current-state snapshot. A current
-  target business key that is missing from the load is treated as logically
-  deleted.
-- `never`: do not mark records as deleted.
-- `field`: treat the record as deleted when the configured `field` equals the
-  configured `value`.
+- `insert_time`: scalar or templated timestamp value used as the proposed
+  `valid_from_datetime` for incoming changes. It is typically a dbt variable.
+- `scd2_auto_from_sot`: when `true`, the earliest version for a business key
+  starts at the platform start-of-time timestamp. When `false`, the earliest
+  version starts at its selected `insert_time`. If omitted, implementations
+  should default to `true`.
+- `scd2_validation`: selects the dbt runtime validity-window validation mode.
+  If omitted, implementations should default to `continuous`.
 
-Delete detection modes may be extended as implementation experience reveals new
-source patterns.
+`scd2_validation` values:
 
-For SCD2, deletes do not physically remove records. A delete creates a new
-current version with `is_deleted_flag = 'Y'` and `is_current_flag = 'Y'`; the
-previous current version is expired. For SCD1, delete detection physically
-removes the current-state record from the generated output.
+- `sparse`: validity windows for the same generated business key may have gaps,
+  but they must not overlap. Every record must have
+  `valid_to_datetime > valid_from_datetime`.
+- `continuous`: validity windows for the same generated business key must have
+  no gaps or overlaps from the earliest `valid_from_datetime` for that key
+  through the platform end-of-time timestamp. Every record must have
+  `valid_to_datetime > valid_from_datetime`.
 
-`valid_from_datetime.valid_from_datetime_selection` values:
-
-- `load_datetime`: use the load timestamp.
-- `field`: use the timezone-aware timestamp value from the configured target
-  field id.
-- `explicit`: use the configured scalar or templated `value`, often a dbt
-  variable.
-
-If `valid_from_datetime.truncate_to_day` is `true`, implementations must
-preserve the value as a timezone-aware timestamp while setting the time
-component to `00:00:00`.
-
-If `valid_from_datetime` is omitted for SCD2, implementations should default to
-`valid_from_datetime_selection: load_datetime`.
-
-`valid_to_datetime.valid_to_datetime_selection` values:
-
-- `next`: set `valid_to_datetime` to the next newer version's
-  `valid_from_datetime`. If no newer version exists, set `valid_to_datetime` to
-  the platform end-of-time timestamp.
-- `field`: use the timezone-aware timestamp value from the configured target
-  field id.
-- `explicit`: use the configured scalar or templated `value`.
-
-If `valid_to_datetime` is omitted for SCD2, implementations should default to
-`valid_to_datetime_selection: next`. This default supports loading data older
-than the current target version because older versions can be end-dated at the
-start of the next newer version.
-
-For generated continuous windows, `valid_to_datetime` is the exclusive upper
-bound of the validity interval. When `valid_to_datetime_selection` is `next`,
-the stored `valid_to_datetime` value must equal the next version's
-`valid_from_datetime`.
-
-`valid_from_to_mode` values:
-
-- `continuous`: recalculate SCD2 windows for each business key so the first
-  version starts at the platform start-of-time timestamp, each following version
-  begins at its selected `valid_from_datetime`, each prior version ends
-  immediately before the following version begins, and the final version ends at
-  the platform end-of-time timestamp.
-- `sparse`: allow gaps between versions for a business key.
-
-If `valid_from_to_mode` is omitted for SCD2, implementations should default to
-`continuous`. The implementation accepts `sparse` in the grammar but does not
-implement it yet.
+`scd2_auto` uses the generated business-key column declared by `business_key` to
+join current target rows, partition validity windows, and identify affected
+history for incremental updates. Implementations calculate `business_data_hash`
+as a SHA2-256 hash over source-derived business values. Generated business-key
+values, generated audit metadata, and generated SCD metadata fields are always
+excluded from the hash.
 
 The reference platform start-of-time timestamp is `0001-01-01T00:00:00Z`. The
 reference platform end-of-time timestamp is `9999-12-31T23:59:59Z`.
 
-`business_data_hash_duplicate_mode` values:
+For `scd2_auto`, implementations must maintain continuous validity windows for
+each business key. When `scd2_auto_from_sot` is `true`, the earliest version for
+a business key must start at the platform start-of-time timestamp. When it is
+`false`, the earliest version must start at its selected `insert_time`. This
+choice applies when the incoming record is earlier than the oldest existing
+version for the business key, including first load. Each following version must
+begin at its selected `insert_time`, each prior version must end at the
+following version's `valid_from_datetime`, and the latest version must end at
+the platform end-of-time timestamp.
 
-- `skip`: skip duplicate business data hash windows when applying SCD2 history.
-- `update`: allow adjacent duplicate business data hash windows to extend an
-  existing matching version's validity range.
-
-If `business_data_hash_duplicate_mode` is omitted for SCD2, implementations
-should default to `skip`.
-
-`business_data_hash.mode` values:
-
-- `include`: hash only the listed `fields`.
-- `exclude`: hash all target business fields except the listed `fields`.
-
-For `business_data_hash.mode = include`, `fields` must contain at least one
-target field id. For `business_data_hash.mode = exclude`, omitted `fields`
-means no additional business fields are excluded.
-
-If `business_data_hash` is omitted for SCD2, implementations should default to
-`mode: exclude` with no listed fields. Implementations calculate
-`business_data_hash` as a SHA2-256 hash over the selected source-derived
-business values joined with a `|` separator; the physical output is a
-`varchar(64)` hexadecimal value. Generated audit metadata and generated SCD
-metadata fields are always excluded from `business_data_hash`. Only values
-derived from declared source fields may be included in the hash.
+dbt implementations must validate generated `scd2_auto` windows before loading
+them into the target. Under `sparse` validation, rows are invalid when
+`valid_to_datetime` is not greater than `valid_from_datetime`, or when the next
+row for the same generated business key starts before the current row's
+`valid_to_datetime`. Under `continuous` validation, rows are also invalid when
+the current row's `valid_to_datetime` is not equal to the next row's
+`valid_from_datetime`, or when the latest row for the generated business key
+does not end at the platform end-of-time timestamp. Invalid rows must fail the
+dbt load rather than being materialised.
 
 SCD2 change detection compares the incoming `business_data_hash` with the
-current target row for the same `business_key` where `is_current_flag = 'Y'`.
-When the hash differs, implementations must expire the previous current version
-and create a new current version.
+current target row for the same generated business key where
+`is_current_flag = 'Y'`. When the hash differs, implementations must expire the
+previous current version and create a new current version.
 
-Implementations must maintain temporal consistency for SCD2 targets.
-When newer data is loaded for a business key, any currently open older version
-must be end-dated at the newer version's `valid_from_datetime` and marked with
-`is_current_flag = 'N'`. After each load, versions for a business key must have
-consistent `is_current_flag`, `valid_from_datetime`, and `valid_to_datetime`
-values so that exactly one non-deleted or logically deleted version is current
-for that key and historical versions do not remain open.
+If an incoming `scd2_auto` record is inserted between existing historical
+versions and its `business_data_hash` matches the adjacent previous or next
+version, implementations must update the affected surrounding validity windows
+rather than leaving adjacent duplicate business-data versions.
 
-Sample: SCD2 configuration.
+Sample: SCD1 field delete detection.
 
 ```yaml
 control_data:
-  change_type: scd2
+  change_type: scd1
   scd:
-    business_key:
-      - account_id
     delete_detection:
-      mode: missing_from_source
-    valid_from_datetime:
-      valid_from_datetime_selection: load_datetime
-    valid_to_datetime:
-      valid_to_datetime_selection: next
-    valid_from_to_mode: continuous
-    business_data_hash_duplicate_mode: skip
-    business_data_hash:
-      mode: exclude
-      fields:
-        - source_changed_at
+      mode: field
+      field: account_status
+      value: DELETED
+```
+
+Sample: SCD2 manual change handling.
+
+```yaml
+control_data:
+  change_type: scd2_manual
+```
+
+Sample: SCD2 automatic change handling.
+
+```yaml
+control_data:
+  change_type: scd2_auto
+  business_key:
+    mode: raw
+    fields:
+      - account_id
+  scd:
+    insert_time: "{{ var('insert_time') }}"
+    scd2_auto_from_sot: true
+    scd2_validation: continuous
 ```
 
 ## 6. Source
@@ -902,10 +913,12 @@ The target audit metadata columns are:
   delete and supports incremental processing and observability. The physical
   data type is `timestamp_tz`.
 
-The generated metadata column data type contract is:
+The generated business-key, audit, and `scd2_auto` metadata column data type
+contract is:
 
 | Column | Physical data type | Value domain |
 | --- | --- | --- |
+| `<target.id>_KEY` or `business_key.name` | `varchar` | raw or hashed business key value |
 | `is_current_flag` | `varchar(1)` | `Y` or `N` |
 | `is_deleted_flag` | `varchar(1)` | `Y` or `N` |
 | `valid_from_datetime` | `timestamp_tz` | timezone-aware timestamp value |
@@ -915,7 +928,9 @@ The generated metadata column data type contract is:
 | `audit_last_changed_datetime` | `timestamp_tz` | timezone-aware timestamp value |
 | `audit_data_process_key` | `varchar(64)` | operational process key |
 
-Target field ids must not use the reserved audit metadata column names.
+Target field ids must not use the reserved generated metadata column names,
+except that `scd2_manual` specifications must declare `valid_from_datetime` and
+`valid_to_datetime` as ordinary target fields.
 
 Sample: target table definition.
 
@@ -1496,25 +1511,28 @@ Parse-time rules:
 - Target field ids must not use reserved audit metadata column names:
   `audit_data_process_key`, `audit_created_datetime`, or
   `audit_last_changed_datetime`.
-- Target field ids must not use generated SCD metadata column names:
+- Target field ids must not use generated `scd2_auto` metadata column names:
   `is_current_flag`, `is_deleted_flag`, `valid_from_datetime`,
-  `valid_to_datetime`, or `business_data_hash`.
-- For `change_type = scd2`, `scd.business_key` is required and each listed
-  field id must exist in `target.fields`.
-- For `change_type = scd1` or `change_type = scd2`,
-  `delete_detection.mode = field` requires `field` and `value`.
-- For `change_type = scd2`, `delete_detection.mode = missing_from_source` is
-  invalid when `valid_from_datetime.valid_from_datetime_selection = field`.
-- For `change_type = scd2`, `valid_from_datetime.valid_from_datetime_selection
-  = field` requires `field`, and `valid_from_datetime_selection = explicit`
-  requires `value`.
-- For `change_type = scd2`, `valid_to_datetime.valid_to_datetime_selection =
-  field` requires `field`, and `valid_to_datetime_selection = explicit`
-  requires `value`.
-- For `change_type = scd2`, `valid_from_to_mode = sparse` is reserved but not
-  implemented by the implementation.
-- For `change_type = scd2`, `business_data_hash.mode = include` requires at
-  least one `fields` entry.
+  `valid_to_datetime`, or `business_data_hash`. `scd2_manual` specifications
+  must declare `valid_from_datetime` and `valid_to_datetime` as target fields.
+- `control_data.business_key` is required for complete specifications.
+- `business_key.fields` must contain at least one target field id, and each
+  configured field id must exist in `target.fields`.
+- The generated business-key column name, either `<target.id>_KEY` or
+  `business_key.name`, must not collide with a target field id or generated
+  metadata field id.
+- For `change_type = scd1`, `delete_detection.mode = field` requires `field`
+  and `value`, and `field` must reference a target field id.
+- For `change_type = scd2_manual`, `scd` must be omitted.
+- For `change_type = scd2_manual`, target fields must include
+  `valid_from_datetime`, `valid_to_datetime`, `is_current`, and `is_deleted`.
+- For `change_type = scd2_manual`, `valid_from_datetime` and
+  `valid_to_datetime` must use timestamp data types, while `is_current` and
+  `is_deleted` must use `varchar(1)`.
+- For `change_type = scd2_auto`, `scd.insert_time` is required.
+- For `change_type = scd1`, `scd2_validation` must be omitted.
+- For `change_type = scd2_auto`, `scd2_validation` defaults to `continuous`
+  when omitted.
 
 Inheritance-time rules:
 

@@ -4,6 +4,10 @@ description: Shared shape for reference code data tables.
 control_data:
   materialisation_type: table
   change_type: scd1
+  business_key:
+    mode: raw
+    fields:
+      - code
   failure_mode: quarantine_row
   quarantine:
     schema: TMP

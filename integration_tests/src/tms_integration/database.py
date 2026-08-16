@@ -11,7 +11,7 @@ from typing import Any
 import snowflake.connector
 import yaml
 
-from type_materialisation.spec import GENERATED_METADATA_FIELD_TYPES
+from type_materialisation.spec import BUSINESS_KEY_DATA_TYPE, GENERATED_METADATA_FIELD_TYPES
 
 DEFAULT_SNOWFLAKE_CONNECTION = "tms_int"
 
@@ -108,6 +108,7 @@ def create_target_table_from_spec(connection: Any, spec_path: Path, schema: str)
     columns = []
     for field in target["fields"]:
         columns.append(f"{quote_identifier(field['id'])} {field['data_type']}")
+    columns.append(f"{quote_identifier(_business_key_column(spec))} {BUSINESS_KEY_DATA_TYPE}")
     for name, data_type in GENERATED_METADATA_FIELD_TYPES.items():
         columns.append(f"{quote_identifier(name)} {data_type}")
     ddl = f"create or replace table {quote_identifier(schema)}.{quote_identifier(table)} ({', '.join(columns)})"
@@ -229,6 +230,7 @@ def _target_column_types(spec_path: Path) -> dict[str, str]:
         _physical_name(field["id"]): str(field["data_type"])
         for field in spec["target"]["fields"]
     }
+    column_types[_business_key_column(spec)] = BUSINESS_KEY_DATA_TYPE
     column_types.update({_physical_name(name): data_type for name, data_type in GENERATED_METADATA_FIELD_TYPES.items()})
     return column_types
 
@@ -243,6 +245,16 @@ def _load_spec(spec_path: Path) -> dict[str, Any]:
 
 def _physical_name(value: Any) -> str:
     return str(value).upper()
+
+
+def _business_key_column(spec: dict[str, Any]) -> str:
+    control_data = spec.get("control_data", {})
+    business_key = control_data.get("business_key", {}) if isinstance(control_data, dict) else {}
+    if isinstance(business_key, dict) and isinstance(business_key.get("name"), str):
+        return _physical_name(business_key["name"])
+    target = spec.get("target", {})
+    target_id = target.get("id") if isinstance(target, dict) else None
+    return _physical_name(f"{target_id}_key" if isinstance(target_id, str) else "key")
 
 
 def _default_connection_name(config: dict[str, Any], connections: dict[str, Any]) -> str:

@@ -13,6 +13,8 @@ Materialisation Specification.
   `lineterminator`, and `quoting` with `minimal` and `all`.
 - Parse-time uniqueness checks for target field ids and specified source column
   names.
+- Required `business_key` parsing and validation, with raw or SHA2-256 hashed
+  generated key columns and optional generated column-name override.
 - Custom macro loading through Python macro objects.
 - dbt project generation for concrete CSV specifications targeting Snowflake
   staged CSV files.
@@ -31,18 +33,17 @@ Materialisation Specification.
 - Date/timestamp transform generation for `parse_date` and `parse_timestamp`
   using common Python `strptime` format strings translated to Snowflake format
   strings, with generated parse-failure validation.
-- SCD2 `business_data_hash` generation from selected source-derived business
-  fields.
-- SCD2 duplicate-hash historical boundary handling for
-  `business_data_hash_duplicate_mode = skip` and `update`.
-- SCD2 current-load `valid_from_datetime` and `valid_to_datetime` generation,
-  including continuous per-business-key windows when
-  `valid_to_datetime_selection` is `next`.
-- SCD2 current-load `is_current_flag` and `is_deleted_flag` generation for
-  `delete_detection.mode = never` and `delete_detection.mode = field`.
-- SCD2 target-aware incremental merge generation for
-  `delete_detection.mode = missing_from_source`, including generated logical
-  delete rows for current target keys absent from the incoming load.
+- SCD2 auto `business_data_hash` generation from source-derived business
+  fields, using the configured generated business key for target joins and
+  window partitions.
+- SCD2 auto duplicate-hash historical boundary update handling.
+- SCD2 auto `valid_from_datetime` and `valid_to_datetime` generation, including
+  continuous per-business-key windows and configurable earliest-version
+  start-of-time handling.
+- SCD2 auto dbt validity-window failure guards for `scd2_validation:
+  continuous` and `scd2_validation: sparse`.
+- SCD2 auto target-aware incremental merge generation.
+- SCD2 manual pass-through fields for source-managed validity and state values.
 - SCD1 hard-delete filtering for `delete_detection.mode = field`.
 
 ## Not Yet Implemented

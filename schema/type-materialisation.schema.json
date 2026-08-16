@@ -31,7 +31,7 @@
       "required": ["control_data", "source", "target"],
       "properties": {
         "control_data": {
-          "required": ["change_type"]
+          "required": ["change_type", "business_key"]
         },
         "source": {
           "oneOf": [
@@ -212,7 +212,10 @@
         },
         "change_type": {
           "type": "string",
-          "enum": ["scd1", "scd2"]
+          "enum": ["scd1", "scd2_manual", "scd2_auto"]
+        },
+        "business_key": {
+          "$ref": "#/$defs/businessKey"
         },
         "scd": {
           "$ref": "#/$defs/scdConfig"
@@ -222,6 +225,31 @@
         },
         "job": {
           "$ref": "#/$defs/jobTable"
+        }
+      }
+    },
+    "businessKey": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["mode", "fields"],
+      "properties": {
+        "mode": {
+          "type": "string",
+          "enum": ["hash", "raw"]
+        },
+        "fields": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/specificationId"
+          }
+        },
+        "name": {
+          "$ref": "#/$defs/specificationId"
+        },
+        "separator": {
+          "type": "string",
+          "default": "|"
         }
       }
     },
@@ -259,179 +287,35 @@
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "business_key": {
-          "type": "array",
-          "minItems": 1,
-          "items": {
-            "$ref": "#/$defs/specificationId"
-          }
-        },
         "delete_detection": {
           "$ref": "#/$defs/scdDeleteDetection"
         },
-        "valid_from_datetime": {
-          "$ref": "#/$defs/scdValidFromDatetime"
+        "insert_time": {
+          "$ref": "#/$defs/scalarValue"
         },
-        "valid_to_datetime": {
-          "$ref": "#/$defs/scdValidToDatetime"
+        "scd2_auto_from_sot": {
+          "type": "boolean"
         },
-        "valid_from_to_mode": {
+        "scd2_validation": {
           "type": "string",
-          "enum": ["continuous", "sparse"]
-        },
-        "business_data_hash_duplicate_mode": {
-          "type": "string",
-          "enum": ["skip", "update"]
-        },
-        "business_data_hash": {
-          "$ref": "#/$defs/scdBusinessDataHash"
+          "enum": ["continuous", "sparse"],
+          "default": "continuous"
         }
       }
     },
     "scdDeleteDetection": {
-      "oneOf": [
-        {
-          "type": "object",
-          "additionalProperties": false,
-          "required": ["mode"],
-          "properties": {
-            "mode": {
-              "const": "missing_from_source"
-            }
-          }
-        },
-        {
-          "type": "object",
-          "additionalProperties": false,
-          "required": ["mode"],
-          "properties": {
-            "mode": {
-              "const": "never"
-            }
-          }
-        },
-        {
-          "type": "object",
-          "additionalProperties": false,
-          "required": ["mode", "field", "value"],
-          "properties": {
-            "mode": {
-              "const": "field"
-            },
-            "field": {
-              "$ref": "#/$defs/specificationId"
-            },
-            "value": {
-              "$ref": "#/$defs/scalarValue"
-            }
-          }
-        }
-      ]
-    },
-    "scdValidFromDatetime": {
-      "oneOf": [
-        {
-          "type": "object",
-          "additionalProperties": false,
-          "required": ["valid_from_datetime_selection"],
-          "properties": {
-            "valid_from_datetime_selection": {
-              "const": "load_datetime"
-            },
-            "truncate_to_day": {
-              "type": "boolean"
-            }
-          }
-        },
-        {
-          "type": "object",
-          "additionalProperties": false,
-          "required": ["valid_from_datetime_selection", "field"],
-          "properties": {
-            "valid_from_datetime_selection": {
-              "const": "field"
-            },
-            "field": {
-              "$ref": "#/$defs/specificationId"
-            },
-            "truncate_to_day": {
-              "type": "boolean"
-            }
-          }
-        },
-        {
-          "type": "object",
-          "additionalProperties": false,
-          "required": ["valid_from_datetime_selection", "value"],
-          "properties": {
-            "valid_from_datetime_selection": {
-              "const": "explicit"
-            },
-            "value": {
-              "$ref": "#/$defs/scalarValue"
-            },
-            "truncate_to_day": {
-              "type": "boolean"
-            }
-          }
-        }
-      ]
-    },
-    "scdValidToDatetime": {
-      "oneOf": [
-        {
-          "type": "object",
-          "additionalProperties": false,
-          "required": ["valid_to_datetime_selection"],
-          "properties": {
-            "valid_to_datetime_selection": {
-              "const": "next"
-            }
-          }
-        },
-        {
-          "type": "object",
-          "additionalProperties": false,
-          "required": ["valid_to_datetime_selection", "field"],
-          "properties": {
-            "valid_to_datetime_selection": {
-              "const": "field"
-            },
-            "field": {
-              "$ref": "#/$defs/specificationId"
-            }
-          }
-        },
-        {
-          "type": "object",
-          "additionalProperties": false,
-          "required": ["valid_to_datetime_selection", "value"],
-          "properties": {
-            "valid_to_datetime_selection": {
-              "const": "explicit"
-            },
-            "value": {
-              "$ref": "#/$defs/scalarValue"
-            }
-          }
-        }
-      ]
-    },
-    "scdBusinessDataHash": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["mode"],
+      "required": ["mode", "field", "value"],
       "properties": {
         "mode": {
-          "type": "string",
-          "enum": ["include", "exclude"]
+          "const": "field"
         },
-        "fields": {
-          "type": "array",
-          "minItems": 1,
-          "items": {
-            "$ref": "#/$defs/specificationId"
-          }
+        "field": {
+          "$ref": "#/$defs/specificationId"
+        },
+        "value": {
+          "$ref": "#/$defs/scalarValue"
         }
       }
     },
@@ -1049,7 +933,7 @@
     },
     "reservedGeneratedFieldId": {
       "type": "string",
-      "pattern": "^([Aa][Uu][Dd][Ii][Tt]_[Dd][Aa][Tt][Aa]_[Pp][Rr][Oo][Cc][Ee][Ss][Ss]_[Kk][Ee][Yy]|[Aa][Uu][Dd][Ii][Tt]_[Cc][Rr][Ee][Aa][Tt][Ee][Dd]_[Dd][Aa][Tt][Ee][Tt][Ii][Mm][Ee]|[Aa][Uu][Dd][Ii][Tt]_[Ll][Aa][Ss][Tt]_[Cc][Hh][Aa][Nn][Gg][Ee][Dd]_[Dd][Aa][Tt][Ee][Tt][Ii][Mm][Ee]|[Ii][Ss]_[Cc][Uu][Rr][Rr][Ee][Nn][Tt]_[Ff][Ll][Aa][Gg]|[Ii][Ss]_[Dd][Ee][Ll][Ee][Tt][Ee][Dd]_[Ff][Ll][Aa][Gg]|[Vv][Aa][Ll][Ii][Dd]_[Ff][Rr][Oo][Mm]_[Dd][Aa][Tt][Ee][Tt][Ii][Mm][Ee]|[Vv][Aa][Ll][Ii][Dd]_[Tt][Oo]_[Dd][Aa][Tt][Ee][Tt][Ii][Mm][Ee]|[Bb][Uu][Ss][Ii][Nn][Ee][Ss][Ss]_[Dd][Aa][Tt][Aa]_[Hh][Aa][Ss][Hh])$"
+      "pattern": "^([Aa][Uu][Dd][Ii][Tt]_[Dd][Aa][Tt][Aa]_[Pp][Rr][Oo][Cc][Ee][Ss][Ss]_[Kk][Ee][Yy]|[Aa][Uu][Dd][Ii][Tt]_[Cc][Rr][Ee][Aa][Tt][Ee][Dd]_[Dd][Aa][Tt][Ee][Tt][Ii][Mm][Ee]|[Aa][Uu][Dd][Ii][Tt]_[Ll][Aa][Ss][Tt]_[Cc][Hh][Aa][Nn][Gg][Ee][Dd]_[Dd][Aa][Tt][Ee][Tt][Ii][Mm][Ee]|[Ii][Ss]_[Cc][Uu][Rr][Rr][Ee][Nn][Tt]_[Ff][Ll][Aa][Gg]|[Ii][Ss]_[Dd][Ee][Ll][Ee][Tt][Ee][Dd]_[Ff][Ll][Aa][Gg]|[Bb][Uu][Ss][Ii][Nn][Ee][Ss][Ss]_[Dd][Aa][Tt][Aa]_[Hh][Aa][Ss][Hh])$"
     }
   }
 }

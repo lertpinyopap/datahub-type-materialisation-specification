@@ -4,13 +4,14 @@ These checks cover reserved generated fields, SCD metadata contracts, CSV dialec
 rules, data type support, and other cross-field specification constraints.
 """
 
+import re
 from pathlib import Path
-from textwrap import indent
+from textwrap import dedent, indent
 
 import pytest
 
 from type_materialisation.cli import resolve_and_validate_spec
-from type_materialisation.spec import GENERATED_METADATA_FIELD_TYPES, parse_sql_type
+from type_materialisation.spec import BUSINESS_KEY_DATA_TYPE, GENERATED_METADATA_FIELD_TYPES, parse_sql_type
 from tests.helpers import diagnostic_messages, write_spec
 
 
@@ -18,7 +19,9 @@ def complete_spec(extra: str = "", field_id: str = "account_id") -> str:
     extra_block = indent(extra.strip(), "    ") if extra.strip() else ""
     control_block = ""
     if "control_data:" not in extra:
-        control_block = "    control_data:\n      change_type: scd1\n"
+        control_block = _control_data_block("", field_id=field_id)
+    else:
+        extra_block = _control_data_block(extra, field_id=field_id)
     return f"""
     id: account_spec
 {control_block.rstrip()}
@@ -38,13 +41,56 @@ def complete_spec(extra: str = "", field_id: str = "account_id") -> str:
     """
 
 
-def parse_yaml(tmp_path: Path, content: str):
+def _control_data_block(extra_control: str, *, field_id: str = "account_id") -> str:
+    if extra_control.strip():
+        block = dedent(extra_control).strip()
+    else:
+        block = "control_data:\n  change_type: scd1"
+    if "business_key:" not in block:
+        lines = block.splitlines()
+        for index, line in enumerate(lines):
+            if line.strip().startswith("change_type:"):
+                prefix = line[: len(line) - len(line.lstrip())]
+                lines[index + 1:index + 1] = [
+                    f"{prefix}business_key:",
+                    f"{prefix}  mode: raw",
+                    f"{prefix}  fields:",
+                    f"{prefix}    - {field_id}",
+                ]
+                break
+        block = "\n".join(lines)
+    return indent(block, "    ")
+
+
+def parse_yaml(tmp_path: Path, content: str, *, auto_business_key: bool = True):
+    if auto_business_key:
+        content = _with_default_business_key(content)
     spec_path = write_spec(tmp_path, "spec", content)
     return resolve_and_validate_spec(spec_path, abstract=False)
 
 
+def _with_default_business_key(content: str) -> str:
+    if "business_key:" in content or "control_data:" not in content:
+        return content
+    match = re.search(r"(?m)^\s*-\s+id:\s+([A-Za-z][A-Za-z0-9_-]*)\s*$", content)
+    field_id = match.group(1) if match else "account_id"
+    lines = dedent(content).splitlines()
+    for index, line in enumerate(lines):
+        if line.strip().startswith("change_type:"):
+            prefix = line[: len(line) - len(line.lstrip())]
+            lines[index + 1:index + 1] = [
+                f"{prefix}business_key:",
+                f"{prefix}  mode: raw",
+                f"{prefix}  fields:",
+                f"{prefix}    - {field_id}",
+            ]
+            break
+    return "\n".join(lines)
+
+
 def test_generated_metadata_field_type_contract_is_supported() -> None:
     # These are implementation-generated columns, but the spec owns their physical types.
+    assert BUSINESS_KEY_DATA_TYPE == "varchar"
     assert GENERATED_METADATA_FIELD_TYPES == {
         "is_current_flag": "varchar(1)",
         "is_deleted_flag": "varchar(1)",
@@ -405,59 +451,164 @@ def test_parse_date_rejects_timezone_if_missing(tmp_path: Path) -> None:
     assert diagnostics[0].location == "$.target.fields.0.transforms.0"
 
 
-def test_scd_business_key_must_reference_a_target_field(tmp_path: Path) -> None:
-    # SCD rules should fail against field ids after inheritance and case-free matching.
+def test_scd2_auto_requires_insert_time(tmp_path: Path) -> None:
     _, diagnostics = parse_yaml(
         tmp_path,
         complete_spec(
             """
             control_data:
-              change_type: scd2
-              scd:
-                business_key:
+              change_type: scd2_auto
+            """
+        ),
+    )
+
+    assert "`scd.insert_time` is required when `change_type` is scd2_auto" in diagnostic_messages(diagnostics)
+
+
+def test_concrete_spec_requires_business_key(tmp_path: Path) -> None:
+    _, diagnostics = parse_yaml(
+        tmp_path,
+        """
+        id: account_spec
+        control_data:
+          change_type: scd1
+        source:
+          format: csv
+          header: true
+        target:
+          id: account
+          schema: business
+          fields:
+            - id: account_id
+              source:
+                pos: 0
+                column: account_id
+              data_type: varchar(20)
+        """,
+        auto_business_key=False,
+    )
+
+    assert "`business_key` is required" in diagnostic_messages(diagnostics)
+
+
+def test_business_key_fields_must_exist(tmp_path: Path) -> None:
+    _, diagnostics = parse_yaml(
+        tmp_path,
+        complete_spec(
+            """
+            control_data:
+              change_type: scd1
+              business_key:
+                mode: raw
+                fields:
                   - missing_account_id
             """
         ),
     )
 
-    assert diagnostic_messages(diagnostics) == ["business key field does not exist in target.fields"]
+    assert "business key field does not exist in target.fields" in diagnostic_messages(diagnostics)
 
 
-def test_scd_business_data_hash_include_requires_fields(tmp_path: Path) -> None:
+def test_business_key_name_must_not_collide_with_target_fields(tmp_path: Path) -> None:
     _, diagnostics = parse_yaml(
         tmp_path,
         complete_spec(
             """
             control_data:
-              change_type: scd2
-              scd:
-                business_key:
+              change_type: scd1
+              business_key:
+                mode: raw
+                name: account_id
+                fields:
                   - account_id
-                business_data_hash:
-                  mode: include
             """
         ),
     )
 
-    assert diagnostic_messages(diagnostics) == ["include mode requires at least one field"]
+    assert "business key name collides with a target field or generated metadata field" in diagnostic_messages(diagnostics)
 
 
-def test_scd_sparse_validity_mode_is_reserved_but_not_implemented(tmp_path: Path) -> None:
+def test_scd2_auto_accepts_insert_time_and_business_key(tmp_path: Path) -> None:
+    _, diagnostics = parse_yaml(
+        tmp_path,
+        """
+        id: account_spec
+        control_data:
+          change_type: scd2_auto
+          business_key:
+            mode: raw
+            fields:
+              - account_id
+          scd:
+            insert_time: "{{ var('insert_time') }}"
+            scd2_auto_from_sot: false
+            scd2_validation: sparse
+        source:
+          format: csv
+          header: true
+        target:
+          id: account
+          schema: business
+          fields:
+            - id: account_id
+              source:
+                pos: 0
+                column: account_id
+              data_type: varchar(20)
+              unique: true
+        """,
+    )
+
+    assert diagnostics == []
+
+
+def test_scd2_validation_rejects_unknown_mode(tmp_path: Path) -> None:
     _, diagnostics = parse_yaml(
         tmp_path,
         complete_spec(
             """
             control_data:
-              change_type: scd2
+              change_type: scd2_auto
               scd:
-                business_key:
-                  - account_id
-                valid_from_to_mode: sparse
+                insert_time: "{{ var('insert_time') }}"
+                scd2_validation: strict
             """
         ),
     )
 
-    assert diagnostic_messages(diagnostics) == ["valid_from_to_mode `sparse` is not implemented yet"]
+    assert "'strict' is not one of ['continuous', 'sparse']" in diagnostic_messages(diagnostics)
+
+
+def test_scd2_validation_is_only_valid_for_scd2_auto(tmp_path: Path) -> None:
+    _, diagnostics = parse_yaml(
+        tmp_path,
+        complete_spec(
+            """
+            control_data:
+              change_type: scd1
+              scd:
+                scd2_validation: sparse
+            """
+        ),
+    )
+
+    assert "`scd2_validation` is only valid when `change_type` is scd2_auto" in diagnostic_messages(diagnostics)
+
+
+def test_scd2_auto_from_sot_is_only_valid_for_scd2_auto(tmp_path: Path) -> None:
+    _, diagnostics = parse_yaml(
+        tmp_path,
+        complete_spec(
+            """
+            control_data:
+              change_type: scd1
+              scd:
+                scd2_auto_from_sot: false
+            """
+        ),
+    )
+
+    assert "`scd2_auto_from_sot` is only valid when `change_type` is scd2_auto" in diagnostic_messages(diagnostics)
 
 
 def test_scd_rejects_legacy_effective_from_key(tmp_path: Path) -> None:
@@ -466,10 +617,9 @@ def test_scd_rejects_legacy_effective_from_key(tmp_path: Path) -> None:
         complete_spec(
             """
             control_data:
-              change_type: scd2
+              change_type: scd2_auto
               scd:
-                business_key:
-                  - account_id
+                insert_time: "{{ var('insert_time') }}"
                 effective_from:
                   mode: field
                   field: account_id
@@ -480,35 +630,15 @@ def test_scd_rejects_legacy_effective_from_key(tmp_path: Path) -> None:
     assert any("Additional properties are not allowed" in message for message in diagnostic_messages(diagnostics))
 
 
-def test_scd_delete_detection_never_is_valid(tmp_path: Path) -> None:
+def test_scd2_auto_rejects_delete_detection(tmp_path: Path) -> None:
     _, diagnostics = parse_yaml(
         tmp_path,
         complete_spec(
             """
             control_data:
-              change_type: scd2
+              change_type: scd2_auto
               scd:
-                business_key:
-                  - account_id
-                delete_detection:
-                  mode: never
-            """
-        ),
-    )
-
-    assert diagnostics == []
-
-
-def test_scd_delete_detection_field_uses_single_value(tmp_path: Path) -> None:
-    _, diagnostics = parse_yaml(
-        tmp_path,
-        complete_spec(
-            """
-            control_data:
-              change_type: scd2
-              scd:
-                business_key:
-                  - account_id
+                insert_time: "{{ var('insert_time') }}"
                 delete_detection:
                   mode: field
                   field: account_id
@@ -517,31 +647,86 @@ def test_scd_delete_detection_field_uses_single_value(tmp_path: Path) -> None:
         ),
     )
 
-    assert diagnostics == []
+    assert "`delete_detection` is only valid when `change_type` is scd1" in diagnostic_messages(diagnostics)
 
 
-def test_scd_missing_from_source_rejects_field_valid_from_selection(tmp_path: Path) -> None:
+def test_scd2_manual_requires_copied_scd_fields(tmp_path: Path) -> None:
     _, diagnostics = parse_yaml(
         tmp_path,
         complete_spec(
             """
             control_data:
-              change_type: scd2
-              scd:
-                business_key:
-                  - account_id
-                delete_detection:
-                  mode: missing_from_source
-                valid_from_datetime:
-                  valid_from_datetime_selection: field
-                  field: account_id
+              change_type: scd2_manual
             """
         ),
     )
 
-    assert diagnostic_messages(diagnostics) == [
-        "delete_detection.mode `missing_from_source` is invalid when valid_from_datetime_selection is field"
-    ]
+    messages = diagnostic_messages(diagnostics)
+    assert "`scd2_manual` requires target field `valid_from_datetime`" in messages
+    assert "`scd2_manual` requires target field `valid_to_datetime`" in messages
+    assert "`scd2_manual` requires target field `is_current`" in messages
+    assert "`scd2_manual` requires target field `is_deleted`" in messages
+
+
+def test_scd2_manual_accepts_copied_scd_fields(tmp_path: Path) -> None:
+    _, diagnostics = parse_yaml(
+        tmp_path,
+        """
+        id: account_spec
+        control_data:
+          change_type: scd2_manual
+        source:
+          format: csv
+          header: true
+        target:
+          id: account
+          schema: business
+          fields:
+            - id: account_id
+              source:
+                pos: 0
+                column: account_id
+              data_type: varchar(20)
+            - id: valid_from_datetime
+              source:
+                pos: 1
+                column: valid_from_datetime
+              data_type: timestamp_tz
+            - id: valid_to_datetime
+              source:
+                pos: 2
+                column: valid_to_datetime
+              data_type: timestamp_tz
+            - id: is_current
+              source:
+                pos: 3
+                column: is_current
+              data_type: varchar(1)
+            - id: is_deleted
+              source:
+                pos: 4
+                column: is_deleted
+              data_type: varchar(1)
+        """,
+    )
+
+    assert diagnostics == []
+
+
+def test_scd2_manual_rejects_scd_parameters(tmp_path: Path) -> None:
+    _, diagnostics = parse_yaml(
+        tmp_path,
+        complete_spec(
+            """
+            control_data:
+              change_type: scd2_manual
+              scd:
+                insert_time: "{{ var('insert_time') }}"
+            """
+        ),
+    )
+
+    assert "`scd` must be omitted for `change_type` scd2_manual" in diagnostic_messages(diagnostics)
 
 
 def test_scd1_delete_detection_field_must_reference_target_field(tmp_path: Path) -> None:
