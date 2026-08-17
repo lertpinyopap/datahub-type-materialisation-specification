@@ -1,6 +1,8 @@
 # yaml-language-server: $schema=../../schema/type-materialisation.schema.json
 id: reference_core_country
 description: Maps reference country CSV data into a manual SCD2 country table.
+
+# Control how we validate, store, and operate
 control_data:
   materialisation_type: table
   # Expect veery record to define all SCD2 fields
@@ -9,14 +11,16 @@ control_data:
     fields:
       - country_code
   scd:
-    update_mode: upsert
-    # Upsert means we can update records if the business key and update_key(s) match
+    # Upsert means we can update records if the business key and update_key(s) match, this allows us to end date old values to add new ones, delete value, etc
+    update_mode: upsert    
     update_key:
       # here we can update a record by matching on business key and valid_from_datetime
       fields:
         - valid_from_datetime
-  # Any error mesns fail the whole load
+  # Any error means fail the whole load
   failure_mode: fail_load
+
+# Control how we get the source data
 source:
   format: csv
   header: true
@@ -31,6 +35,8 @@ source:
   delimiter: ","
   quotechar: '"'
   lineterminator: "\r\n"
+
+# Control the target columns and types, and control validation and transformation of the source data in to the target data
 target:
   id: country
   schema: TMP
@@ -45,6 +51,7 @@ target:
         - type: trim
       nullable: false
       validations:
+      # Validation must be 2 uppercase letters or a string starting with DQ
         - type: regex
           pattern: "^([A-Z]{2}|DQ.*)$"
     - id: country_description
@@ -63,6 +70,10 @@ target:
       transforms:
         - type: trim
       nullable: false
+      validations:
+      # Validation must be 3 uppercase letters or a string starting with DQ
+        - type: regex
+          pattern: "^([A-Z]{3}|DQ.*)$"
     - id: country_code_iso_nnn
       source:
         pos: 3
