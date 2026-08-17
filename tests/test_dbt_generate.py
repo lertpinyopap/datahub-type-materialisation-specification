@@ -1770,6 +1770,52 @@ def test_scd2_manual_defaults_to_append_only_incremental_mode(tmp_path: Path) ->
     assert "unique_key=" not in model_sql
 
 
+def test_scd2_manual_truncate_before_load_uses_table_materialization(tmp_path: Path) -> None:
+    result, output_dir = generate(
+        tmp_path,
+        csv_generation_spec(
+            extra_control="""
+            control_data:
+              change_type: scd2_manual
+              truncate_before_load: true
+            """,
+            fields="""
+        - id: account_id
+          source:
+            pos: 0
+            column: account_id
+          data_type: varchar(20)
+        - id: valid_from_datetime
+          source:
+            pos: 1
+            column: valid_from_datetime
+          data_type: timestamp_tz
+        - id: valid_to_datetime
+          source:
+            pos: 2
+            column: valid_to_datetime
+          data_type: timestamp_tz
+        - id: is_current
+          source:
+            pos: 3
+            column: is_current
+          data_type: varchar(1)
+        - id: is_deleted
+          source:
+            pos: 4
+            column: is_deleted
+          data_type: varchar(1)
+            """,
+        ),
+    )
+
+    assert result.errors == []
+    model_sql = (output_dir / "models" / "generated" / "account.sql").read_text(encoding="utf-8")
+    assert "materialized='table'" in model_sql
+    assert "incremental_strategy=" not in model_sql
+    assert "allow_truncate" in model_sql
+
+
 def test_scd2_auto_generation_rejects_missing_insert_time(tmp_path: Path) -> None:
     result, output_dir = generate(
         tmp_path,
@@ -1827,16 +1873,14 @@ def test_scd1_generation_hard_deletes_field_marked_rows(tmp_path: Path) -> None:
     assert "where not (ACCOUNT_STATUS = 'DELETED')" in model_sql
 
 
-def test_scd1_truncate_delete_mode_requires_allow_truncate_var(tmp_path: Path) -> None:
+def test_truncate_before_load_requires_allow_truncate_var(tmp_path: Path) -> None:
     result, output_dir = generate(
         tmp_path,
         csv_generation_spec(
             extra_control="""
             control_data:
               change_type: scd1
-              scd:
-                delete_detection:
-                  mode: truncate
+              truncate_before_load: true
             """,
         ),
     )
@@ -1846,7 +1890,7 @@ def test_scd1_truncate_delete_mode_requires_allow_truncate_var(tmp_path: Path) -
     assert "materialized='table'" in model_sql
     assert "allow_truncate" in model_sql
     assert "exceptions.raise_compiler_error" in model_sql
-    assert "delete_detection.mode `truncate` requires dbt var `allow_truncate: true`" in model_sql
+    assert "truncate_before_load requires dbt var `allow_truncate: true`" in model_sql
     assert "where not" not in model_sql
 
 
@@ -1924,17 +1968,16 @@ def test_scd2_auto_queries_existing_target(tmp_path: Path) -> None:
     assert "existing_target.VALID_FROM_DATETIME as TMS_VALID_FROM_DATETIME_CANDIDATE" in model_sql
 
 
-def test_scd2_auto_truncate_delete_mode_rebuilds_without_existing_target(tmp_path: Path) -> None:
+def test_scd2_auto_truncate_before_load_rebuilds_without_existing_target(tmp_path: Path) -> None:
     result, output_dir = generate(
         tmp_path,
         csv_generation_spec(
             extra_control="""
             control_data:
               change_type: scd2_auto
+              truncate_before_load: true
               scd:
                 insert_time: "{{ var('insert_time') }}"
-                delete_detection:
-                  mode: truncate
             """,
             fields="""
         - id: account_id

@@ -44,8 +44,8 @@ Materialisation Specification.
 - SCD2 auto dbt validity-window failure guards for `scd2_validation:
   continuous` and `scd2_validation: sparse`.
 - SCD2 auto target-aware incremental merge generation.
-- Guarded SCD1 and SCD2 auto full rebuilds for
-  `delete_detection.mode = truncate`, requiring `allow_truncate: true`.
+- Guarded full rebuilds for `truncate_before_load: true`, requiring
+  `allow_truncate: true`.
 - SCD2 manual pass-through fields for source-managed validity and state values.
 - SCD1 hard-delete filtering for `delete_detection.mode = field`.
 

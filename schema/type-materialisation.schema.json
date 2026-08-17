@@ -214,6 +214,10 @@
           "type": "string",
           "enum": ["scd1", "scd2_manual", "scd2_auto"]
         },
+        "truncate_before_load": {
+          "type": "boolean",
+          "default": false
+        },
         "business_key": {
           "$ref": "#/$defs/businessKey"
         },
@@ -326,34 +330,20 @@
       }
     },
     "scdDeleteDetection": {
-      "oneOf": [
-        {
-          "type": "object",
-          "additionalProperties": false,
-          "required": ["mode", "field", "value"],
-          "properties": {
-            "mode": {
-              "const": "field"
-            },
-            "field": {
-              "$ref": "#/$defs/specificationId"
-            },
-            "value": {
-              "$ref": "#/$defs/scalarValue"
-            }
-          }
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["mode", "field", "value"],
+      "properties": {
+        "mode": {
+          "const": "field"
         },
-        {
-          "type": "object",
-          "additionalProperties": false,
-          "required": ["mode"],
-          "properties": {
-            "mode": {
-              "const": "truncate"
-            }
-          }
+        "field": {
+          "$ref": "#/$defs/specificationId"
+        },
+        "value": {
+          "$ref": "#/$defs/scalarValue"
         }
-      ]
+      }
     },
     "sourcePatch": {
       "type": "object",

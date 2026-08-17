@@ -186,6 +186,7 @@ control_data ::=
   skip_surrogate_key?
   materialisation_type?
   failure_mode?
+  truncate_before_load?
   staging_schema?
   scd?
   quarantine?
@@ -194,6 +195,7 @@ control_data ::=
 materialisation_type ::= table
 failure_mode ::= fail_load | quarantine_row
 change_type ::= scd1 | scd2_manual | scd2_auto
+truncate_before_load ::= true | false
 business_key ::= business_key_config
 skip_business_key ::= true | false
 skip_surrogate_key ::= true | false
@@ -214,6 +216,14 @@ omitted, implementations should default to `fail_load`.
 
 `change_type` explicitly declares the change-handling behavior. It is required
 for complete specifications and has no default.
+
+`truncate_before_load` controls whether the target output is fully rebuilt from
+the generated source output before loading. If omitted, implementations should
+default to `false`. When `true`, dbt implementations must require an explicit
+runtime variable `allow_truncate: true` before executing the rebuild. This
+second opt-in is a safety precaution so a specification cannot accidentally
+trigger destructive target replacement without an operator explicitly enabling it
+for that run.
 
 `business_key` declares the target fields used to identify the business entity
 represented by each record. It is required unless `skip_business_key` is `true`.
@@ -270,6 +280,7 @@ control_data:
   materialisation_type: table
   failure_mode: quarantine_row
   change_type: scd2_auto
+  truncate_before_load: false
   staging_schema: INTERMEDIATE
   business_key:
     fields:
@@ -565,7 +576,6 @@ scd2_manual_scd_config ::=
 
 scd2_auto_scd_config ::=
   insert_time
-  delete_detection?
   scd2_auto_from_sot?
   scd2_validation?
 
@@ -573,7 +583,6 @@ delete_detection ::=
   mode: field
     field
     value
-  | mode: truncate
 
 insert_time ::= scalar
 scd2_auto_from_sot ::= true | false
@@ -581,7 +590,7 @@ scd2_validation ::= continuous | sparse
 update_mode ::= append_only | upsert
 update_key ::=
   fields[]
-delete_detection_mode ::= field | truncate
+delete_detection_mode ::= field
 field ::= target field id
 value ::= scalar
 ```
@@ -593,9 +602,8 @@ is `scd2_auto`.
 
 For `scd1`, implementations materialise the current typed state without SCD2
 history metadata. SCD1 may use `delete_detection.mode: field` to physically
-remove matching records from the generated current-state output, or
-`delete_detection.mode: truncate` to fully recreate the target from the current
-source output.
+remove matching records from the generated current-state output. Full target
+rebuilds are controlled by `control_data.truncate_before_load`.
 
 For `scd2_manual`, the source must provide SCD2 state values and the
 specification must declare them in `target.fields` as ordinary fields:
@@ -663,18 +671,11 @@ names.
 
 - `field`: remove rows where a target field equals the configured value. This
   mode is only valid for `scd1`.
-- `truncate`: fully recreate the target from the generated source output. This
-  mode is valid for `scd1` and `scd2_auto`. For dbt implementations, generated
-  models must require an explicit runtime variable `allow_truncate: true`
-  before executing the rebuild.
 
-`scd2_auto` has four SCD parameters:
+`scd2_auto` has three SCD parameters:
 
 - `insert_time`: scalar or templated timestamp value used as the proposed
   `valid_from_datetime` for incoming changes. It is typically a dbt variable.
-- `delete_detection.mode: truncate`: optional protected full-history rebuild
-  mode. When configured, implementations recreate the generated SCD2 target
-  from the current source rows and do not read the existing target history.
 - `scd2_auto_from_sot`: when `true`, the earliest version for a business key
   starts at the platform start-of-time timestamp. When `false`, the earliest
   version starts at `insert_time`. If omitted, implementations should default
@@ -751,13 +752,12 @@ Sample: protected truncate rebuild.
 ```yaml
 control_data:
   change_type: scd2_auto
+  truncate_before_load: true
   business_key:
     fields:
       - account_id
   scd:
     insert_time: "{{ var('insert_time') }}"
-    delete_detection:
-      mode: truncate
 ```
 
 Sample: SCD2 manual change handling.
@@ -1779,10 +1779,9 @@ Parse-time rules:
 - For `delete_detection.mode = field`, `field` and `value` are required, and
   `field` must reference a target field id. This mode is valid only when
   `change_type = scd1`.
-- For `delete_detection.mode = truncate`, `field` and `value` must be omitted.
-  This mode is valid when `change_type = scd1` or `change_type = scd2_auto`.
-  dbt implementations must require `allow_truncate: true` before executing the
-  rebuild.
+- If `truncate_before_load` is `true`, dbt implementations must require
+  `allow_truncate: true` before executing the rebuild as a safety precaution
+  against accidental destructive target replacement.
 - For `change_type = scd2_manual`, `scd` may contain `update_mode` and
   `update_key`, and must not contain other SCD parameters.
 - For `change_type = scd2_manual`, `scd.update_key` is valid only when

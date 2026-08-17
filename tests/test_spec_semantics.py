@@ -812,16 +812,14 @@ def test_scd2_auto_accepts_insert_time_and_business_key(tmp_path: Path) -> None:
     assert diagnostics == []
 
 
-def test_scd1_accepts_truncate_delete_detection(tmp_path: Path) -> None:
+def test_control_data_accepts_truncate_before_load_for_scd1(tmp_path: Path) -> None:
     _, diagnostics = parse_yaml(
         tmp_path,
         complete_spec(
             """
             control_data:
               change_type: scd1
-              scd:
-                delete_detection:
-                  mode: truncate
+              truncate_before_load: true
             """
         ),
     )
@@ -829,17 +827,16 @@ def test_scd1_accepts_truncate_delete_detection(tmp_path: Path) -> None:
     assert diagnostics == []
 
 
-def test_scd2_auto_accepts_truncate_delete_detection(tmp_path: Path) -> None:
+def test_control_data_accepts_truncate_before_load_for_scd2_auto(tmp_path: Path) -> None:
     _, diagnostics = parse_yaml(
         tmp_path,
         complete_spec(
             """
             control_data:
               change_type: scd2_auto
+              truncate_before_load: false
               scd:
                 insert_time: "{{ var('insert_time') }}"
-                delete_detection:
-                  mode: truncate
             """
         ),
     )

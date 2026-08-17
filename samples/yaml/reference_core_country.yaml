@@ -5,7 +5,7 @@ description: Maps reference country CSV data into a manual SCD2 country table.
 # Control how we validate, store, and operate
 control_data:
   materialisation_type: table
-  # Expect veery record to define all SCD2 fields
+  # Expect every record to define all SCD2 fields
   change_type: scd2_manual
   business_key:
     fields:
@@ -14,7 +14,7 @@ control_data:
     # Upsert means we can update records if the business key and update_key(s) match, this allows us to end date old values to add new ones, delete value, etc
     update_mode: upsert    
     update_key:
-      # here we can update a record by matching on business key and valid_from_datetime
+      # Here we define the update condition to be the business key plus valid_from_datetime
       fields:
         - valid_from_datetime
   # Any error means fail the whole load
@@ -83,7 +83,7 @@ target:
         - type: trim
       nullable: false
       validations:
-        # Sample validation must be 3 numbers or NA
+        # Validation must be 3 numbers or NA
         - type: regex
           pattern: "^([0-9]{3}|NA)$"
     - id: is_current

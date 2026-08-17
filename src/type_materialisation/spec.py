@@ -489,8 +489,7 @@ def _validate_scd(spec: dict[str, Any], *, abstract: bool) -> list[Diagnostic]:
         )
     delete_detection = scd.get("delete_detection")
     if isinstance(delete_detection, dict):
-        delete_mode = delete_detection.get("mode")
-        if change_type == "scd2_auto" and delete_mode != "truncate":
+        if change_type == "scd2_auto":
             diagnostics.append(
                 Diagnostic(
                     "`delete_detection.mode = field` is only valid when `change_type` is scd1",

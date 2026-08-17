@@ -183,7 +183,7 @@ def _unsupported_for_initial_dbt_generation(spec: dict[str, Any]) -> list[Diagno
                     "$.control_data.scd.insert_time",
                 )
             )
-        if "delete_detection" in scd and _delete_detection_mode(spec) != "truncate":
+        if "delete_detection" in scd:
             diagnostics.append(
                 Diagnostic(
                     "`delete_detection.mode = field` is only valid when `change_type` is scd1",
@@ -489,14 +489,17 @@ def _write_final_model(spec: dict[str, Any], result: DbtGenerationResult) -> Non
             "    on_schema_change='fail',",
         ]
     elif _change_type(spec) == "scd2_manual":
-        materialized = "incremental"
-        if _scd2_manual_uses_business_key_upsert(spec):
+        if _truncate_before_load_enabled(spec):
+            materialized = "table"
+        elif _scd2_manual_uses_business_key_upsert(spec):
+            materialized = "incremental"
             extra_config_lines = [
                 "    incremental_strategy='delete+insert',",
                 f"    unique_key={_scd2_manual_incremental_unique_key(spec)},",
                 "    on_schema_change='fail',",
             ]
         else:
+            materialized = "incremental"
             extra_config_lines = [
                 "    incremental_strategy='append',",
                 "    on_schema_change='fail',",
@@ -1102,7 +1105,7 @@ def _scd2_valid_rows_lines(
 
 
 def _scd2_uses_target_merge(spec: dict[str, Any]) -> bool:
-    return _change_type(spec) == "scd2_auto" and not _truncate_delete_mode_enabled(spec)
+    return _change_type(spec) == "scd2_auto" and not _truncate_before_load_enabled(spec)
 
 
 def _scd2_manual_uses_business_key_upsert(spec: dict[str, Any]) -> bool:
@@ -1137,12 +1140,12 @@ def _scd2_manual_incremental_unique_key_columns(spec: dict[str, Any]) -> list[st
 
 
 def _truncate_guard_lines(spec: dict[str, Any]) -> list[str]:
-    if not _truncate_delete_mode_enabled(spec):
+    if not _truncate_before_load_enabled(spec):
         return []
     return [
         "{% set tms_allow_truncate = var('allow_truncate', false) %}",
         "{% if tms_allow_truncate != true and (tms_allow_truncate | string | lower) != 'true' %}",
-        '  {{ exceptions.raise_compiler_error("delete_detection.mode `truncate` requires dbt var `allow_truncate: true`") }}',
+        '  {{ exceptions.raise_compiler_error("truncate_before_load requires dbt var `allow_truncate: true`") }}',
         "{% endif %}",
         "",
     ]
@@ -2549,8 +2552,9 @@ def _delete_detection_mode(spec: dict[str, Any]) -> str:
     return str(_delete_detection_config(spec).get("mode", "never"))
 
 
-def _truncate_delete_mode_enabled(spec: dict[str, Any]) -> bool:
-    return _delete_detection_mode(spec) == "truncate"
+def _truncate_before_load_enabled(spec: dict[str, Any]) -> bool:
+    control_data = spec.get("control_data", {})
+    return isinstance(control_data, dict) and control_data.get("truncate_before_load") is True
 
 
 def _scd1_delete_filter_lines(spec: dict[str, Any]) -> list[str]:
