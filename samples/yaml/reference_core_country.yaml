@@ -1,0 +1,127 @@
+# yaml-language-server: $schema=../../schema/type-materialisation.schema.json
+id: reference_core_country
+description: Maps reference country CSV data into a manual SCD2 country table.
+control_data:
+  materialisation_type: table
+  # Expect veery record to define all SCD2 fields
+  change_type: scd2_manual
+  business_key:
+    fields:
+      - country_code
+  scd:
+    update_mode: upsert
+    # Upsert means we can update records if the business key and update_key(s) match
+    update_key:
+      # here we can update a record by matching on business key and valid_from_datetime
+      fields:
+        - valid_from_datetime
+  # Any error mesns fail the whole load
+  failure_mode: fail_load
+source:
+  format: csv
+  header: true
+  # Expect csv file to be in dbt seed folder, later we might prefer to use CSV stage
+  load_method: dbt_seed
+  seed:
+    # Pass file name/location  in to tms generate-dbt with --var
+    file: "{{ tms_var('country_csv_file') }}"
+    name: reference_core_country_seed
+    # TMP for tetsing but it should be CORE 
+    schema: TMP
+  delimiter: ","
+  quotechar: '"'
+  lineterminator: "\r\n"
+target:
+  id: country
+  schema: TMP
+  table_name: COUNTRY
+  fields:
+    - id: country_code
+      source:
+        pos: 0
+        column: COUNTRY_CODE
+      data_type: varchar(20)
+      transforms:
+        - type: trim
+      nullable: false
+      validations:
+        - type: regex
+          pattern: "^([A-Z]{2}|DQ.*)$"
+    - id: country_description
+      source:
+        pos: 1
+        column: COUNTRY_DESCRIPTION
+      data_type: varchar(255)
+      transforms:
+        - type: trim
+      nullable: false
+    - id: country_code_iso_ccc
+      source:
+        pos: 2
+        column: COUNTRY_CODE_ISO_CCC
+      data_type: varchar(20)
+      transforms:
+        - type: trim
+      nullable: false
+    - id: country_code_iso_nnn
+      source:
+        pos: 3
+        column: COUNTRY_CODE_ISO_NNN
+      data_type: varchar(3)
+      transforms:
+        - type: trim
+      nullable: false
+      validations:
+        # Sample validation must be 3 numbers or a word starting with DQ
+        - type: regex
+          pattern: "^([0-9]{3}|NA)$"
+    - id: is_current
+      source:
+        pos: 4
+        column: IS_CURRENT_FLAG
+      data_type: varchar(1)
+      transforms:
+        - type: trim
+      nullable: false
+      validations:
+        - type: allowed_values
+          values:
+            - "Y"
+            - "N"
+    - id: is_deleted
+      source:
+        pos: 5
+        column: IS_DELETED_FLAG
+      data_type: varchar(1)
+      transforms:
+        - type: trim
+      nullable: false
+      validations:
+        - type: allowed_values
+          values:
+            - "Y"
+            - "N"
+    - id: valid_from_datetime
+      source:
+        pos: 6
+        column: VALID_FROM_DATETIME
+      data_type: timestamp_tz
+      transforms:
+        - type: parse_timestamp
+          format: "%d/%m/%Y"
+          # As records don't have time or timezone use start of day UTC for from datetime
+          timezone_if_missing: UTC
+          time_if_missing: start_of_day
+      nullable: false
+    - id: valid_to_datetime
+      source:
+        pos: 7
+        column: VALID_TO_DATETIME
+      data_type: timestamp_tz
+      transforms:
+        - type: parse_timestamp
+          format: "%d/%m/%Y"
+          # As records don't have time or timezone use end of day UTC for to datetime
+          timezone_if_missing: UTC
+          time_if_missing: end_of_day
+      nullable: false

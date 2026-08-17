@@ -1,0 +1,59 @@
+id: account_order_json
+control_data:
+  change_type: scd1
+  business_key:
+    fields:
+      - order_id
+source:
+  format: table
+  schema: TMP
+  table: account_order_json_source
+  flatten:
+    column: payload
+    path: customer.orders
+    alias: order_item
+    mode: array
+target:
+  id: account_order
+  schema: BUSINESS
+  fields:
+    - id: account_id
+      source:
+        column: payload
+        snowflake_path: customer.account.id
+      data_type: varchar(20)
+      nullable: false
+    - id: customer_name
+      source:
+        column: payload
+        snowflake_path: customer.profile.name
+      data_type: varchar(100)
+      nullable: false
+    - id: order_id
+      source:
+        column: order_item
+        snowflake_path: id
+      data_type: varchar(20)
+      nullable: false
+      unique: true
+    - id: order_amount
+      source:
+        column: order_item
+        snowflake_path: metrics.amount
+      data_type: number(10,2)
+      nullable: false
+    - id: order_date
+      source:
+        column: order_item
+        snowflake_path: metrics.orderDate
+      data_type: date
+      nullable: false
+      transforms:
+        - type: parse_date
+          format: "%Y-%m-%d"
+    - id: priority_customer
+      source:
+        column: payload
+        snowflake_path: customer.flags.priority
+      data_type: boolean
+      nullable: false

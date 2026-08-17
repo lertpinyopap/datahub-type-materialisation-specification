@@ -74,7 +74,8 @@ class IntegrationReporter:
         self._print(message)
 
     def load_start(self, step: LoadStep) -> None:
-        self.step(f"Running load {step.name}", str(step.source_csv.name))
+        source_file = step.source_csv or step.source_json
+        self.step(f"Running load {step.name}", source_file.name if source_file is not None else None)
 
     def checks(self, checks: list[str]) -> None:
         if not checks:

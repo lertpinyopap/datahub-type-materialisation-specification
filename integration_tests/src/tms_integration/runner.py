@@ -22,6 +22,7 @@ from .database import (
     insert_csv_rows,
     replace_csv_stage_from_file,
     replace_source_table_from_csv,
+    replace_source_table_from_json,
     snowflake_connection,
 )
 from .dbt_runner import run_tms_dbt_project, validate_dbt_build_environment
@@ -45,7 +46,7 @@ class CustomAssertionContext:
     target_table: str
     project_dir: Path
     spec_path: Path
-    source_csv: Path
+    source_csv: Path | None
 
 
 def generate_project_for_scenario(scenario: Scenario, output_dir: Path) -> GeneratedScenarioProject:
@@ -130,13 +131,24 @@ def _run_live_scenario(
                 reporter.load_start(step)
                 if _source_format(generated_project.spec_path) == "table":
                     source_table = _source_table_name(generated_project.spec_path)
-                    reporter.step("Creating source table from VARCHAR CSV", source_table)
-                    replace_source_table_from_csv(connection, target_schema, source_table, step.source_csv)
-                    reporter.ok("Source table loaded", step.source_csv.name)
+                    if step.source_json is not None:
+                        reporter.step("Creating source table from JSON", source_table)
+                        replace_source_table_from_json(connection, target_schema, source_table, step.source_json)
+                        reporter.ok("Source table loaded", step.source_json.name)
+                    elif step.source_csv is not None:
+                        reporter.step("Creating source table from VARCHAR CSV", source_table)
+                        replace_source_table_from_csv(connection, target_schema, source_table, step.source_csv)
+                        reporter.ok("Source table loaded", step.source_csv.name)
+                    else:
+                        raise AssertionError(f"table-source load {step.name} has no source fixture")
                 elif _source_load_method(generated_project.spec_path) == "dbt_seed":
+                    if step.source_csv is None:
+                        raise AssertionError(f"dbt_seed load {step.name} requires source_csv")
                     reporter.step("Replacing generated seed data", step.source_csv.name)
                     _replace_seed(project_dir, step.source_csv)
                 else:
+                    if step.source_csv is None:
+                        raise AssertionError(f"CSV stage load {step.name} requires source_csv")
                     source_stage = _source_csv_stage_name(generated_project.spec_path)
                     reporter.step("Creating CSV stage and uploading file", source_stage)
                     replace_csv_stage_from_file(connection, target_schema, source_stage, step.source_csv)
@@ -311,10 +323,6 @@ def _prefix_spec_relations(spec: dict, original_spec_path: Path) -> None:
     target["id"] = _prefixed_logical_name(original_target_id)
     target["table_name"] = _prefixed_logical_name(str(target.get("table_name", original_target_id)))
     control_data = spec.setdefault("control_data", {})
-    if isinstance(control_data, dict):
-        business_key = control_data.get("business_key")
-        if isinstance(business_key, dict) and "name" not in business_key:
-            business_key["name"] = f"{original_target_id}_key"
 
     source = spec.get("source", {})
     if isinstance(source, dict) and source.get("format") == "csv" and source.get("load_method") == "dbt_seed":

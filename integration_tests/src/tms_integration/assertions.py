@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+from difflib import unified_diff
 from pathlib import Path
 from typing import Any
 
@@ -29,7 +30,7 @@ def assert_rows_equal(
 ) -> None:
     actual = normalise_rows(actual_rows, preserve_whitespace=preserve_whitespace)
     expected = normalise_rows(expected_rows, preserve_whitespace=preserve_whitespace)
-    assert actual == expected
+    assert actual == expected, _row_diff(actual, expected)
 
 
 def _normalise_value(value: Any, *, preserve_whitespace: bool) -> str:
@@ -42,3 +43,17 @@ def _normalise_value(value: Any, *, preserve_whitespace: bool) -> str:
         return text
     text = text.strip()
     return " ".join(text.split())
+
+
+def _row_diff(actual: list[dict[str, str]], expected: list[dict[str, str]]) -> str:
+    actual_lines = [repr(row) for row in actual]
+    expected_lines = [repr(row) for row in expected]
+    return "\n".join(
+        unified_diff(
+            expected_lines,
+            actual_lines,
+            fromfile="expected",
+            tofile="actual",
+            lineterm="",
+        )
+    )

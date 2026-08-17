@@ -130,6 +130,9 @@
                 },
                 {
                   "required": ["column"]
+                },
+                {
+                  "required": ["fixed_value"]
                 }
               ]
             }
@@ -145,7 +148,14 @@
         {
           "properties": {
             "source": {
-              "required": ["pos"],
+              "anyOf": [
+                {
+                  "required": ["pos"]
+                },
+                {
+                  "required": ["fixed_value"]
+                }
+              ],
               "not": {
                 "required": ["column"]
               }
@@ -162,7 +172,14 @@
         {
           "properties": {
             "source": {
-              "required": ["column"],
+              "anyOf": [
+                {
+                  "required": ["column"]
+                },
+                {
+                  "required": ["fixed_value"]
+                }
+              ],
               "not": {
                 "required": ["pos"]
               }

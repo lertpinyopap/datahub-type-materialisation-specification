@@ -6,6 +6,7 @@ from typing import Any, Iterable
 from .errors import Diagnostic
 
 BUSINESS_KEY_DATA_TYPE = "varchar"
+SURROGATE_KEY_DATA_TYPE = "varchar(36)"
 
 GENERATED_METADATA_FIELD_TYPES = {
     "is_current_flag": "varchar(1)",
@@ -28,7 +29,7 @@ SCD2_MANUAL_FIELD_TYPES = {
 SUPPORTED_TYPE_RE = re.compile(r"^\s*([A-Za-z][A-Za-z0-9_]*)(?:\(([^)]*)\))?\s*$")
 JINJA_EXPR_RE = re.compile(r"{{.*?}}")
 SUPPORTED_JINJA_EXPR_RE = re.compile(
-    r"""^\s*{{\s*(var|env_var)\(\s*(['"])[^'"]+\2\s*(,\s*(['"])[^'"]*\4\s*)?\)\s*}}\s*$"""
+    r"""^\s*{{\s*(var|env_var|tms_var)\(\s*(['"])[^'"]+\2\s*(,\s*(['"])[^'"]*\4\s*)?\)\s*}}\s*$"""
 )
 
 
@@ -115,8 +116,11 @@ def validate_semantics(spec: dict[str, Any], *, abstract: bool) -> list[Diagnost
     diagnostics: list[Diagnostic] = []
     diagnostics.extend(_validate_jinja(spec))
     diagnostics.extend(_validate_target_fields(spec))
+    diagnostics.extend(_validate_fixed_value_sources(spec))
+    diagnostics.extend(_validate_snowflake_table_extraction(spec))
     diagnostics.extend(_validate_csv_seed_source(spec))
     diagnostics.extend(_validate_table_query(spec))
+    diagnostics.extend(_validate_surrogate_key(spec))
     diagnostics.extend(_validate_business_key(spec, abstract=abstract))
     diagnostics.extend(_validate_scd(spec, abstract=abstract))
     return diagnostics
@@ -149,6 +153,8 @@ def _validate_target_fields(spec: dict[str, Any]) -> list[Diagnostic]:
         column = source.get("column")
         if not isinstance(column, str):
             continue
+        if "snowflake_path" in source:
+            continue
         column_key = case_key(column)
         column_location = f"$.target.fields[{index}].source.column"
         if column_key in seen_source_columns:
@@ -162,8 +168,140 @@ def _validate_target_fields(spec: dict[str, Any]) -> list[Diagnostic]:
     return diagnostics
 
 
+def _validate_snowflake_table_extraction(spec: dict[str, Any]) -> list[Diagnostic]:
+    diagnostics: list[Diagnostic] = []
+    source = spec.get("source")
+    if not isinstance(source, dict):
+        return diagnostics
+    source_format = source.get("format")
+    flatten_aliases = _flatten_aliases(source)
+
+    if "flatten" in source and source_format != "table":
+        diagnostics.append(Diagnostic("source.flatten is only valid for table sources", "$.source.flatten"))
+
+    diagnostics.extend(_validate_flatten_entries(source))
+
+    ordinary_source_columns = {
+        case_key(field_source["column"])
+        for field in fields(spec)
+        if isinstance(field, dict)
+        for field_source in [field.get("source")]
+        if isinstance(field_source, dict)
+        and isinstance(field_source.get("column"), str)
+        and "snowflake_path" not in field_source
+    }
+    for alias, location in flatten_aliases.items():
+        if alias in ordinary_source_columns:
+            diagnostics.append(
+                Diagnostic(
+                    "source.flatten.alias duplicates a field.source.column that is used without snowflake_path",
+                    location,
+                )
+            )
+
+    for index, field in enumerate(fields(spec)):
+        if not isinstance(field, dict):
+            continue
+        field_source = field.get("source")
+        if not isinstance(field_source, dict):
+            continue
+        has_path = "snowflake_path" in field_source
+        column = field_source.get("column")
+        if has_path and source_format != "table":
+            diagnostics.append(
+                Diagnostic(
+                    "field.source.snowflake_path is only valid for table sources",
+                    f"$.target.fields[{index}].source.snowflake_path",
+                )
+            )
+        if has_path and not isinstance(column, str):
+            diagnostics.append(
+                Diagnostic(
+                    "field.source.snowflake_path requires field.source.column",
+                    f"$.target.fields[{index}].source.column",
+                )
+            )
+        if (
+            not has_path
+            and isinstance(column, str)
+            and case_key(column) in flatten_aliases
+        ):
+            diagnostics.append(
+                Diagnostic(
+                    "field.source.column references a flatten alias and requires snowflake_path",
+                    f"$.target.fields[{index}].source.snowflake_path",
+                )
+            )
+    return diagnostics
+
+
+def _validate_fixed_value_sources(spec: dict[str, Any]) -> list[Diagnostic]:
+    diagnostics: list[Diagnostic] = []
+    for index, field in enumerate(fields(spec)):
+        if not isinstance(field, dict):
+            continue
+        field_source = field.get("source")
+        if not isinstance(field_source, dict) or "fixed_value" not in field_source:
+            continue
+        for selector in ("pos", "column", "snowflake_path"):
+            if selector in field_source:
+                diagnostics.append(
+                    Diagnostic(
+                        f"field.source.fixed_value cannot be combined with field.source.{selector}",
+                        f"$.target.fields[{index}].source.fixed_value",
+                    )
+                )
+    return diagnostics
+
+
+def _validate_flatten_entries(source: dict[str, Any]) -> list[Diagnostic]:
+    diagnostics: list[Diagnostic] = []
+    seen_aliases: dict[str, str] = {}
+    for index, entry in enumerate(_flatten_entries(source)):
+        location = _flatten_entry_location(source, index)
+        alias = entry.get("alias")
+        if isinstance(alias, str):
+            key = case_key(alias)
+            alias_location = f"{location}.alias"
+            if key in seen_aliases:
+                diagnostics.append(
+                    Diagnostic(
+                        f"duplicates source.flatten.alias `{seen_aliases[key]}` case-insensitively",
+                        alias_location,
+                    )
+                )
+            seen_aliases[key] = alias
+    return diagnostics
+
+
+def _flatten_entries(source: dict[str, Any]) -> list[dict[str, Any]]:
+    flatten = source.get("flatten")
+    if isinstance(flatten, dict):
+        return [flatten]
+    if isinstance(flatten, list):
+        return [entry for entry in flatten if isinstance(entry, dict)]
+    return []
+
+
+def _flatten_aliases(source: dict[str, Any]) -> dict[str, str]:
+    aliases: dict[str, str] = {}
+    for index, entry in enumerate(_flatten_entries(source)):
+        alias = entry.get("alias")
+        if isinstance(alias, str):
+            aliases[case_key(alias)] = f"{_flatten_entry_location(source, index)}.alias"
+    return aliases
+
+
+def _flatten_entry_location(source: dict[str, Any], index: int) -> str:
+    return "$.source.flatten" if isinstance(source.get("flatten"), dict) else f"$.source.flatten[{index}]"
+
+
 def _reserved_generated_fields(spec: dict[str, Any]) -> set[str]:
     reserved = set(RESERVED_GENERATED_FIELDS)
+    if _business_key_enabled(spec):
+        reserved.add(_business_key_generated_name(spec))
+    if _surrogate_key_enabled(spec):
+        reserved.add(_surrogate_key_name(spec))
     if _change_type(spec) == "scd2_manual":
         reserved.discard("valid_from_datetime")
         reserved.discard("valid_to_datetime")
@@ -211,17 +349,19 @@ def _validate_csv_seed_source(spec: dict[str, Any]) -> list[Diagnostic]:
                 )
             )
             continue
+        if "fixed_value" in field_source:
+            continue
         if source.get("header") is True and not isinstance(field_source.get("column"), str):
             diagnostics.append(
                 Diagnostic(
-                    "dbt_seed CSV sources with a header require field.source.column",
+                    "dbt_seed CSV sources with a header require field.source.column or field.source.fixed_value",
                     f"$.target.fields[{index}].source.column",
                 )
             )
         if source.get("header") is False and not isinstance(field_source.get("pos"), int):
             diagnostics.append(
                 Diagnostic(
-                    "dbt_seed CSV sources without a header require field.source.pos",
+                    "dbt_seed CSV sources without a header require field.source.pos or field.source.fixed_value",
                     f"$.target.fields[{index}].source.pos",
                 )
             )
@@ -284,8 +424,34 @@ def _validate_scd(spec: dict[str, Any], *, abstract: bool) -> list[Diagnostic]:
             diagnostics.append(Diagnostic("`scd.insert_time` is required when `change_type` is scd2_auto", "$.control_data.scd.insert_time"))
 
     if change_type == "scd2_manual":
-        if isinstance(scd, dict) and scd:
-            diagnostics.append(Diagnostic("`scd` must be omitted for `change_type` scd2_manual", "$.control_data.scd"))
+        if isinstance(scd, dict):
+            invalid_keys = set(scd) - {"update_mode", "update_key"}
+            if invalid_keys:
+                diagnostics.append(
+                    Diagnostic(
+                        "`scd2_manual` supports only `scd.update_mode` and `scd.update_key`",
+                        "$.control_data.scd",
+                    )
+                )
+            if "update_key" in scd and scd.get("update_mode", "append_only") != "upsert":
+                diagnostics.append(
+                    Diagnostic(
+                        "`scd.update_key` is only valid when `scd.update_mode` is upsert",
+                        "$.control_data.scd.update_key",
+                    )
+                )
+            update_key = scd.get("update_key")
+            if isinstance(update_key, dict):
+                update_key_fields = update_key.get("fields", [])
+                if isinstance(update_key_fields, list):
+                    for index, field_id in enumerate(update_key_fields):
+                        if isinstance(field_id, str) and field_ids and case_key(field_id) not in field_ids:
+                            diagnostics.append(
+                                Diagnostic(
+                                    "update key field does not exist in target.fields",
+                                    f"$.control_data.scd.update_key.fields[{index}]",
+                                )
+                            )
         diagnostics.extend(_validate_scd2_manual_fields(spec))
 
     if not isinstance(scd, dict):
@@ -307,6 +473,20 @@ def _validate_scd(spec: dict[str, Any], *, abstract: bool) -> list[Diagnostic]:
                 "$.control_data.scd.scd2_validation",
             )
         )
+    if change_type in {"scd1", "scd2_auto"} and "update_mode" in scd:
+        diagnostics.append(
+            Diagnostic(
+                "`update_mode` is only valid when `change_type` is scd2_manual",
+                "$.control_data.scd.update_mode",
+            )
+        )
+    if change_type in {"scd1", "scd2_auto"} and "update_key" in scd:
+        diagnostics.append(
+            Diagnostic(
+                "`update_key` is only valid when `change_type` is scd2_manual",
+                "$.control_data.scd.update_key",
+            )
+        )
     delete_detection = scd.get("delete_detection")
     if isinstance(delete_detection, dict):
         delete_mode = delete_detection.get("mode")
@@ -325,54 +505,122 @@ def _validate_scd(spec: dict[str, Any], *, abstract: bool) -> list[Diagnostic]:
     return diagnostics
 
 
+def _validate_surrogate_key(spec: dict[str, Any]) -> list[Diagnostic]:
+    diagnostics: list[Diagnostic] = []
+    if not _surrogate_key_enabled(spec):
+        return diagnostics
+    generated_name = _surrogate_key_name(spec)
+    target_field_ids = {
+        case_key(field["id"])
+        for field in fields(spec)
+        if isinstance(field, dict) and isinstance(field.get("id"), str)
+    }
+    reserved = set(RESERVED_GENERATED_FIELDS)
+    business_key_name = _business_key_generated_name(spec)
+    if generated_name in target_field_ids or generated_name in reserved or generated_name == business_key_name:
+        diagnostics.append(
+            Diagnostic(
+                "surrogate key name collides with a target field or generated metadata field",
+                "$.control_data.skip_surrogate_key",
+            )
+        )
+    return diagnostics
+
+
 def _validate_business_key(spec: dict[str, Any], *, abstract: bool) -> list[Diagnostic]:
     diagnostics: list[Diagnostic] = []
     control_data = spec.get("control_data")
     if not isinstance(control_data, dict):
         return diagnostics
     business_key = control_data.get("business_key")
+    business_key_required = _business_key_required(spec)
     if business_key is None:
-        if not abstract:
+        if business_key_required and not abstract:
             diagnostics.append(Diagnostic("`business_key` is required", "$.control_data.business_key"))
         return diagnostics
     if not isinstance(business_key, dict):
         return diagnostics
-    name = business_key.get("name")
     configured_fields = business_key.get("fields")
     target_field_ids = {
         case_key(field["id"])
         for field in fields(spec)
         if isinstance(field, dict) and isinstance(field.get("id"), str)
     }
-    generated_name = case_key(str(name)) if isinstance(name, str) else _default_business_key_name(spec)
+    generated_name = _business_key_generated_name(spec)
     reserved = set(RESERVED_GENERATED_FIELDS)
-    if generated_name in target_field_ids or generated_name in reserved:
+    if _business_key_enabled(spec) and (generated_name in target_field_ids or generated_name in reserved):
         diagnostics.append(
             Diagnostic(
                 "business key name collides with a target field or generated metadata field",
-                "$.control_data.business_key.name" if isinstance(name, str) else "$.control_data.business_key",
+                "$.control_data.business_key",
             )
         )
     if not isinstance(configured_fields, list):
         return diagnostics
     if not target_field_ids:
         return diagnostics
+    surrogate_key_name = _surrogate_key_name(spec) if _surrogate_key_enabled(spec) else None
     for index, field_id in enumerate(configured_fields):
-        if isinstance(field_id, str) and case_key(field_id) not in target_field_ids:
+        if not isinstance(field_id, str):
+            continue
+        field_key = case_key(field_id)
+        location = f"$.control_data.business_key.fields[{index}]"
+        if surrogate_key_name is not None and field_key == surrogate_key_name:
+            diagnostics.append(
+                Diagnostic(
+                    "business key field must not reference generated surrogate key",
+                    location,
+                )
+            )
+            continue
+        if field_key not in target_field_ids:
             diagnostics.append(
                 Diagnostic(
                     "business key field does not exist in target.fields",
-                    f"$.control_data.business_key.fields[{index}]",
+                    location,
                 )
             )
     return diagnostics
 
 
+def _business_key_generated_name(spec: dict[str, Any]) -> str:
+    return _default_business_key_name(spec)
+
+
 def _default_business_key_name(spec: dict[str, Any]) -> str:
     target = spec.get("target")
     if not isinstance(target, dict) or not isinstance(target.get("id"), str):
+        return "business_key"
+    return case_key(f"{_target_key_base(target['id'])}_business_key")
+
+
+def _business_key_enabled(spec: dict[str, Any]) -> bool:
+    control_data = spec.get("control_data")
+    if not isinstance(control_data, dict):
+        return True
+    return control_data.get("skip_business_key") is not True
+
+
+def _business_key_required(spec: dict[str, Any]) -> bool:
+    return _business_key_enabled(spec) or _change_type(spec) == "scd2_auto"
+
+
+def _surrogate_key_enabled(spec: dict[str, Any]) -> bool:
+    control_data = spec.get("control_data")
+    if not isinstance(control_data, dict):
+        return True
+    return control_data.get("skip_surrogate_key") is not True
+
+
+def _surrogate_key_name(spec: dict[str, Any]) -> str:
+    target = spec.get("target")
+    if not isinstance(target, dict) or not isinstance(target.get("id"), str):
         return "key"
-    return case_key(f"{target['id']}_key")
+    return case_key(f"{_target_key_base(target['id'])}_key")
+
+
+def _target_key_base(target_id: str) -> str:
+    return target_id.rsplit("__", 1)[-1]
 
 
 def _validate_scd2_manual_fields(spec: dict[str, Any]) -> list[Diagnostic]:

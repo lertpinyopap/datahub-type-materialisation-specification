@@ -181,7 +181,9 @@ extends: abstract_reference_code_data
 ```text
 control_data ::=
   change_type
-  business_key
+  business_key?
+  skip_business_key?
+  skip_surrogate_key?
   materialisation_type?
   failure_mode?
   scd?
@@ -192,6 +194,8 @@ materialisation_type ::= table
 failure_mode ::= fail_load | quarantine_row
 change_type ::= scd1 | scd2_manual | scd2_auto
 business_key ::= business_key_config
+skip_business_key ::= true | false
+skip_surrogate_key ::= true | false
 scd ::= scd_config
 quarantine ::= quarantine_table
 job ::= job_table
@@ -209,12 +213,23 @@ omitted, implementations should default to `fail_load`.
 `change_type` explicitly declares the change-handling behavior. It is required
 for complete specifications and has no default.
 
-`business_key` declares the stable key used to identify the business entity
-represented by each record. It is required for complete specifications and has
-no default.
+`business_key` declares the target fields used to identify the business entity
+represented by each record. It is required unless `skip_business_key` is `true`.
+For `scd2_auto`, `business_key` is required even when the generated
+business-key column is skipped because the fields are needed for history
+windowing and target matching.
 
-`scd` configures delete handling for SCD1, plus generated validity-window
-behavior and protected full-history rebuilds for `scd2_auto`.
+`skip_business_key` controls whether the generated business-key column is
+omitted from the target output. If omitted, implementations should default to
+`false`.
+
+`skip_surrogate_key` controls whether the generated surrogate-key column is
+omitted from the target output. If omitted, implementations should default to
+`false`.
+
+`scd` configures delete handling for SCD1, update behavior for `scd2_manual`,
+and generated validity-window behavior and protected full-history rebuilds for
+`scd2_auto`.
 
 `quarantine` optionally describes the quarantine table used when
 `failure_mode` is `quarantine_row`.
@@ -247,7 +262,6 @@ control_data:
   failure_mode: quarantine_row
   change_type: scd2_auto
   business_key:
-    mode: raw
     fields:
       - account_id
   scd:
@@ -263,67 +277,93 @@ control_data:
 
 ```text
 business_key_config ::=
-  mode
   fields[]
-  separator?
-  name?
 
-business_key_mode ::= hash | raw
 fields ::= target field id
-separator ::= string
-name ::= generated field id
 ```
 
-`business_key` is required for all complete specifications. It declares how the
-implementation builds the generated business-key column stored on the target
-record.
+`business_key` declares the ordered list of target field ids used to build the
+generated business-key value. Every field id must exist in `target.fields`.
 
-The generated business-key column is physically stored as `varchar`. By default
-the generated column name is `<target.id>_KEY`, using the implementation's
-normal physical identifier casing. For example, a target id of
-`customer_mapping` produces `CUSTOMER_MAPPING_KEY`. `business_key.name` may be
-provided to override this generated column name.
+When `skip_business_key` is omitted or `false`, implementations must generate a
+business-key column on the target. The generated column is physically stored as
+`varchar`. Its generated column name is `<target.id>_BUSINESS_KEY`, using the
+implementation's normal physical identifier casing. For example, a target id of
+`customer_mapping` produces `CUSTOMER_MAPPING_BUSINESS_KEY`.
 
-`business_key.mode` values:
+The generated business-key value is always the SHA2-256 hash of the configured
+field values concatenated with the pipe character `|`. The business-key column
+name, hashing algorithm, and separator are fixed by the specification and are
+not configurable. If `target.id` contains an implementation or environment
+prefix separated by `__`, generated business-key column names use only the part
+after the final `__`.
 
-- `raw`: concatenate the configured field values using `separator` and store the
-  resulting string.
-- `hash`: concatenate the configured field values using `separator`, calculate a
-  SHA2-256 hash of that string, and store the hash string.
+When `skip_business_key: true`, implementations must omit the generated
+business-key column from the target output.
 
-`business_key.fields` is the ordered list of target field ids used to build the
-key. Every field id must exist in `target.fields`.
-
-`business_key.separator` is the string placed between field values before raw
-storage or hashing. If omitted, it defaults to `|`. It may be the empty string
-`""`, meaning values are concatenated without a separator.
-
-Sample: raw business key.
+Sample: generated business key.
 
 ```yaml
 control_data:
   change_type: scd1
   business_key:
-    mode: raw
     fields:
       - account_id
 ```
 
-Sample: hashed business key with an overridden column name.
+Sample: skipped generated business key.
 
 ```yaml
 control_data:
-  change_type: scd2_auto
-  business_key:
-    mode: hash
-    name: customer_mapping_key
-    fields:
-      - customer_id
-      - source_system_code
-    separator: ""
+  change_type: scd1
+  skip_business_key: true
 ```
 
-### 5.2 Quarantine Table
+### 5.2 Surrogate Key
+
+```text
+skip_surrogate_key ::= true | false
+```
+
+When `skip_surrogate_key` is omitted or `false`, implementations must generate
+a unique row-level GUID value for every newly created target row. The generated
+surrogate-key column is physically stored as `varchar(36)`.
+
+The generated surrogate-key column name is `<target.id>_KEY`, using the
+implementation's normal physical identifier casing. For example, a target id of
+`customer_mapping` produces `CUSTOMER_MAPPING_KEY`. If `target.id` contains an
+implementation or environment prefix separated by `__`, generated surrogate-key
+column names use only the part after the final `__`.
+
+When `skip_surrogate_key: true`, implementations must omit the generated
+surrogate-key column from the target output.
+
+The generated surrogate-key column is system metadata. It must not be declared
+in `target.fields`, must not be listed in `business_key.fields`, and must be
+excluded from `business_data_hash`.
+
+Sample: default surrogate key generation.
+
+```yaml
+control_data:
+  change_type: scd1
+  business_key:
+    fields:
+      - account_id
+```
+
+Sample: skipped surrogate key generation.
+
+```yaml
+control_data:
+  change_type: scd1
+  business_key:
+    fields:
+      - account_id
+  skip_surrogate_key: true
+```
+
+### 5.3 Quarantine Table
 
 ```text
 quarantine_table ::=
@@ -387,7 +427,7 @@ control_data:
     table: account_load__QUARANTINE
 ```
 
-### 5.3 Job Table
+### 5.4 Job Table
 
 ```text
 job_table ::=
@@ -501,13 +541,17 @@ control_data:
     table: TYPE_MATERIALISATION_JOBS
 ```
 
-### 5.4 Slowly Changing Dimensions
+### 5.5 Slowly Changing Dimensions
 
 ```text
-scd_config ::= scd1_scd_config | scd2_auto_scd_config
+scd_config ::= scd1_scd_config | scd2_manual_scd_config | scd2_auto_scd_config
 
 scd1_scd_config ::=
   delete_detection?
+
+scd2_manual_scd_config ::=
+  update_mode?
+  update_key?
 
 scd2_auto_scd_config ::=
   insert_time
@@ -524,14 +568,18 @@ delete_detection ::=
 insert_time ::= scalar
 scd2_auto_from_sot ::= true | false
 scd2_validation ::= continuous | sparse
+update_mode ::= append_only | upsert
+update_key ::=
+  fields[]
 delete_detection_mode ::= field | truncate
 field ::= target field id
 value ::= scalar
 ```
 
-SCD configuration is used for delete handling when `change_type` is `scd1` and
-for generated validity-window behavior and protected full-history rebuilds when
-`change_type` is `scd2_auto`.
+SCD configuration is used for delete handling when `change_type` is `scd1`, for
+manual update behavior when `change_type` is `scd2_manual`, and for generated
+validity-window behavior and protected full-history rebuilds when `change_type`
+is `scd2_auto`.
 
 For `scd1`, implementations materialise the current typed state without SCD2
 history metadata. SCD1 may use `delete_detection.mode: field` to physically
@@ -539,9 +587,8 @@ remove matching records from the generated current-state output, or
 `delete_detection.mode: truncate` to fully recreate the target from the current
 source output.
 
-For `scd2_manual`, implementations do not apply special SCD2 handling. The
-source must provide SCD2 state values and the specification must declare them in
-`target.fields` as ordinary fields:
+For `scd2_manual`, the source must provide SCD2 state values and the
+specification must declare them in `target.fields` as ordinary fields:
 
 - `valid_from_datetime`: timestamp value from which the row is valid.
 - `valid_to_datetime`: timestamp value until which the row is valid.
@@ -551,7 +598,29 @@ source must provide SCD2 state values and the specification must declare them in
 The `valid_from_datetime` and `valid_to_datetime` fields must use a timestamp
 data type. The `is_current` and `is_deleted` fields must use `varchar(1)`.
 These fields are typed, transformed, validated, and copied like any other target
-field. `scd2_manual` must not declare `scd` parameters.
+field. Implementations must not derive SCD2 validity windows or state flags for
+`scd2_manual`.
+
+Implementations must reject a manual SCD2 load when more than one incoming row
+for the same configured `business_key` has `is_current = 'Y'`.
+
+For incremental dbt loads, `scd2_manual` uses `scd.update_mode` to control
+whether incoming rows may replace existing target rows:
+
+- `append_only`: append incoming rows without replacing existing target rows.
+  This is the default when `update_mode` is omitted.
+- `upsert`: replace target rows that have the same configured `business_key`
+  plus `scd.update_key.fields` as an incoming source row, and insert incoming
+  rows whose combined key does not already exist in the target.
+
+`upsert` allows a later manual SCD2 source file to update the
+`valid_to_datetime` and state flags for an existing version while adding a new
+version. `business_key.fields` identifies the logical entity, while
+`scd.update_key.fields` identifies the version row for upsert matching. If
+`update_mode` is `upsert` and `update_key` is omitted, implementations should
+default `update_key.fields` to `valid_from_datetime`. `scd.update_key` is valid
+only when `update_mode` is `upsert`. `scd2_manual` must not declare SCD
+parameters other than `update_mode` and `update_key`.
 
 For `scd2_auto`, implementations preserve historical versions and generate the
 following target metadata columns:
@@ -609,8 +678,8 @@ names.
 join current target rows, partition validity windows, and identify affected
 history for incremental updates. Implementations calculate `business_data_hash`
 as a SHA2-256 hash over source-derived business values. Generated business-key
-values, generated audit metadata, and generated SCD metadata fields are always
-excluded from the hash.
+values, generated surrogate-key values, generated audit metadata, and generated
+SCD metadata fields are always excluded from the hash.
 
 The reference platform start-of-time timestamp is `0001-01-01T00:00:00Z`. The
 reference platform end-of-time timestamp is `9999-12-31T23:59:59Z`.
@@ -630,9 +699,10 @@ row for the same generated business key starts before the current row's
 `valid_to_datetime`. Under `continuous` validation, rows are also invalid when
 the current row's `valid_to_datetime` is not equal to the next row's
 `valid_from_datetime`, or when the latest row for the generated business key
-does not end at the platform end-of-time timestamp. Invalid rows must fail the
-dbt load rather than being materialised, leaving the existing target state
-unchanged.
+does not end at or after `9999-12-30 00:00:00`. This near-end-of-time threshold
+allows timezone-normalised end-of-time timestamps to validate reliably. Invalid
+rows must fail the dbt load rather than being materialised, leaving the existing
+target state unchanged.
 
 SCD2 change detection compares the incoming `business_data_hash` with the
 current target row for the same generated business key where
@@ -662,7 +732,6 @@ Sample: protected truncate rebuild.
 control_data:
   change_type: scd2_auto
   business_key:
-    mode: raw
     fields:
       - account_id
   scd:
@@ -684,7 +753,6 @@ Sample: SCD2 automatic change handling.
 control_data:
   change_type: scd2_auto
   business_key:
-    mode: raw
     fields:
       - account_id
   scd:
@@ -707,7 +775,8 @@ typing, and validation.
 
 - `csv`: delimited text input where fields may be selected by position, column
   name, or both.
-- `table`: relational table input where fields are selected by column name.
+- `table`: Snowflake table or query input where fields are selected by column
+  name, or by native Snowflake path extraction from semi-structured columns.
 
 ### 6.1 CSV Source
 
@@ -789,19 +858,20 @@ second `@`.
 `seed` describes how a CSV file is loaded using dbt's native seed mechanism:
 
 - `file`: local CSV file copied into the generated dbt project's `seeds`
-  directory.
+  directory. Variable expressions in `file` are resolved by Python tooling
+  before dbt generation copies the file.
 - `name`: dbt seed resource name. Defaults to `<target.id>__seed`.
 - `database`: database for the seed relation. If omitted, the active dbt
   adapter and database session context resolves it.
 - `schema`: schema for the seed relation. Defaults to `target.schema`.
 
 For `load_method: dbt_seed`, `seed.file` is required. When `header` is `true`,
-each target field must specify `field.source.column`. When `header` is `false`,
-each target field must specify `field.source.pos`; the implementation must
-synthesize a dbt seed header using `COL_<N>` names, where `N` is the zero-based
-field position. dbt seed loading is intended for small local CSV files and
-development or reference-data workflows; stage-based loading remains the
-preferred path for large operational source files.
+each non-fixed target field must specify `field.source.column`. When `header` is
+`false`, each non-fixed target field must specify `field.source.pos`; the
+implementation must synthesize a dbt seed header using `COL_<N>` names, where
+`N` is the zero-based field position. dbt seed loading is intended for small
+local CSV files and development or reference-data workflows; stage-based
+loading remains the preferred path for large operational source files.
 
 `upload` describes whether the implementation should upload the local CSV file
 before dbt generation:
@@ -870,11 +940,25 @@ table_source ::=
     query?
   | query
   )
+  flatten?
+
+flatten ::= flatten_source | flatten_source[]
+
+flatten_source ::=
+  column
+  path?
+  alias
+  outer?
+  mode?
 
 database ::= string
 schema ::= string
 table ::= string
 query ::= SQL SELECT statement
+path ::= Snowflake semi-structured path
+alias ::= identifier
+outer ::= true | false
+mode ::= object | array | both
 ```
 
 Sample: table source.
@@ -896,6 +980,34 @@ timestamp or batch identifier, select a subset of columns, join, deduplicate, or
 perform other source shaping before target field mapping runs. If `query` is
 omitted, `schema` and `table` are required and implementations should read all
 rows from that source relation.
+
+`flatten` optionally declares Snowflake-native row expansion over
+semi-structured source data before field mapping. Implementations must compile
+each entry to a `lateral flatten` operation. `column` names the source column or
+an earlier flatten alias. `path` selects the array or object to expand using
+Snowflake semi-structured path syntax. `alias` names the flatten output for
+field mappings. `outer` maps to Snowflake `FLATTEN(..., OUTER => ...)` and
+defaults to `false`.
+
+`flatten.mode` values:
+
+- `object`: expand object entries only.
+- `array`: expand array entries only.
+- `both`: expand object and array entries. This is the default.
+
+Sample: table source with Snowflake flattening.
+
+```yaml
+source:
+  format: table
+  schema: raw
+  table: landed_order_events
+  flatten:
+    column: payload
+    path: customer.orders
+    alias: order_item
+    mode: array
+```
 
 ## 7. Target
 
@@ -948,12 +1060,13 @@ The target audit metadata columns are:
   delete and supports incremental processing and observability. The physical
   data type is `timestamp_tz`.
 
-The generated business-key, audit, and `scd2_auto` metadata column data type
-contract is:
+The generated surrogate-key, business-key, audit, and `scd2_auto` metadata
+column data type contract is:
 
 | Column | Physical data type | Value domain |
 | --- | --- | --- |
-| `<target.id>_KEY` or `business_key.name` | `varchar` | raw or hashed business key value |
+| `<target.id>_KEY` | `varchar(36)` | generated GUID value |
+| `<target.id>_BUSINESS_KEY` | `varchar` | SHA2-256 hashed business key value |
 | `is_current_flag` | `varchar(1)` | `Y` or `N` |
 | `is_deleted_flag` | `varchar(1)` | `Y` or `N` |
 | `valid_from_datetime` | `timestamp_tz` | timezone-aware timestamp value |
@@ -1032,12 +1145,17 @@ field.source ::= csv_field_source | table_field_source
 csv_field_source ::=
   pos?
   column?
+  | fixed_value
 
 table_field_source ::=
   column
+  snowflake_path?
+  | fixed_value
 
 pos ::= integer >= 0
 column ::= string
+snowflake_path ::= Snowflake semi-structured path
+fixed_value ::= scalar
 ```
 
 For CSV sources, a field may be selected by position, column name, or both. If
@@ -1052,11 +1170,23 @@ implementations should alias positional stage columns to these names; dbt-seed
 implementations should synthesize a seed header with these names.
 
 For table sources, a field must be selected by column name. `pos` is invalid for
-table sources.
+table sources. `snowflake_path` may be supplied to extract a scalar value from a
+Snowflake `VARIANT`, `OBJECT`, or `ARRAY` column, or from the `value` column of
+a configured flatten alias. The extracted value enters the TMS transform and
+validation pipeline as a `varchar` source value; target typing still happens in
+the normal TMS field pipeline.
 
-Any `field.source.column` value specified in `target.fields` must be unique
-within the resolved target field list. Column comparison is case-free, so
-`account_id` and `ACCOUNT_ID` are the same source column name.
+For any source format, `fixed_value` supplies the same scalar source value for
+every generated source row. It is mutually exclusive with `pos`, `column`, and
+`snowflake_path`. The fixed value enters the TMS transform and validation
+pipeline as a `varchar` source value; target typing still happens in the normal
+TMS field pipeline.
+
+Any `field.source.column` value specified without `snowflake_path` in
+`target.fields` must be unique within the resolved target field list. Column
+comparison is case-free, so `account_id` and `ACCOUNT_ID` are the same source
+column name. Multiple fields may use the same semi-structured source column when
+each field supplies its own `snowflake_path`.
 
 Sample: CSV field source using both position and column.
 
@@ -1077,6 +1207,38 @@ fields:
     source:
       column: account_id
     data_type: varchar(20)
+```
+
+Sample: table field source using Snowflake path extraction.
+
+```yaml
+fields:
+  - id: opened_date
+    source:
+      column: payload
+      snowflake_path: account.openedDate
+    data_type: date
+```
+
+Sample: table field source using a flatten alias.
+
+```yaml
+fields:
+  - id: order_id
+    source:
+      column: order_item
+      snowflake_path: id
+    data_type: varchar(20)
+```
+
+Sample: field source using a fixed value.
+
+```yaml
+fields:
+  - id: is_current
+    source:
+      fixed_value: "Y"
+    data_type: varchar(1)
 ```
 
 ## 10. Data Types
@@ -1126,9 +1288,11 @@ parse_timestamp ::=
   type: parse_timestamp
   format
   timezone_if_missing?
+  time_if_missing?
 
 format ::= Python datetime format string
 timezone_if_missing ::= Z | UTC | local
+time_if_missing ::= start_of_day | end_of_day
 
 round ::=
   type: round
@@ -1158,7 +1322,9 @@ compatible with the field's `data_type`.
 - `parse_date`: parse a string value into a date using `format`.
 - `parse_timestamp`: parse a string value into a timezone-aware timestamp using
   `format`. If the parsed value does not include timezone information, the
-  value must be rejected unless `timezone_if_missing` is supplied.
+  value must be rejected unless `timezone_if_missing` is supplied. If the
+  source format does not include a time component, `time_if_missing` may be
+  supplied to set the parsed timestamp to the start or end of the parsed day.
 - `round`: round a numeric value to a decimal `scale`.
 - `custom`: apply a named Python macro to the column.
 
@@ -1187,6 +1353,13 @@ If `mode` is omitted, implementations should default to `half_up`.
 - `local`: treat a timestamp without timezone information as local to the
   runtime environment.
 
+`time_if_missing` values:
+
+- `start_of_day`: when the timestamp format has no time component, set the
+  parsed time to `00:00:00`.
+- `end_of_day`: when the timestamp format has no time component, set the parsed
+  time to `23:59:59`.
+
 Date and timestamp `format` values use Python `datetime` `strptime` /
 `strftime`-style format codes. Timestamp formats must include a timezone offset
 or timezone-bearing value unless `timezone_if_missing` is supplied.
@@ -1200,6 +1373,8 @@ Common date and timestamp format examples:
 - `%Y-%m-%d`: `2026-08-13`
 - `%d/%m/%Y`: `13/08/2026`
 - `%Y-%m-%d %H:%M:%S` with `timezone_if_missing: UTC`: `2026-08-13 14:30:00`
+- `%d/%m/%Y` with `timezone_if_missing: UTC` and
+  `time_if_missing: end_of_day`: `13/08/2026`
 - `%Y-%m-%dT%H:%M:%S%z`: `2026-08-13T14:30:00+1000`
 - `%Y-%m-%dT%H:%M:%S%z`: `2026-08-13T14:30:00Z`
 
@@ -1486,9 +1661,17 @@ variable_expression ::=
   | "{{ var('name', 'default') }}"
   | "{{ env_var('name') }}"
   | "{{ env_var('name', 'default') }}"
+  | "{{ tms_var('name') }}"
+  | "{{ tms_var('name', 'default') }}"
 ```
 
-Variable expressions are resolved after YAML parsing and before source loading.
+`tms_var` expressions are resolved by TMS from command-line `--vars` after YAML
+parsing and before schema validation, CSV validation, or dbt project
+generation. If a `tms_var` expression provides a default, the default is used
+when the variable is omitted from `--vars`.
+
+`var` and `env_var` expressions are dbt-time expressions. They may remain in
+generated dbt files and be resolved by dbt at runtime.
 
 Sample: table source with dbt-style variables.
 
@@ -1528,21 +1711,30 @@ Parse-time rules:
 - Complete concrete specifications must declare `control_data.change_type`.
 - `source.format ::= csv | table`.
 - For `source.format = csv`, each field source must specify at least one of
-  `pos` or `column`.
+  `pos`, `column`, or `fixed_value`.
 - For `source.format = csv` and `source.header = false`, `field.source.column`
   is invalid.
 - For `source.format = csv`, `source.load_method = dbt_seed`, and
-  `source.header = true`, each field source must specify `column`.
+  `source.header = true`, each field source must specify `column` or
+  `fixed_value`.
 - For `source.format = csv`, `source.load_method = dbt_seed`, and
-  `source.header = false`, each field source must specify `pos`.
-- For `source.format = table`, `field.source.column` is required.
+  `source.header = false`, each field source must specify `pos` or
+  `fixed_value`.
+- For `source.format = table`, each field source must specify `column` or
+  `fixed_value`.
 - For `source.format = table`, `field.source.pos` is invalid.
+- For `source.format = table`, `field.source.snowflake_path` is valid only with
+  `field.source.column`.
+- `field.source.fixed_value` is mutually exclusive with `field.source.pos`,
+  `field.source.column`, and `field.source.snowflake_path`.
+- For `source.format = table`, each `source.flatten.alias` must be unique and
+  must not duplicate a physical source column used without `snowflake_path`.
 - For `source.format = table`, if `source.query` is supplied, it must be a
   single SQL query starting with `select` or `with` and must not include a
   statement terminator.
 - Target field ids must be unique within the resolved target field list.
-- Specified `field.source.column` values must be unique within the resolved
-  target field list.
+- Specified `field.source.column` values without `snowflake_path` must be unique
+  within the resolved target field list.
 - Target field ids must not use reserved audit metadata column names:
   `audit_data_process_key`, `audit_created_datetime`, or
   `audit_last_changed_datetime`.
@@ -1550,12 +1742,19 @@ Parse-time rules:
   `is_current_flag`, `is_deleted_flag`, `valid_from_datetime`,
   `valid_to_datetime`, or `business_data_hash`. `scd2_manual` specifications
   must declare `valid_from_datetime` and `valid_to_datetime` as target fields.
-- `control_data.business_key` is required for complete specifications.
+- `control_data.business_key` is required for complete specifications unless
+  `skip_business_key` is `true`. `scd2_auto` specifications must declare
+  `business_key` even when `skip_business_key` is `true`.
 - `business_key.fields` must contain at least one target field id, and each
   configured field id must exist in `target.fields`.
-- The generated business-key column name, either `<target.id>_KEY` or
-  `business_key.name`, must not collide with a target field id or generated
-  metadata field id.
+- When surrogate-key generation is enabled, `business_key.fields` must not
+  include the generated surrogate-key column name.
+- If `skip_business_key` is omitted or `false`, the generated business-key
+  column name `<target.id>_BUSINESS_KEY` must not collide with a target field id
+  or generated metadata field id.
+- If `skip_surrogate_key` is omitted or `false`, the generated surrogate-key
+  column name `<target.id>_KEY` must not collide with a target field id, the
+  generated business-key column name, or another generated metadata field id.
 - For `delete_detection.mode = field`, `field` and `value` are required, and
   `field` must reference a target field id. This mode is valid only when
   `change_type = scd1`.
@@ -1563,7 +1762,14 @@ Parse-time rules:
   This mode is valid when `change_type = scd1` or `change_type = scd2_auto`.
   dbt implementations must require `allow_truncate: true` before executing the
   rebuild.
-- For `change_type = scd2_manual`, `scd` must be omitted.
+- For `change_type = scd2_manual`, `scd` may contain `update_mode` and
+  `update_key`, and must not contain other SCD parameters.
+- For `change_type = scd2_manual`, `scd.update_key` is valid only when
+  `scd.update_mode = upsert`.
+- For `change_type = scd2_manual`, every `scd.update_key.fields` value must
+  reference a target field id. When `scd.update_mode = upsert` and
+  `scd.update_key` is omitted, implementations should default
+  `scd.update_key.fields` to `valid_from_datetime`.
 - For `change_type = scd2_manual`, target fields must include
   `valid_from_datetime`, `valid_to_datetime`, `is_current`, and `is_deleted`.
 - For `change_type = scd2_manual`, `valid_from_datetime` and
@@ -1607,6 +1813,13 @@ Load-time rules:
   are both specified, the source header at `pos` must equal `column`.
 - For `source.format = table`, `field.source.column` must exist in the source
   table.
+- For `source.format = table`, if `field.source.snowflake_path` is specified and
+  `field.source.column` is not a configured flatten alias, the source column
+  must be a Snowflake `VARIANT`, `OBJECT`, or `ARRAY` column. If the
+  implementation can inspect table metadata before materialisation, it must fail
+  before target data is changed when this condition is not met. Missing path
+  values produce null source values and are handled by ordinary TMS field
+  validation.
 - For any field with `unique: true`, non-null materialised values for that field
   must be unique within the loaded source set.
 

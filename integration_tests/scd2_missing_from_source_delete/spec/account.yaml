@@ -3,7 +3,6 @@ control_data:
   materialisation_type: table
   change_type: scd2_auto
   business_key:
-    mode: raw
     fields:
       - account_id
   scd:

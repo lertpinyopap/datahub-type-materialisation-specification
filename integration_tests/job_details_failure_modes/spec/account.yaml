@@ -3,7 +3,6 @@ control_data:
   materialisation_type: table
   change_type: scd1
   business_key:
-    mode: raw
     fields:
       - account_id
   failure_mode: fail_load

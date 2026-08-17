@@ -9,6 +9,10 @@ updating historical duplicate boundaries.
 ## What This Test Covers
 
 - Generated `business_data_hash` values drive current duplicate detection.
+- Generated business-key values are present and stable across all SCD2 versions
+  for the same business entity.
+- Generated surrogate-key values are present, GUID-shaped, unique per row, and
+  preserved for pre-existing rows.
 - The generated incremental model compares the incoming hash with the current
   target row hash.
 - An incoming row with the same business key and same business hash does not

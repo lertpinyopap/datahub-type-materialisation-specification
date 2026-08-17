@@ -59,7 +59,6 @@ def _control_data_block(extra_control: str, *, field_id: str = "account_id") -> 
                 prefix = line[: len(line) - len(line.lstrip())]
                 lines[index + 1:index + 1] = [
                     f"{prefix}business_key:",
-                    f"{prefix}  mode: raw",
                     f"{prefix}  fields:",
                     f"{prefix}    - {field_id}",
                 ]
@@ -83,7 +82,6 @@ def _with_default_business_key(content: str) -> str:
             prefix = line[: len(line) - len(line.lstrip())]
             lines[index + 1:index + 1] = [
                 f"{prefix}business_key:",
-                f"{prefix}  mode: raw",
                 f"{prefix}  fields:",
                 f"{prefix}    - {field_id}",
             ]
@@ -169,7 +167,7 @@ def test_csv_dbt_seed_generation_copies_seed_and_reads_from_ref(tmp_path: Path) 
           header: true
           load_method: dbt_seed
           seed:
-            file: {seed_file.name}
+            file: {seed_file}
             name: account_seed
             schema: TMP
         target:
@@ -203,6 +201,143 @@ def test_csv_dbt_seed_generation_copies_seed_and_reads_from_ref(tmp_path: Path) 
     assert "@csv_stage" not in source_sql
 
 
+def test_csv_dbt_seed_file_can_use_generation_var(monkeypatch, tmp_path: Path) -> None:
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    seed_file = run_dir / "account_seed_input.csv"
+    seed_file.write_text("account_id\nACCT000000000001\n", encoding="utf-8")
+    monkeypatch.chdir(run_dir)
+    result, output_dir = generate(
+        tmp_path,
+        """
+        id: account_csv
+        control_data:
+          change_type: scd1
+        source:
+          format: csv
+          header: true
+          load_method: dbt_seed
+          seed:
+            file: "{{ tms_var('seed_file') }}"
+            name: account_seed
+        target:
+          id: account
+          schema: business
+          fields:
+            - id: account_id
+              source:
+                pos: 0
+                column: account_id
+              data_type: varchar(20)
+        """,
+        vars={"seed_file": seed_file.name},
+    )
+
+    assert result.errors == []
+    assert (output_dir / "seeds" / "account_seed.csv").read_text(encoding="utf-8") == seed_file.read_text(encoding="utf-8")
+
+
+def test_csv_dbt_seed_file_can_use_generation_var_default(monkeypatch, tmp_path: Path) -> None:
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    seed_file = run_dir / "account_seed_input.csv"
+    seed_file.write_text("account_id\nACCT000000000001\n", encoding="utf-8")
+    monkeypatch.chdir(run_dir)
+    result, output_dir = generate(
+        tmp_path,
+        """
+        id: account_csv
+        control_data:
+          change_type: scd1
+        source:
+          format: csv
+          header: true
+          load_method: dbt_seed
+          seed:
+            file: "{{ tms_var('seed_file', 'account_seed_input.csv') }}"
+            name: account_seed
+        target:
+          id: account
+          schema: business
+          fields:
+            - id: account_id
+              source:
+                pos: 0
+                column: account_id
+              data_type: varchar(20)
+        """,
+    )
+
+    assert result.errors == []
+    assert (output_dir / "seeds" / "account_seed.csv").read_text(encoding="utf-8") == seed_file.read_text(encoding="utf-8")
+
+
+def test_generation_resolves_tms_vars_before_generating_project(tmp_path: Path) -> None:
+    seed_file = tmp_path / "account_seed_input.csv"
+    seed_file.write_text("account_id\nACCT000000000001\n", encoding="utf-8")
+    result, output_dir = generate(
+        tmp_path,
+        """
+        id: account_csv
+        control_data:
+          change_type: scd1
+        source:
+          format: csv
+          header: true
+          load_method: dbt_seed
+          seed:
+            file: "{{ tms_var('seed_file') }}"
+            name: account_seed
+            schema: "{{ tms_var('seed_schema', 'TMP') }}"
+        target:
+          id: account
+          schema: business
+          fields:
+            - id: account_id
+              source:
+                pos: 0
+                column: account_id
+              data_type: varchar(20)
+        """,
+        vars={"seed_file": str(seed_file), "seed_schema": "SANDBOX"},
+    )
+
+    assert result.errors == []
+    project = load_yaml(output_dir / "dbt_project.yml")
+    seed_config = project["seeds"]["type_materialisation_generated"]["account_seed"]
+    assert seed_config["+schema"] == "SANDBOX"
+
+
+def test_generation_fails_when_required_tms_var_is_missing(tmp_path: Path) -> None:
+    result, _ = generate(
+        tmp_path,
+        """
+        id: account_csv
+        control_data:
+          change_type: scd1
+        source:
+          format: csv
+          header: true
+          load_method: dbt_seed
+          seed:
+            file: "{{ tms_var('seed_file') }}"
+            name: account_seed
+        target:
+          id: account
+          schema: business
+          fields:
+            - id: account_id
+              source:
+                pos: 0
+                column: account_id
+              data_type: varchar(20)
+        """,
+    )
+
+    assert diagnostic_messages(result.errors) == ["variable `seed_file` was not provided"]
+    assert result.errors[0].location == "$.source.seed.file"
+
+
 def test_csv_dbt_seed_without_header_synthesizes_position_column_names(tmp_path: Path) -> None:
     seed_file = tmp_path / "account_seed_input.csv"
     seed_file.write_text("ACCT000000000001,Acme Trading,ACTIVE\n", encoding="utf-8")
@@ -218,7 +353,7 @@ def test_csv_dbt_seed_without_header_synthesizes_position_column_names(tmp_path:
           load_method: dbt_seed
           lineterminator: "\\n"
           seed:
-            file: {seed_file.name}
+            file: {seed_file}
             name: account_seed
             schema: TMP
         target:
@@ -251,6 +386,47 @@ def test_csv_dbt_seed_without_header_synthesizes_position_column_names(tmp_path:
     source_sql = (output_dir / "models" / "generated" / "account__source.sql").read_text(encoding="utf-8")
     assert "cast(COL_0 as string) as COL_0" in source_sql
     assert "cast(COL_2 as string) as COL_2" in source_sql
+
+
+def test_csv_dbt_seed_generation_outputs_fixed_values_without_seed_columns(tmp_path: Path) -> None:
+    seed_file = tmp_path / "account_seed_input.csv"
+    seed_file.write_text("account_id\nACCT000000000001\n", encoding="utf-8")
+    result, output_dir = generate(
+        tmp_path,
+        f"""
+        id: account_csv
+        control_data:
+          change_type: scd1
+        source:
+          format: csv
+          header: true
+          load_method: dbt_seed
+          seed:
+            file: {seed_file}
+            name: account_seed
+            schema: TMP
+        target:
+          id: account
+          schema: business
+          fields:
+            - id: account_id
+              source:
+                column: account_id
+              data_type: varchar(20)
+            - id: is_current
+              source:
+                fixed_value: "Y"
+              data_type: varchar(1)
+        """,
+    )
+
+    assert result.errors == []
+    project = load_yaml(output_dir / "dbt_project.yml")
+    seed_config = project["seeds"]["type_materialisation_generated"]["account_seed"]
+    assert seed_config["+column_types"] == {"ACCOUNT_ID": "varchar"}
+    source_sql = (output_dir / "models" / "generated" / "account__source.sql").read_text(encoding="utf-8")
+    assert "cast(ACCOUNT_ID as string) as ACCOUNT_ID" in source_sql
+    assert "cast('Y' as string) as IS_CURRENT" in source_sql
 
 
 def test_csv_dbt_seed_generation_reports_missing_seed_file(tmp_path: Path) -> None:
@@ -307,6 +483,32 @@ def test_generated_source_model_uses_csv_positions(tmp_path: Path) -> None:
     source_sql = (output_dir / "models" / "generated" / "account__source.sql").read_text(encoding="utf-8")
     assert "$1::string as ACCOUNT_ID" in source_sql
     assert "$3::string as ACCOUNT_STATUS" in source_sql
+
+
+def test_generated_source_model_uses_fixed_values(tmp_path: Path) -> None:
+    result, output_dir = generate(
+        tmp_path,
+        csv_generation_spec(
+            fields="""
+        - id: account_id
+          source:
+            pos: 0
+            column: account_id
+          data_type: varchar(20)
+        - id: is_current
+          source:
+            fixed_value: "Y"
+          data_type: varchar(1)
+            """
+        ),
+    )
+
+    assert result.errors == []
+    source_sql = (output_dir / "models" / "generated" / "account__source.sql").read_text(encoding="utf-8")
+    model_sql = (output_dir / "models" / "generated" / "account.sql").read_text(encoding="utf-8")
+    assert "$1::string as ACCOUNT_ID" in source_sql
+    assert "cast('Y' as string) as IS_CURRENT" in source_sql
+    assert "cast(IS_CURRENT as varchar(1)) as IS_CURRENT" in model_sql
 
 
 def test_headerless_csv_stage_generation_aliases_positions_to_col_names(tmp_path: Path) -> None:
@@ -504,6 +706,16 @@ def test_parse_date_and_timestamp_transforms_generate_snowflake_sql(tmp_path: Pa
             - type: parse_timestamp
               format: "%Y-%m-%d %H:%M:%S"
               timezone_if_missing: UTC
+        - id: valid_to_datetime
+          source:
+            pos: 3
+            column: valid_to_datetime
+          data_type: timestamp_tz
+          transforms:
+            - type: parse_timestamp
+              format: "%d/%m/%Y"
+              timezone_if_missing: UTC
+              time_if_missing: end_of_day
             """
         ),
     )
@@ -514,6 +726,7 @@ def test_parse_date_and_timestamp_transforms_generate_snowflake_sql(tmp_path: Pa
     assert "try_to_date(cast(OPENED_ON as varchar), 'DD/MM/YYYY')" in model_sql
     assert "try_to_timestamp_tz(cast(OPENED_AT as varchar), 'YYYY-MM-DD\"T\"HH24:MI:SSTZHTZM')" in model_sql
     assert "try_to_timestamp_tz(concat(cast(REVIEWED_AT as varchar), ' +0000'), 'YYYY-MM-DD HH24:MI:SS TZHTZM')" in model_sql
+    assert "dateadd(second, 86399, date_trunc('day', try_to_timestamp_tz(concat(cast(VALID_TO_DATETIME as varchar), ' +0000'), 'DD/MM/YYYY TZHTZM')))" in model_sql
     assert "field `opened_on` does not match parse_date format `%d/%m/%Y`" in guard_sql
     assert "field `opened_at` does not match parse_timestamp format `%Y-%m-%dT%H:%M:%S%z`" in guard_sql
 
@@ -565,7 +778,7 @@ def test_table_source_generation_reads_from_configured_relation(tmp_path: Path) 
 
     assert result.errors == []
     source_sql = (output_dir / "models" / "generated" / "account__source.sql").read_text(encoding="utf-8")
-    assert "ACCOUNT_ID as ACCOUNT_ID" in source_sql
+    assert "source_query.ACCOUNT_ID as ACCOUNT_ID" in source_sql
     assert "select * from RAW.LANDING.ACCOUNT_SOURCE" in source_sql
     assert "from source_query" in source_sql
 
@@ -605,6 +818,122 @@ def test_table_source_generation_wraps_source_query(tmp_path: Path) -> None:
     assert "      from landing.account_source" in source_sql
     assert "      where load_batch_id = '{{ var('load_batch_id') }}'" in source_sql
     assert "from source_query" in source_sql
+
+
+def test_table_source_generation_extracts_snowflake_paths_as_varchar(tmp_path: Path) -> None:
+    result, output_dir = generate(
+        tmp_path,
+        """
+        id: table_spec
+        control_data:
+          change_type: scd1
+        source:
+          format: table
+          database: raw
+          schema: landing
+          table: account_events
+        target:
+          id: account
+          schema: business
+          fields:
+            - id: account_id
+              source:
+                column: payload
+                snowflake_path: account.id
+              data_type: varchar(20)
+            - id: opened_on
+              source:
+                column: payload
+                snowflake_path: account.openedDate
+              data_type: date
+              transforms:
+                - type: parse_date
+                  format: "%Y-%m-%d"
+        """,
+    )
+
+    assert result.errors == []
+    source_sql = (output_dir / "models" / "generated" / "account__source.sql").read_text(encoding="utf-8")
+    final_sql = (output_dir / "models" / "generated" / "account.sql").read_text(encoding="utf-8")
+    assert "to_varchar(get_path(source_query.PAYLOAD, 'account.id')) as ACCOUNT_ID" in source_sql
+    assert "to_varchar(get_path(source_query.PAYLOAD, 'account.openedDate')) as OPENED_ON" in source_sql
+    assert "from RAW.information_schema.columns" in source_sql
+    assert "and upper(column_name) in ('PAYLOAD')" in source_sql
+    assert "data_type not in ('VARIANT', 'OBJECT', 'ARRAY')" in source_sql
+    assert "try_to_date(cast(OPENED_ON as varchar), 'YYYY-MM-DD')" in final_sql
+
+
+def test_table_source_generation_uses_fixed_values(tmp_path: Path) -> None:
+    result, output_dir = generate(
+        tmp_path,
+        """
+        id: table_spec
+        control_data:
+          change_type: scd1
+        source:
+          format: table
+          schema: landing
+          table: account_events
+        target:
+          id: account
+          schema: business
+          fields:
+            - id: account_id
+              source:
+                column: account_id
+              data_type: varchar(20)
+            - id: is_current
+              source:
+                fixed_value: "Y"
+              data_type: varchar(1)
+        """,
+    )
+
+    assert result.errors == []
+    source_sql = (output_dir / "models" / "generated" / "account__source.sql").read_text(encoding="utf-8")
+    assert "source_query.ACCOUNT_ID as ACCOUNT_ID" in source_sql
+    assert "cast('Y' as string) as IS_CURRENT" in source_sql
+    assert "from source_query" in source_sql
+
+
+def test_table_source_generation_flattens_snowflake_paths(tmp_path: Path) -> None:
+    result, output_dir = generate(
+        tmp_path,
+        """
+        id: table_spec
+        control_data:
+          change_type: scd1
+        source:
+          format: table
+          schema: landing
+          table: order_events
+          flatten:
+            column: payload
+            path: customer.orders
+            alias: order_item
+            mode: array
+        target:
+          id: order
+          schema: business
+          fields:
+            - id: account_id
+              source:
+                column: payload
+                snowflake_path: customer.account.id
+              data_type: varchar(20)
+            - id: order_id
+              source:
+                column: order_item
+                snowflake_path: id
+              data_type: varchar(20)
+        """,
+    )
+
+    assert result.errors == []
+    source_sql = (output_dir / "models" / "generated" / "order__source.sql").read_text(encoding="utf-8")
+    assert "to_varchar(get_path(source_query.PAYLOAD, 'customer.account.id')) as ACCOUNT_ID" in source_sql
+    assert "to_varchar(get_path(ORDER_ITEM.value, 'id')) as ORDER_ID" in source_sql
+    assert ", lateral flatten(input => get_path(source_query.PAYLOAD, 'customer.orders'), mode => 'ARRAY') as ORDER_ITEM" in source_sql
 
 
 def test_job_event_hooks_are_generated_at_project_run_level(tmp_path: Path) -> None:
@@ -825,7 +1154,7 @@ def test_scd2_auto_generation_adds_business_data_hash(tmp_path: Path) -> None:
     assert "SCD2 duplicate-hash historical boundary handling" not in not_implemented
 
 
-def test_business_key_generation_supports_hash_mode_name_and_separator(tmp_path: Path) -> None:
+def test_business_key_generation_uses_fixed_sha2_pipe_hash(tmp_path: Path) -> None:
     result, output_dir = generate(
         tmp_path,
         csv_generation_spec(
@@ -833,12 +1162,9 @@ def test_business_key_generation_supports_hash_mode_name_and_separator(tmp_path:
             control_data:
               change_type: scd1
               business_key:
-                mode: hash
-                name: customer_mapping_key
                 fields:
                   - account_id
                   - account_name
-                separator: ""
             """,
             fields="""
         - id: account_id
@@ -858,11 +1184,96 @@ def test_business_key_generation_supports_hash_mode_name_and_separator(tmp_path:
     assert result.errors == []
     model_sql = (output_dir / "models" / "generated" / "account.sql").read_text(encoding="utf-8")
     assert (
-        "cast(sha2(concat_ws('', coalesce(cast(cast(ACCOUNT_ID as varchar(20)) as varchar), ''), "
+        "cast(sha2(concat_ws('|', coalesce(cast(cast(ACCOUNT_ID as varchar(20)) as varchar), ''), "
         "coalesce(cast(cast(ACCOUNT_NAME as varchar(255)) as varchar), '')), 256) as varchar) "
-        "as CUSTOMER_MAPPING_KEY"
+        "as ACCOUNT_BUSINESS_KEY"
         in model_sql
     )
+
+
+def test_surrogate_key_generation_defaults_to_id_key(tmp_path: Path) -> None:
+    result, output_dir = generate(
+        tmp_path,
+        csv_generation_spec(),
+    )
+
+    assert result.errors == []
+    model_sql = (output_dir / "models" / "generated" / "account.sql").read_text(encoding="utf-8")
+    assert "cast(uuid_string() as varchar(36)) as ACCOUNT_KEY" in model_sql
+
+
+def test_business_key_generation_can_be_disabled(tmp_path: Path) -> None:
+    result, output_dir = generate(
+        tmp_path,
+        csv_generation_spec(
+            extra_control="""
+            control_data:
+              change_type: scd1
+              skip_business_key: true
+            """,
+        ),
+    )
+
+    assert result.errors == []
+    model_sql = (output_dir / "models" / "generated" / "account.sql").read_text(encoding="utf-8")
+    assert "ACCOUNT_BUSINESS_KEY" not in model_sql
+
+
+def test_surrogate_key_generation_can_be_disabled(tmp_path: Path) -> None:
+    result, output_dir = generate(
+        tmp_path,
+        csv_generation_spec(
+            extra_control="""
+            control_data:
+              change_type: scd1
+              skip_surrogate_key: true
+            """,
+        ),
+    )
+
+    assert result.errors == []
+    model_sql = (output_dir / "models" / "generated" / "account.sql").read_text(encoding="utf-8")
+    assert "uuid_string()" not in model_sql
+    assert "ACCOUNT_KEY" not in model_sql
+
+
+def test_scd2_auto_generation_preserves_existing_surrogate_keys(tmp_path: Path) -> None:
+    result, output_dir = generate(
+        tmp_path,
+        csv_generation_spec(
+            extra_control="""
+            control_data:
+              change_type: scd2_auto
+              scd:
+                insert_time: "{{ var('insert_time') }}"
+            """,
+            fields="""
+        - id: account_id
+          source:
+            pos: 0
+            column: account_id
+          data_type: varchar(20)
+        - id: account_name
+          source:
+            pos: 1
+            column: account_name
+          data_type: varchar(255)
+            """,
+        ),
+    )
+
+    assert result.errors == []
+    model_sql = (output_dir / "models" / "generated" / "account.sql").read_text(encoding="utf-8")
+    assert "cast(uuid_string() as varchar(36)) as ACCOUNT_KEY" in model_sql
+    assert "existing_target.ACCOUNT_KEY as ACCOUNT_KEY" in model_sql
+    assert "ACCOUNT_KEY" in model_sql
+    assert (
+        "cast(sha2(concat_ws('|', coalesce(cast(cast(ACCOUNT_ID as varchar(20)) as varchar), ''), "
+        "coalesce(cast(cast(ACCOUNT_NAME as varchar(255)) as varchar), '')), 256) as varchar(64)) "
+        "as BUSINESS_DATA_HASH"
+        in model_sql
+    )
+    assert "cast(cast(ACCOUNT_KEY" not in model_sql
 
 
 def test_scd2_auto_generation_adds_continuous_validity_windows(tmp_path: Path) -> None:
@@ -894,9 +1305,9 @@ def test_scd2_auto_generation_adds_continuous_validity_windows(tmp_path: Path) -
     assert result.errors == []
     model_sql = (output_dir / "models" / "generated" / "account.sql").read_text(encoding="utf-8")
     assert "cast('{{ var('insert_time') }}' as timestamp_tz) as TMS_VALID_FROM_DATETIME_CANDIDATE" in model_sql
-    assert "row_number() over (partition by ACCOUNT_KEY order by TMS_VALID_FROM_DATETIME_CANDIDATE) = 1" in model_sql
+    assert "row_number() over (partition by ACCOUNT_BUSINESS_KEY order by TMS_VALID_FROM_DATETIME_CANDIDATE) = 1" in model_sql
     assert "cast('0001-01-01T00:00:00Z' as timestamp_tz)" in model_sql
-    assert "lead(VALID_FROM_DATETIME) over (partition by ACCOUNT_KEY order by VALID_FROM_DATETIME)" in model_sql
+    assert "lead(VALID_FROM_DATETIME) over (partition by ACCOUNT_BUSINESS_KEY order by VALID_FROM_DATETIME)" in model_sql
     assert "dateadd(second, -1" not in model_sql
     assert "cast('9999-12-31T23:59:59Z' as timestamp_tz)" in model_sql
     assert "end as IS_CURRENT_FLAG" in model_sql
@@ -907,11 +1318,19 @@ def test_scd2_auto_generation_adds_continuous_validity_windows(tmp_path: Path) -
     assert "(TMS_NEXT_VALID_FROM_DATETIME < VALID_TO_DATETIME)" in model_sql
     assert "(TMS_NEXT_VALID_FROM_DATETIME is not null and VALID_TO_DATETIME <> TMS_NEXT_VALID_FROM_DATETIME)" in model_sql
     assert (
-        "(TMS_NEXT_VALID_FROM_DATETIME is null "
-        "and VALID_TO_DATETIME <> cast('9999-12-31T23:59:59Z' as timestamp_tz))"
+        "-- Accept near-end-of-time values so timezone normalisation of "
+        "9999-12-31 timestamps does not falsely reject open-ended rows."
         in model_sql
     )
-    assert "cast('TYPE_MATERIALISATION_SCD2_VALIDATION_FAILED' as number)" in model_sql
+    assert (
+        "(TMS_NEXT_VALID_FROM_DATETIME is null "
+        "and VALID_TO_DATETIME < cast('9999-12-30 00:00:00' as timestamp_tz))"
+        in model_sql
+    )
+    assert (
+        "cast(concat('TYPE_MATERIALISATION_SCD2_VALIDATION_FAILED:', SCD2_VALIDATION_FAILURE_COUNT) as number)"
+        in model_sql
+    )
     assert "cross join scd2_validation_guard" in model_sql
     assert "where scd2_validation_guard.SCD2_VALIDATION_GUARD = 0" in model_sql
 
@@ -991,6 +1410,14 @@ def test_scd2_manual_generation_copies_declared_scd_fields(tmp_path: Path) -> No
             extra_control="""
             control_data:
               change_type: scd2_manual
+              business_key:
+                fields:
+                  - account_id
+              scd:
+                update_mode: upsert
+                update_key:
+                  fields:
+                    - valid_from_datetime
             """,
             fields="""
         - id: account_id
@@ -1029,12 +1456,162 @@ def test_scd2_manual_generation_copies_declared_scd_fields(tmp_path: Path) -> No
 
     assert result.errors == []
     model_sql = (output_dir / "models" / "generated" / "account.sql").read_text(encoding="utf-8")
+    assert "materialized='incremental'" in model_sql
+    assert "incremental_strategy='delete+insert'" in model_sql
+    assert "unique_key=['ACCOUNT_BUSINESS_KEY', 'VALID_FROM_DATETIME']" in model_sql
     assert "cast(VALID_FROM_DATETIME as timestamp_tz) as VALID_FROM_DATETIME" in model_sql
     assert "cast(VALID_TO_DATETIME as timestamp_tz) as VALID_TO_DATETIME" in model_sql
     assert "cast(IS_CURRENT as varchar(1)) as IS_CURRENT" in model_sql
     assert "cast(IS_DELETED as varchar(1)) as IS_DELETED" in model_sql
     assert "BUSINESS_DATA_HASH" not in model_sql
     assert "IS_CURRENT_FLAG" not in model_sql
+
+
+def test_scd2_manual_generation_rejects_multiple_current_rows_for_entity_key(tmp_path: Path) -> None:
+    result, output_dir = generate(
+        tmp_path,
+        csv_generation_spec(
+            extra_control="""
+            control_data:
+              change_type: scd2_manual
+              business_key:
+                fields:
+                  - account_id
+              scd:
+                update_mode: upsert
+                update_key:
+                  fields:
+                    - valid_from_datetime
+            """,
+            fields="""
+        - id: account_id
+          source:
+            pos: 0
+            column: account_id
+          data_type: varchar(20)
+        - id: valid_from_datetime
+          source:
+            pos: 1
+            column: valid_from_datetime
+          data_type: timestamp_tz
+        - id: valid_to_datetime
+          source:
+            pos: 2
+            column: valid_to_datetime
+          data_type: timestamp_tz
+        - id: is_current
+          source:
+            pos: 3
+            column: is_current
+          data_type: varchar(1)
+        - id: is_deleted
+          source:
+            pos: 4
+            column: is_deleted
+          data_type: varchar(1)
+            """,
+        ),
+    )
+
+    assert result.errors == []
+    guard_sql = (output_dir / "models" / "generated" / "account__validation_guard.sql").read_text(encoding="utf-8")
+    assert "scd2_manual has multiple current rows for the same current-row key" in guard_sql
+    assert "count_if(try_cast(cast(IS_CURRENT as varchar) as varchar(1)) = 'Y') over" in guard_sql
+    assert "partition by try_cast(cast(ACCOUNT_ID as varchar) as varchar(20))" in guard_sql
+    assert "VALID_FROM_DATETIME" not in guard_sql.split("partition by", 1)[1].split("then", 1)[0]
+
+
+def test_scd2_manual_upsert_defaults_update_key_to_valid_from_datetime(tmp_path: Path) -> None:
+    result, output_dir = generate(
+        tmp_path,
+        csv_generation_spec(
+            extra_control="""
+            control_data:
+              change_type: scd2_manual
+              business_key:
+                fields:
+                  - account_id
+              scd:
+                update_mode: upsert
+            """,
+            fields="""
+        - id: account_id
+          source:
+            pos: 0
+            column: account_id
+          data_type: varchar(20)
+        - id: valid_from_datetime
+          source:
+            pos: 1
+            column: valid_from_datetime
+          data_type: timestamp_tz
+        - id: valid_to_datetime
+          source:
+            pos: 2
+            column: valid_to_datetime
+          data_type: timestamp_tz
+        - id: is_current
+          source:
+            pos: 3
+            column: is_current
+          data_type: varchar(1)
+        - id: is_deleted
+          source:
+            pos: 4
+            column: is_deleted
+          data_type: varchar(1)
+            """,
+        ),
+    )
+
+    assert result.errors == []
+    model_sql = (output_dir / "models" / "generated" / "account.sql").read_text(encoding="utf-8")
+    assert "unique_key=['ACCOUNT_BUSINESS_KEY', 'VALID_FROM_DATETIME']" in model_sql
+
+
+def test_scd2_manual_defaults_to_append_only_incremental_mode(tmp_path: Path) -> None:
+    result, output_dir = generate(
+        tmp_path,
+        csv_generation_spec(
+            extra_control="""
+            control_data:
+              change_type: scd2_manual
+            """,
+            fields="""
+        - id: account_id
+          source:
+            pos: 0
+            column: account_id
+          data_type: varchar(20)
+        - id: valid_from_datetime
+          source:
+            pos: 1
+            column: valid_from_datetime
+          data_type: timestamp_tz
+        - id: valid_to_datetime
+          source:
+            pos: 2
+            column: valid_to_datetime
+          data_type: timestamp_tz
+        - id: is_current
+          source:
+            pos: 3
+            column: is_current
+          data_type: varchar(1)
+        - id: is_deleted
+          source:
+            pos: 4
+            column: is_deleted
+          data_type: varchar(1)
+            """,
+        ),
+    )
+
+    assert result.errors == []
+    model_sql = (output_dir / "models" / "generated" / "account.sql").read_text(encoding="utf-8")
+    assert "materialized='incremental'" in model_sql
+    assert "incremental_strategy='append'" in model_sql
+    assert "unique_key=" not in model_sql
 
 
 def test_scd2_auto_generation_rejects_missing_insert_time(tmp_path: Path) -> None:
@@ -1180,7 +1757,7 @@ def test_scd2_auto_queries_existing_target(tmp_path: Path) -> None:
     model_sql = (output_dir / "models" / "generated" / "account.sql").read_text(encoding="utf-8")
     assert "materialized='incremental'" in model_sql
     assert "incremental_strategy='delete+insert'" in model_sql
-    assert "unique_key=['ACCOUNT_KEY']" in model_sql
+    assert "unique_key=['ACCOUNT_BUSINESS_KEY']" in model_sql
     assert "from {{ this }}" in model_sql
     assert "current_target_rows as (" in model_sql
     assert "where IS_CURRENT_FLAG = 'Y'" in model_sql
@@ -1226,7 +1803,7 @@ def test_scd2_auto_truncate_delete_mode_rebuilds_without_existing_target(tmp_pat
     assert "current_target_rows as (" not in model_sql
     assert "allow_truncate" in model_sql
     assert "exceptions.raise_compiler_error" in model_sql
-    assert "row_number() over (partition by ACCOUNT_KEY order by TMS_VALID_FROM_DATETIME_CANDIDATE) = 1" in model_sql
+    assert "row_number() over (partition by ACCOUNT_BUSINESS_KEY order by TMS_VALID_FROM_DATETIME_CANDIDATE) = 1" in model_sql
     assert "scd2_invalid_validity_rows as (" in model_sql
     assert "cross join scd2_validation_guard" in model_sql
 

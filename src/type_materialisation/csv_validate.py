@@ -10,7 +10,7 @@ from typing import Any
 from .custom_macros import MacroLoadError, PythonMacroResolver
 from .errors import Diagnostic
 from .inheritance import InheritanceError, resolve_spec
-from .spec import SqlType, decimal_fits, fields, parse_sql_type, to_decimal
+from .spec import SqlType, case_key, decimal_fits, fields, parse_sql_type, to_decimal
 
 
 @dataclass
@@ -68,6 +68,7 @@ def validate_csv_file(
             _validate_header_mappings(target_fields, header, result)
 
         unique_values: dict[str, set[Any]] = defaultdict(set)
+        current_row_keys: dict[tuple[Any, ...], int] = {}
         for row_number, row in enumerate(reader, start=2 if header_enabled else 1):
             result.rows_checked += 1
             row_values: dict[str, Any] = {}
@@ -89,7 +90,7 @@ def validate_csv_file(
                     row_values[str(field_id)] = value
                 except ValueError as exc:
                     result.errors.append(Diagnostic(str(exc), location))
-            del row_values
+            _validate_scd2_manual_current_row_key(spec, row_values, row_number, current_row_keys, result)
     return result
 
 
@@ -227,10 +228,13 @@ def _apply_transforms(
         elif transform_type == "parse_date":
             current = datetime.strptime(str(current), str(transform["format"])).date()
         elif transform_type == "parse_timestamp":
-            current = _timezone_aware_timestamp(
-                datetime.strptime(str(current), str(transform["format"])),
-                "timestamp transform result must include a timezone",
-                transform.get("timezone_if_missing"),
+            current = _apply_time_if_missing(
+                _timezone_aware_timestamp(
+                    datetime.strptime(str(current), str(transform["format"])),
+                    "timestamp transform result must include a timezone",
+                    transform.get("timezone_if_missing"),
+                ),
+                transform,
             )
         elif transform_type == "round":
             scale = int(transform["scale"])
@@ -325,6 +329,31 @@ def _timezone_aware_timestamp(
     raise ValueError(message)
 
 
+def _apply_time_if_missing(value: datetime, transform: dict[str, Any]) -> datetime:
+    if _python_datetime_format_has_time(str(transform["format"])):
+        return value
+    mode = transform.get("time_if_missing")
+    if mode == "start_of_day":
+        return value.replace(hour=0, minute=0, second=0, microsecond=0)
+    if mode == "end_of_day":
+        return value.replace(hour=23, minute=59, second=59, microsecond=0)
+    return value
+
+
+def _python_datetime_format_has_time(python_format: str) -> bool:
+    index = 0
+    while index < len(python_format):
+        if python_format[index] != "%":
+            index += 1
+            continue
+        if index + 1 >= len(python_format):
+            return False
+        if python_format[index + 1] in {"H", "I", "M", "S", "f", "p"}:
+            return True
+        index += 2
+    return False
+
+
 def _validate_nullable(value: Any, field: dict[str, Any], location: str) -> None:
     if value is None and field.get("nullable") is False:
         raise ValueError("is null but field is not nullable")
@@ -375,6 +404,63 @@ def _validate_rules(
                 raise ValueError("custom validation failed")
             if isinstance(result, str) and result:
                 raise ValueError(result)
+
+
+def _validate_scd2_manual_current_row_key(
+    spec: dict[str, Any],
+    row_values: dict[str, Any],
+    row_number: int,
+    current_row_keys: dict[tuple[Any, ...], int],
+    result: CsvValidationResult,
+) -> None:
+    control_data = spec.get("control_data", {})
+    if not isinstance(control_data, dict) or control_data.get("change_type") != "scd2_manual":
+        return
+    field_lookup = _field_id_lookup(spec)
+    is_current_id = field_lookup.get("is_current")
+    if is_current_id is None or row_values.get(is_current_id) != "Y":
+        return
+    key_ids = [
+        field_lookup[field_key]
+        for field_key in _business_key_field_keys(spec)
+        if field_key in field_lookup
+    ]
+    if not key_ids:
+        return
+    try:
+        key = tuple(row_values[field_id] for field_id in key_ids)
+    except KeyError:
+        return
+    if key in current_row_keys:
+        result.errors.append(
+            Diagnostic(
+                "scd2_manual has multiple current rows for the same current-row key",
+                f"row {row_number}, field `is_current`",
+            )
+        )
+    else:
+        current_row_keys[key] = row_number
+
+
+def _business_key_field_keys(spec: dict[str, Any]) -> list[str]:
+    control_data = spec.get("control_data", {})
+    if not isinstance(control_data, dict):
+        return []
+    business_key = control_data.get("business_key", {})
+    if not isinstance(business_key, dict):
+        return []
+    configured_fields = business_key.get("fields", [])
+    if not isinstance(configured_fields, list):
+        return []
+    return [case_key(value) for value in configured_fields if isinstance(value, str)]
+
+
+def _field_id_lookup(spec: dict[str, Any]) -> dict[str, str]:
+    return {
+        case_key(field["id"]): field["id"]
+        for field in fields(spec)
+        if isinstance(field, dict) and isinstance(field.get("id"), str)
+    }
 
 
 def _is_allowed(value: Any, allowed_values: list[Any]) -> bool:

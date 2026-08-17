@@ -26,6 +26,7 @@ from tms_integration.database import (
     load_snowflake_connection_config,
     replace_csv_stage_from_file,
     replace_source_table_from_csv,
+    replace_source_table_from_json,
 )
 from tms_integration.runner import (
     CustomAssertionContext,
@@ -91,6 +92,7 @@ def test_integration_scenarios_are_discoverable_and_self_contained() -> None:
         "scd1_csv_stage_load",
         "scd1_csv_transforms",
         "scd1_quarantine_regex_validation",
+        "scd1_table_source_json_flatten",
         "scd1_table_source_query_quarantine",
         "scd1_table_source_varchar_load",
         "scd2_continuous_field_validity",
@@ -110,7 +112,11 @@ def test_integration_scenarios_are_discoverable_and_self_contained() -> None:
         assert scenario.loads
         assert (scenario.root / "src").is_dir()
         for step in scenario.loads:
-            assert step.source_csv.exists()
+            assert (step.source_csv is None) != (step.source_json is None)
+            if step.source_csv is not None:
+                assert step.source_csv.exists()
+            if step.source_json is not None:
+                assert step.source_json.exists()
             assert isinstance(step.force_runtime_failure, bool)
             if step.expect_dbt_success:
                 assert step.expected_target_csv is not None
@@ -121,6 +127,7 @@ def test_integration_scenarios_are_discoverable_and_self_contained() -> None:
                 assert expected_relation.expected_csv.exists()
                 assert expected_relation.columns
     assert (INTEGRATION_ROOT / "scd1_csv_stage_load" / "src" / "assertions.py").is_file()
+    assert (INTEGRATION_ROOT / "scd2_hash_skip_current_duplicate" / "src" / "assertions.py").is_file()
 
 
 def test_integration_scenarios_generate_dbt_unit_tests(tmp_path: Path) -> None:
@@ -321,6 +328,24 @@ def test_source_table_load_creates_varchar_table_from_csv(monkeypatch, tmp_path:
             "insert into TMP.TMS_INT__ACCOUNT_SOURCE_TABLE (ACCOUNT_ID, ACCOUNT_PRIORITY) values (%s, %s)",
             ("A2", "20"),
         ),
+    ]
+    assert cursor.closed is True
+
+
+def test_source_table_load_creates_variant_payload_from_json(monkeypatch, tmp_path: Path) -> None:
+    json_path = tmp_path / "source.json"
+    json_path.write_text('[{"customer":{"id":"A1"}},{"customer":{"id":"A2"}}]\n', encoding="utf-8")
+    cursor = RecordingCursor()
+    ddl: list[str] = []
+
+    monkeypatch.setattr(integration_database, "_execute", lambda connection, sql: ddl.append(sql))
+
+    replace_source_table_from_json(RecordingConnection(cursor), "TMP", "TMS_INT__JSON_SOURCE", json_path)
+
+    assert ddl == ["create or replace table TMP.TMS_INT__JSON_SOURCE (PAYLOAD variant)"]
+    assert cursor.executed == [
+        ("insert into TMP.TMS_INT__JSON_SOURCE (PAYLOAD) select parse_json(%s)", ('{"customer":{"id":"A1"}}',)),
+        ("insert into TMP.TMS_INT__JSON_SOURCE (PAYLOAD) select parse_json(%s)", ('{"customer":{"id":"A2"}}',)),
     ]
     assert cursor.closed is True
 
@@ -681,6 +706,26 @@ def test_table_source_query_quarantine_scenario_projects_source_query(tmp_path: 
     assert "where FAILURE_DETAILS is not null" in quarantine_sql
 
 
+def test_table_source_json_flatten_scenario_generates_native_snowflake_extraction(tmp_path: Path) -> None:
+    scenario = load_scenario(INTEGRATION_ROOT / "scd1_table_source_json_flatten")
+    output_dir = tmp_path / scenario.name
+
+    generated_project = generate_project_for_scenario(scenario, output_dir)
+
+    source_sql = (
+        output_dir / "models" / "generated" / "tms_int__account_order__source.sql"
+    ).read_text(encoding="utf-8")
+    model_sql = (
+        output_dir / "models" / "generated" / "tms_int__account_order.sql"
+    ).read_text(encoding="utf-8")
+    assert scenario.loads[0].source_json is not None
+    assert "to_varchar(get_path(source_query.PAYLOAD, 'customer.account.id')) as ACCOUNT_ID" in source_sql
+    assert "to_varchar(get_path(source_query.PAYLOAD, 'customer.profile.name')) as CUSTOMER_NAME" in source_sql
+    assert "to_varchar(get_path(ORDER_ITEM.value, 'metrics.amount')) as ORDER_AMOUNT" in source_sql
+    assert ", lateral flatten(input => get_path(source_query.PAYLOAD, 'customer.orders'), mode => 'ARRAY') as ORDER_ITEM" in source_sql
+    assert "try_to_date(cast(ORDER_DATE as varchar), 'YYYY-MM-DD')" in model_sql
+
+
 def test_csv_stage_scenario_prefixes_stage_and_adds_it_to_cleanup(tmp_path: Path) -> None:
     scenario = load_scenario(INTEGRATION_ROOT / "scd1_csv_stage_load")
     output_dir = tmp_path / scenario.name
@@ -811,9 +856,18 @@ def test_hash_skip_scenario_generates_business_hash_skip_sql(tmp_path: Path) -> 
     spec = load_yaml(generated_project.spec_path)
     model_sql = (output_dir / "models" / "generated" / "tms_int__account.sql").read_text(encoding="utf-8")
     assert spec["target"]["id"] == "tms_int__account"
-    assert spec["control_data"]["business_key"]["name"] == "account_key"
-    assert "as ACCOUNT_KEY" in model_sql
-    assert "TMS_INT__ACCOUNT_KEY" not in model_sql
+    assert "name" not in spec["control_data"]["business_key"]
+    assert spec["control_data"].get("skip_business_key") is not True
+    assert spec["control_data"].get("skip_surrogate_key") is not True
+    assert "cast(uuid_string() as varchar(36)) as ACCOUNT_KEY" in model_sql
+    assert (
+        "cast(sha2(concat_ws('|', coalesce(cast(cast(ACCOUNT_ID as varchar(20)) as varchar), '')), 256) "
+        "as varchar) as ACCOUNT_BUSINESS_KEY"
+        in model_sql
+    )
+    assert "existing_target.ACCOUNT_KEY as ACCOUNT_KEY" in model_sql
+    assert "existing_target.ACCOUNT_BUSINESS_KEY as ACCOUNT_BUSINESS_KEY" in model_sql
+    assert "unique_key=['ACCOUNT_BUSINESS_KEY']" in model_sql
     assert (
         "sha2(concat_ws('|', coalesce(cast(cast(ACCOUNT_ID as varchar(20)) as varchar), ''), "
         "coalesce(cast(cast(ACCOUNT_VALUE as number(10,0)) as varchar), '')), 256)"
@@ -854,11 +908,11 @@ def test_scd2_validation_failure_rollback_scenarios_generate_guards(tmp_path: Pa
         assert scenario.loads[0].expect_dbt_success is False
         assert scenario.loads[0].expected_target_csv is not None
         assert "AUDIT_LAST_CHANGED_DATETIME" in scenario.expected_columns
-        assert "unique_key=['ACCOUNT_KEY']" in model_sql
+        assert "unique_key=['ACCOUNT_BUSINESS_KEY']" in model_sql
         assert "VALID_TO_DATETIME <= VALID_FROM_DATETIME" in model_sql
         assert "TYPE_MATERIALISATION_SCD2_VALIDATION_FAILED" in model_sql
         assert ("VALID_TO_DATETIME <> TMS_NEXT_VALID_FROM_DATETIME" in model_sql) is expects_continuity_check
-        assert "TMS_INT__ACCOUNT_KEY" not in model_sql
+        assert "ACCOUNT_BUSINESS_KEY" in model_sql
 
 
 def test_integration_row_comparison_normalises_case_order_and_whitespace(tmp_path: Path) -> None:

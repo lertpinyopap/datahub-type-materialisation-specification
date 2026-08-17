@@ -13,8 +13,9 @@ Materialisation Specification.
   `lineterminator`, and `quoting` with `minimal` and `all`.
 - Parse-time uniqueness checks for target field ids and specified source column
   names.
-- Required `business_key` parsing and validation, with raw or SHA2-256 hashed
-  generated key columns and optional generated column-name override.
+- Required `business_key.fields` parsing and validation, with fixed SHA2-256
+  generated business-key columns that can be skipped by spec.
+- Default id-derived surrogate-key GUID columns that can be skipped by spec.
 - Custom macro loading through Python macro objects.
 - dbt project generation for concrete CSV specifications targeting Snowflake
   staged CSV files.

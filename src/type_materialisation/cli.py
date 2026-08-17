@@ -9,7 +9,9 @@ from .dbt_generate import GenerateDbtOptions, generate_dbt_project
 from .errors import DependencyError, Diagnostic
 from .inheritance import InheritanceError, resolve_spec
 from .schema import validate_schema
+from .source_files import csv_load_method, csv_seed_file_path
 from .spec import validate_parse_semantics
+from .variables import parse_vars, resolve_python_template, resolve_python_templates
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -52,6 +54,10 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="validate as an abstract/partial specification",
     )
+    parse_parser.add_argument(
+        "--vars",
+        help="YAML/JSON mapping used to resolve TMS variable expressions before parsing",
+    )
 
     validate_parser = subparsers.add_parser("validate", help="validate a CSV file according to a concrete spec")
     validate_parser.add_argument("--spec", required=True, type=Path, help="path to a concrete specification YAML file")
@@ -62,7 +68,15 @@ def _build_parser() -> argparse.ArgumentParser:
         type=Path,
         help="directory searched for inherited parent specifications; may be provided more than once",
     )
-    validate_parser.add_argument("--input-file", required=True, type=Path, help="path to a CSV file")
+    validate_parser.add_argument(
+        "--input-file",
+        type=Path,
+        help="path to a CSV file; defaults to source.seed.file for dbt_seed CSV sources",
+    )
+    validate_parser.add_argument(
+        "--vars",
+        help="YAML/JSON mapping used to resolve Python-side variable expressions before validation",
+    )
     validate_parser.add_argument(
         "--macro-path",
         action="append",
@@ -101,6 +115,10 @@ def _build_parser() -> argparse.ArgumentParser:
         type=Path,
         help="path containing Python macro modules; may be provided more than once",
     )
+    generate_parser.add_argument(
+        "--vars",
+        help="YAML/JSON mapping used to resolve Python-side variable expressions before generation",
+    )
 
     build_parser = subparsers.add_parser("dbt-build", help="build a generated dbt project for a spec")
     build_parser.add_argument("--spec", required=True, type=Path, help="path to a concrete specification YAML file")
@@ -115,7 +133,11 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def _parse(args: argparse.Namespace) -> int:
-    diagnostics = parse_spec(args.spec, abstract=args.abstract, spec_paths=args.spec_path)
+    variables, var_diagnostics = parse_vars(args.vars)
+    if var_diagnostics:
+        _print_diagnostics("vars parse failed", var_diagnostics)
+        return 1
+    diagnostics = parse_spec(args.spec, abstract=args.abstract, spec_paths=args.spec_path, variables=variables)
     if diagnostics:
         _print_diagnostics("parse failed", diagnostics)
         return 1
@@ -125,13 +147,32 @@ def _parse(args: argparse.Namespace) -> int:
 
 
 def _validate(args: argparse.Namespace) -> int:
-    resolved, diagnostics = resolve_and_validate_spec(args.spec, abstract=False, spec_paths=args.spec_path)
+    variables, var_diagnostics = parse_vars(args.vars)
+    if var_diagnostics:
+        _print_diagnostics("vars parse failed", var_diagnostics)
+        return 1
+    resolved, diagnostics = resolve_and_validate_spec(
+        args.spec,
+        abstract=False,
+        spec_paths=args.spec_path,
+        variables=variables,
+    )
     if diagnostics:
         _print_diagnostics("spec parse failed", diagnostics)
         return 1
+    input_file, input_diagnostics = _validation_input_file(
+        args.input_file,
+        resolved,
+        args.spec,
+        variables,
+    )
+    if input_diagnostics:
+        _print_diagnostics("input file resolution failed", input_diagnostics)
+        return 1
+    assert input_file is not None
     result = validate_csv_file(
         args.spec,
-        args.input_file,
+        input_file,
         macro_paths=args.macro_path,
         spec=resolved,
         spec_paths=args.spec_path,
@@ -144,13 +185,48 @@ def _validate(args: argparse.Namespace) -> int:
         return 1
     _print_success(
         "validation passed",
-        f"{args.input_file} is valid according to {args.spec} ({result.rows_checked} rows checked)",
+        f"{input_file} is valid according to {args.spec} ({result.rows_checked} rows checked)",
     )
     return 0
 
 
+def _validation_input_file(
+    input_file: Path | None,
+    spec: dict,
+    spec_path: Path,
+    variables: dict,
+) -> tuple[Path | None, list[Diagnostic]]:
+    if input_file is not None:
+        try:
+            return Path(resolve_python_template(str(input_file), variables=variables)), []
+        except ValueError as exc:
+            return None, [Diagnostic(str(exc), "--input-file")]
+
+    source = spec.get("source", {})
+    if (
+        isinstance(source, dict)
+        and source.get("format") == "csv"
+        and csv_load_method(source) == "dbt_seed"
+    ):
+        try:
+            return csv_seed_file_path(spec, spec_path), []
+        except OSError as exc:
+            return None, [Diagnostic(str(exc), "$.source.seed.file")]
+
+    return None, [Diagnostic("--input-file is required unless source.load_method is dbt_seed", "--input-file")]
+
+
 def _generate_dbt(args: argparse.Namespace) -> int:
-    resolved, diagnostics = resolve_and_validate_spec(args.spec, abstract=False, spec_paths=args.spec_path)
+    variables, var_diagnostics = parse_vars(args.vars)
+    if var_diagnostics:
+        _print_diagnostics("vars parse failed", var_diagnostics)
+        return 1
+    resolved, diagnostics = resolve_and_validate_spec(
+        args.spec,
+        abstract=False,
+        spec_paths=args.spec_path,
+        variables=variables,
+    )
     if diagnostics:
         _print_diagnostics("spec parse failed", diagnostics)
         return 1
@@ -164,6 +240,7 @@ def _generate_dbt(args: argparse.Namespace) -> int:
             macro_paths=args.macro_path,
             spec=resolved,
             spec_paths=args.spec_path,
+            vars=variables,
         )
     )
     if result.warnings:
@@ -199,8 +276,19 @@ def _default_dbt_project_dir(spec_path: Path) -> Path:
     return Path("tmp") / spec_path.stem
 
 
-def parse_spec(spec_path: Path, *, abstract: bool, spec_paths: list[Path] | None = None) -> list[Diagnostic]:
-    _, diagnostics = resolve_and_validate_spec(spec_path, abstract=abstract, spec_paths=spec_paths)
+def parse_spec(
+    spec_path: Path,
+    *,
+    abstract: bool,
+    spec_paths: list[Path] | None = None,
+    variables: dict | None = None,
+) -> list[Diagnostic]:
+    _, diagnostics = resolve_and_validate_spec(
+        spec_path,
+        abstract=abstract,
+        spec_paths=spec_paths,
+        variables=variables,
+    )
     return diagnostics
 
 
@@ -209,6 +297,7 @@ def resolve_and_validate_spec(
     *,
     abstract: bool,
     spec_paths: list[Path] | None = None,
+    variables: dict | None = None,
 ) -> tuple[dict | None, list[Diagnostic]]:
     if not spec_path.exists():
         return None, [Diagnostic("spec file does not exist", str(spec_path))]
@@ -216,8 +305,8 @@ def resolve_and_validate_spec(
         resolved = resolve_spec(spec_path, spec_paths=spec_paths)
     except InheritanceError as exc:
         return None, [Diagnostic(str(exc), "inheritance")]
-    data = resolved.spec
-    diagnostics = validate_schema(data, abstract=abstract)
+    data, diagnostics = resolve_python_templates(resolved.spec, variables=variables)
+    diagnostics.extend(validate_schema(data, abstract=abstract))
     diagnostics.extend(validate_parse_semantics(data, abstract=abstract))
     return data, diagnostics
 

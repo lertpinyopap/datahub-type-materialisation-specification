@@ -31,7 +31,7 @@
       "required": ["control_data", "source", "target"],
       "properties": {
         "control_data": {
-          "required": ["change_type", "business_key"]
+          "required": ["change_type"]
         },
         "source": {
           "oneOf": [
@@ -217,6 +217,14 @@
         "business_key": {
           "$ref": "#/$defs/businessKey"
         },
+        "skip_business_key": {
+          "type": "boolean",
+          "default": false
+        },
+        "skip_surrogate_key": {
+          "type": "boolean",
+          "default": false
+        },
         "scd": {
           "$ref": "#/$defs/scdConfig"
         },
@@ -231,25 +239,14 @@
     "businessKey": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["mode", "fields"],
+      "required": ["fields"],
       "properties": {
-        "mode": {
-          "type": "string",
-          "enum": ["hash", "raw"]
-        },
         "fields": {
           "type": "array",
           "minItems": 1,
           "items": {
             "$ref": "#/$defs/specificationId"
           }
-        },
-        "name": {
-          "$ref": "#/$defs/specificationId"
-        },
-        "separator": {
-          "type": "string",
-          "default": "|"
         }
       }
     },
@@ -300,6 +297,28 @@
           "type": "string",
           "enum": ["continuous", "sparse"],
           "default": "continuous"
+        },
+        "update_mode": {
+          "type": "string",
+          "enum": ["append_only", "upsert"],
+          "default": "append_only"
+        },
+        "update_key": {
+          "$ref": "#/$defs/scdUpdateKey"
+        }
+      }
+    },
+    "scdUpdateKey": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["fields"],
+      "properties": {
+        "fields": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/specificationId"
+          }
         }
       }
     },
@@ -386,6 +405,9 @@
         },
         "query": {
           "$ref": "#/$defs/templatedString"
+        },
+        "flatten": {
+          "$ref": "#/$defs/tableSourceFlatten"
         }
       }
     },
@@ -527,6 +549,46 @@
         },
         "query": {
           "$ref": "#/$defs/templatedString"
+        },
+        "flatten": {
+          "$ref": "#/$defs/tableSourceFlatten"
+        }
+      }
+    },
+    "tableSourceFlatten": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/tableSourceFlattenEntry"
+        },
+        {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/tableSourceFlattenEntry"
+          }
+        }
+      ]
+    },
+    "tableSourceFlattenEntry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["column", "alias"],
+      "properties": {
+        "column": {
+          "$ref": "#/$defs/templatedString"
+        },
+        "path": {
+          "$ref": "#/$defs/templatedString"
+        },
+        "alias": {
+          "$ref": "#/$defs/specificationId"
+        },
+        "outer": {
+          "type": "boolean"
+        },
+        "mode": {
+          "type": "string",
+          "enum": ["object", "array", "both"]
         }
       }
     },
@@ -643,6 +705,12 @@
         },
         "column": {
           "$ref": "#/$defs/templatedString"
+        },
+        "snowflake_path": {
+          "$ref": "#/$defs/templatedString"
+        },
+        "fixed_value": {
+          "$ref": "#/$defs/scalarValue"
         }
       }
     },
@@ -660,6 +728,9 @@
                 },
                 {
                   "required": ["column"]
+                },
+                {
+                  "required": ["fixed_value"]
                 }
               ]
             }
@@ -675,7 +746,14 @@
         {
           "properties": {
             "source": {
-              "required": ["pos"],
+              "anyOf": [
+                {
+                  "required": ["pos"]
+                },
+                {
+                  "required": ["fixed_value"]
+                }
+              ],
               "not": {
                 "required": ["column"]
               }
@@ -692,7 +770,14 @@
         {
           "properties": {
             "source": {
-              "required": ["column"],
+              "anyOf": [
+                {
+                  "required": ["column"]
+                },
+                {
+                  "required": ["fixed_value"]
+                }
+              ],
               "not": {
                 "required": ["pos"]
               }
@@ -761,6 +846,10 @@
         "timezone_if_missing": {
           "type": "string",
           "enum": ["Z", "UTC", "local"]
+        },
+        "time_if_missing": {
+          "type": "string",
+          "enum": ["start_of_day", "end_of_day"]
         }
       }
     },

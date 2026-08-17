@@ -1,0 +1,53 @@
+[
+  {
+    "customer": {
+      "account": {
+        "id": "A100"
+      },
+      "profile": {
+        "name": "Acme Trading"
+      },
+      "flags": {
+        "priority": true
+      },
+      "orders": [
+        {
+          "id": "O-100-1",
+          "metrics": {
+            "amount": 125.5,
+            "orderDate": "2026-08-01"
+          }
+        },
+        {
+          "id": "O-100-2",
+          "metrics": {
+            "amount": 40,
+            "orderDate": "2026-08-02"
+          }
+        }
+      ]
+    }
+  },
+  {
+    "customer": {
+      "account": {
+        "id": "B200"
+      },
+      "profile": {
+        "name": "Beta Supplies"
+      },
+      "flags": {
+        "priority": false
+      },
+      "orders": [
+        {
+          "id": "O-200-1",
+          "metrics": {
+            "amount": 300.75,
+            "orderDate": "2026-08-03"
+          }
+        }
+      ]
+    }
+  }
+]

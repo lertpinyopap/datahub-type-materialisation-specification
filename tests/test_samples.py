@@ -21,7 +21,11 @@ SAMPLE_CSV_DIR = REPO_ROOT / "samples" / "csv"
 @pytest.mark.parametrize("spec_path", sorted(SAMPLE_YAML_DIR.glob("*.yaml")))
 def test_valid_sample_yaml_parses_as_concrete_spec(spec_path: Path) -> None:
     # Samples are documentation examples, so parsing them is part of the contract.
-    _, diagnostics = resolve_and_validate_spec(spec_path, abstract=False)
+    _, diagnostics = resolve_and_validate_spec(
+        spec_path,
+        abstract=False,
+        variables=_sample_vars(spec_path),
+    )
 
     assert diagnostics == []
 
@@ -107,6 +111,12 @@ def _schema_values(value) -> set[str]:
             values.update(_schema_values(child))
         return values
     return set()
+
+
+def _sample_vars(spec_path: Path) -> dict[str, str]:
+    if spec_path.name == "reference_core_country.yaml":
+        return {"country_csv_file": str(SAMPLE_CSV_DIR / "REFERENCE.CORE.COUNTRY.csv")}
+    return {}
 
 
 def test_broken_yaml_sample_fails_for_expected_reasons() -> None:

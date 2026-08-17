@@ -1,4 +1,4 @@
 # Scenario-Specific Source
 
-This scenario does not need custom SQL or Python. It uses an initial target CSV
-plus one CSV seed-backed source load.
+`assertions.py` checks the generated key columns that are not fully covered by
+the expected-target CSV comparison.

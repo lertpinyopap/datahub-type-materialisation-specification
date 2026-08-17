@@ -1,0 +1,4 @@
+account_id,customer_name,order_id,order_amount,order_date,priority_customer,ACCOUNT_ORDER_BUSINESS_KEY,audit_data_process_key
+A100,Acme Trading,O-100-1,125.50,2026-08-01,true,782e4a87878277f5d1f338906b43dfa40d8d6057acbc4fc806f3d02c2b29950b,JSON_FLATTEN_001
+A100,Acme Trading,O-100-2,40.00,2026-08-02,true,27cb74d9e58cb627c4b6e618d70e3e792db6d663e7cddc0fc06ddefcce6a850a,JSON_FLATTEN_001
+B200,Beta Supplies,O-200-1,300.75,2026-08-03,false,23e960a934ab61258b106dc19039261767d813a378548f36723fbd523656ef6d,JSON_FLATTEN_001

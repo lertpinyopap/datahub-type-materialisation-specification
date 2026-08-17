@@ -24,7 +24,8 @@ class ExpectedRelation:
 @dataclass(frozen=True)
 class LoadStep:
     name: str
-    source_csv: Path
+    source_csv: Path | None
+    source_json: Path | None
     expected_target_csv: Path | None
     dbt_vars: dict[str, Any]
     expect_dbt_success: bool
@@ -106,7 +107,10 @@ def _load_steps(root: Path, manifest: dict[str, Any], manifest_path: Path) -> li
         if not isinstance(raw_step, dict):
             raise ScenarioError(f"{manifest_path}: load step {index} must be a mapping")
         name = _required_string(raw_step, "name", manifest_path)
-        source_csv = _required_file(root, _required_string(raw_step, "source_csv", manifest_path))
+        source_csv = _optional_file(root, raw_step.get("source_csv"))
+        source_json = _optional_file(root, raw_step.get("source_json"))
+        if (source_csv is None) == (source_json is None):
+            raise ScenarioError(f"{manifest_path}: load step {index} must specify exactly one of `source_csv` or `source_json`")
         expected_target_csv = _optional_file(root, raw_step.get("expected_target"))
         dbt_vars = _optional_mapping(raw_step.get("dbt_vars"), manifest_path, f"loads[{index}].dbt_vars")
         expect_dbt_success = raw_step.get("expect_dbt_success", True) is not False
@@ -123,6 +127,7 @@ def _load_steps(root: Path, manifest: dict[str, Any], manifest_path: Path) -> li
             LoadStep(
                 name=name,
                 source_csv=source_csv,
+                source_json=source_json,
                 expected_target_csv=expected_target_csv,
                 dbt_vars=dbt_vars,
                 expect_dbt_success=expect_dbt_success,

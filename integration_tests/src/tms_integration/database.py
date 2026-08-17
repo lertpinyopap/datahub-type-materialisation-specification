@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import json
 import os
 import tomllib
 from collections.abc import Iterator
@@ -11,7 +12,11 @@ from typing import Any
 import snowflake.connector
 import yaml
 
-from type_materialisation.spec import BUSINESS_KEY_DATA_TYPE, GENERATED_METADATA_FIELD_TYPES
+from type_materialisation.spec import (
+    BUSINESS_KEY_DATA_TYPE,
+    GENERATED_METADATA_FIELD_TYPES,
+    SURROGATE_KEY_DATA_TYPE,
+)
 
 DEFAULT_SNOWFLAKE_CONNECTION = "tms_int"
 
@@ -108,7 +113,10 @@ def create_target_table_from_spec(connection: Any, spec_path: Path, schema: str)
     columns = []
     for field in target["fields"]:
         columns.append(f"{quote_identifier(field['id'])} {field['data_type']}")
-    columns.append(f"{quote_identifier(_business_key_column(spec))} {BUSINESS_KEY_DATA_TYPE}")
+    if _surrogate_key_enabled(spec):
+        columns.append(f"{quote_identifier(_surrogate_key_column(spec))} {SURROGATE_KEY_DATA_TYPE}")
+    if _business_key_enabled(spec):
+        columns.append(f"{quote_identifier(_business_key_column(spec))} {BUSINESS_KEY_DATA_TYPE}")
     for name, data_type in GENERATED_METADATA_FIELD_TYPES.items():
         columns.append(f"{quote_identifier(name)} {data_type}")
     ddl = f"create or replace table {quote_identifier(schema)}.{quote_identifier(table)} ({', '.join(columns)})"
@@ -142,6 +150,31 @@ def replace_source_table_from_csv(connection: Any, schema: str, table: str, csv_
             cursor.execute(sql, tuple(row[column] for column in raw_columns))
     finally:
         cursor.close()
+
+
+def replace_source_table_from_json(connection: Any, schema: str, table: str, json_path: Path) -> None:
+    rows = _read_json_documents(json_path)
+    if not rows:
+        raise IntegrationConfigError(f"source JSON file must contain at least one document: {json_path}")
+    _execute(
+        connection,
+        f"create or replace table {quote_identifier(schema)}.{quote_identifier(table)} (PAYLOAD variant)",
+    )
+    sql = f"insert into {quote_identifier(schema)}.{quote_identifier(table)} (PAYLOAD) select parse_json(%s)"
+    cursor = connection.cursor()
+    try:
+        for row in rows:
+            cursor.execute(sql, (json.dumps(row, separators=(",", ":")),))
+    finally:
+        cursor.close()
+
+
+def _read_json_documents(json_path: Path) -> list[Any]:
+    text = json_path.read_text(encoding="utf-8").strip()
+    if not text:
+        return []
+    parsed = json.loads(text)
+    return parsed if isinstance(parsed, list) else [parsed]
 
 
 def insert_csv_rows(connection: Any, schema: str, table: str, csv_path: Path, spec_path: Path) -> None:
@@ -230,7 +263,10 @@ def _target_column_types(spec_path: Path) -> dict[str, str]:
         _physical_name(field["id"]): str(field["data_type"])
         for field in spec["target"]["fields"]
     }
-    column_types[_business_key_column(spec)] = BUSINESS_KEY_DATA_TYPE
+    if _surrogate_key_enabled(spec):
+        column_types[_surrogate_key_column(spec)] = SURROGATE_KEY_DATA_TYPE
+    if _business_key_enabled(spec):
+        column_types[_business_key_column(spec)] = BUSINESS_KEY_DATA_TYPE
     column_types.update({_physical_name(name): data_type for name, data_type in GENERATED_METADATA_FIELD_TYPES.items()})
     return column_types
 
@@ -248,13 +284,33 @@ def _physical_name(value: Any) -> str:
 
 
 def _business_key_column(spec: dict[str, Any]) -> str:
-    control_data = spec.get("control_data", {})
-    business_key = control_data.get("business_key", {}) if isinstance(control_data, dict) else {}
-    if isinstance(business_key, dict) and isinstance(business_key.get("name"), str):
-        return _physical_name(business_key["name"])
     target = spec.get("target", {})
     target_id = target.get("id") if isinstance(target, dict) else None
-    return _physical_name(f"{target_id}_key" if isinstance(target_id, str) else "key")
+    return _physical_name(f"{_target_key_base(target_id)}_business_key" if isinstance(target_id, str) else "business_key")
+
+
+def _business_key_enabled(spec: dict[str, Any]) -> bool:
+    control_data = spec.get("control_data", {})
+    if not isinstance(control_data, dict):
+        return True
+    return control_data.get("skip_business_key") is not True
+
+
+def _surrogate_key_enabled(spec: dict[str, Any]) -> bool:
+    control_data = spec.get("control_data", {})
+    if not isinstance(control_data, dict):
+        return True
+    return control_data.get("skip_surrogate_key") is not True
+
+
+def _surrogate_key_column(spec: dict[str, Any]) -> str:
+    target = spec.get("target", {})
+    target_id = target.get("id") if isinstance(target, dict) else None
+    return _physical_name(f"{_target_key_base(target_id)}_key" if isinstance(target_id, str) else "key")
+
+
+def _target_key_base(target_id: str) -> str:
+    return target_id.rsplit("__", 1)[-1]
 
 
 def _default_connection_name(config: dict[str, Any], connections: dict[str, Any]) -> str:

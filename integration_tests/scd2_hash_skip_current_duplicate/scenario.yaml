@@ -6,6 +6,7 @@ target:
   expected_columns:
     - ACCOUNT_ID
     - ACCOUNT_VALUE
+    - ACCOUNT_BUSINESS_KEY
     - IS_CURRENT_FLAG
     - IS_DELETED_FLAG
     - VALID_FROM_DATETIME
@@ -20,6 +21,7 @@ checks:
   - Load 003 changes A1 from value 2 back to value 1 and must create another current SCD2 version.
   - The final value 1 has the same hash as the original historical row but is not skipped because the current hash differs.
   - Load 004 adds a historical duplicate of value 1 and must move the matching value 1 boundary backward.
+  - Expected rows assert the generated business key hash, and custom Python assertions verify generated surrogate keys.
 loads:
   - name: load_001
     source_csv: data/load_001_source.csv

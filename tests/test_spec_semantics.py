@@ -11,7 +11,12 @@ from textwrap import dedent, indent
 import pytest
 
 from type_materialisation.cli import resolve_and_validate_spec
-from type_materialisation.spec import BUSINESS_KEY_DATA_TYPE, GENERATED_METADATA_FIELD_TYPES, parse_sql_type
+from type_materialisation.spec import (
+    BUSINESS_KEY_DATA_TYPE,
+    GENERATED_METADATA_FIELD_TYPES,
+    SURROGATE_KEY_DATA_TYPE,
+    parse_sql_type,
+)
 from tests.helpers import diagnostic_messages, write_spec
 
 
@@ -53,7 +58,6 @@ def _control_data_block(extra_control: str, *, field_id: str = "account_id") -> 
                 prefix = line[: len(line) - len(line.lstrip())]
                 lines[index + 1:index + 1] = [
                     f"{prefix}business_key:",
-                    f"{prefix}  mode: raw",
                     f"{prefix}  fields:",
                     f"{prefix}    - {field_id}",
                 ]
@@ -80,7 +84,6 @@ def _with_default_business_key(content: str) -> str:
             prefix = line[: len(line) - len(line.lstrip())]
             lines[index + 1:index + 1] = [
                 f"{prefix}business_key:",
-                f"{prefix}  mode: raw",
                 f"{prefix}  fields:",
                 f"{prefix}    - {field_id}",
             ]
@@ -91,6 +94,7 @@ def _with_default_business_key(content: str) -> str:
 def test_generated_metadata_field_type_contract_is_supported() -> None:
     # These are implementation-generated columns, but the spec owns their physical types.
     assert BUSINESS_KEY_DATA_TYPE == "varchar"
+    assert SURROGATE_KEY_DATA_TYPE == "varchar(36)"
     assert GENERATED_METADATA_FIELD_TYPES == {
         "is_current_flag": "varchar(1)",
         "is_deleted_flag": "varchar(1)",
@@ -101,7 +105,7 @@ def test_generated_metadata_field_type_contract_is_supported() -> None:
         "audit_last_changed_datetime": "timestamp_tz",
         "audit_data_process_key": "varchar(64)",
     }
-    for data_type in GENERATED_METADATA_FIELD_TYPES.values():
+    for data_type in [SURROGATE_KEY_DATA_TYPE, *GENERATED_METADATA_FIELD_TYPES.values()]:
         parse_sql_type(data_type)
 
 
@@ -170,6 +174,151 @@ def test_source_column_names_are_rejected_case_insensitively(tmp_path: Path) -> 
 
     assert diagnostic_messages(diagnostics) == ["duplicates source column `account_id` case-insensitively"]
     assert diagnostics[0].location == "$.target.fields[1].source.column"
+
+
+def test_table_snowflake_path_allows_reusing_payload_column(tmp_path: Path) -> None:
+    _, diagnostics = parse_yaml(
+        tmp_path,
+        """
+        id: account_spec
+        control_data:
+          change_type: scd1
+        source:
+          format: table
+          schema: raw
+          table: landed_events
+        target:
+          id: account
+          schema: business
+          fields:
+            - id: account_id
+              source:
+                column: payload
+                snowflake_path: account.id
+              data_type: varchar(20)
+            - id: account_name
+              source:
+                column: payload
+                snowflake_path: account.profile.name
+              data_type: varchar(255)
+        """,
+    )
+
+    assert diagnostics == []
+
+
+def test_fixed_value_source_is_allowed_without_column_or_position(tmp_path: Path) -> None:
+    _, diagnostics = parse_yaml(
+        tmp_path,
+        """
+        id: account_spec
+        control_data:
+          change_type: scd1
+        source:
+          format: table
+          schema: raw
+          table: landed_events
+        target:
+          id: account
+          schema: business
+          fields:
+            - id: is_current
+              source:
+                fixed_value: "Y"
+              data_type: varchar(1)
+        """,
+    )
+
+    assert diagnostics == []
+
+
+def test_fixed_value_source_rejects_other_selectors(tmp_path: Path) -> None:
+    _, diagnostics = parse_yaml(
+        tmp_path,
+        """
+        id: account_spec
+        control_data:
+          change_type: scd1
+          business_key:
+            fields:
+              - is_current
+        source:
+          format: table
+          schema: raw
+          table: landed_events
+        target:
+          id: account
+          schema: business
+          fields:
+            - id: is_current
+              source:
+                column: payload
+                fixed_value: "Y"
+              data_type: varchar(1)
+        """,
+        auto_business_key=False,
+    )
+
+    assert "field.source.fixed_value cannot be combined with field.source.column" in diagnostic_messages(diagnostics)
+
+
+def test_snowflake_path_is_rejected_for_csv_source(tmp_path: Path) -> None:
+    _, diagnostics = parse_yaml(
+        tmp_path,
+        """
+        id: account_spec
+        control_data:
+          change_type: scd1
+        source:
+          format: csv
+          header: true
+        target:
+          id: account
+          schema: business
+          fields:
+            - id: account_id
+              source:
+                pos: 0
+                column: payload
+                snowflake_path: account.id
+              data_type: varchar(20)
+        """,
+    )
+
+    assert "field.source.snowflake_path is only valid for table sources" in diagnostic_messages(diagnostics)
+
+
+def test_table_flatten_aliases_are_rejected_case_insensitively(tmp_path: Path) -> None:
+    _, diagnostics = parse_yaml(
+        tmp_path,
+        """
+        id: order_spec
+        control_data:
+          change_type: scd1
+        source:
+          format: table
+          schema: raw
+          table: landed_events
+          flatten:
+            - column: payload
+              path: orders
+              alias: item
+            - column: payload
+              path: shipments
+              alias: ITEM
+        target:
+          id: order
+          schema: business
+          fields:
+            - id: order_id
+              source:
+                column: item
+                snowflake_path: id
+              data_type: varchar(20)
+        """,
+    )
+
+    assert "duplicates source.flatten.alias `item` case-insensitively" in diagnostic_messages(diagnostics)
 
 
 def test_csv_source_uses_python_dialect_names(tmp_path: Path) -> None:
@@ -359,7 +508,7 @@ def test_csv_dbt_seed_with_header_requires_source_columns(tmp_path: Path) -> Non
     )
 
     assert diagnostic_messages(diagnostics) == [
-        "dbt_seed CSV sources with a header require field.source.column",
+        "dbt_seed CSV sources with a header require field.source.column or field.source.fixed_value",
     ]
 
 
@@ -414,6 +563,37 @@ def test_parse_timestamp_accepts_timezone_if_missing(tmp_path: Path) -> None:
                 - type: parse_timestamp
                   format: "%Y-%m-%d %H:%M:%S"
                   timezone_if_missing: UTC
+        """,
+    )
+
+    assert diagnostics == []
+
+
+def test_parse_timestamp_accepts_time_if_missing(tmp_path: Path) -> None:
+    # Date-only timestamp source strings can explicitly choose the generated time of day.
+    _, diagnostics = parse_yaml(
+        tmp_path,
+        """
+        id: account_spec
+        control_data:
+          change_type: scd1
+        source:
+          format: csv
+          header: true
+        target:
+          id: account
+          schema: business
+          fields:
+            - id: opened_at
+              source:
+                pos: 0
+                column: opened_at
+              data_type: timestamp_tz
+              transforms:
+                - type: parse_timestamp
+                  format: "%d/%m/%Y"
+                  timezone_if_missing: UTC
+                  time_if_missing: end_of_day
         """,
     )
 
@@ -499,7 +679,6 @@ def test_business_key_fields_must_exist(tmp_path: Path) -> None:
             control_data:
               change_type: scd1
               business_key:
-                mode: raw
                 fields:
                   - missing_account_id
             """
@@ -509,23 +688,95 @@ def test_business_key_fields_must_exist(tmp_path: Path) -> None:
     assert "business key field does not exist in target.fields" in diagnostic_messages(diagnostics)
 
 
-def test_business_key_name_must_not_collide_with_target_fields(tmp_path: Path) -> None:
+def test_default_business_key_name_must_not_collide_with_target_fields(tmp_path: Path) -> None:
+    _, diagnostics = parse_yaml(
+        tmp_path,
+        complete_spec(field_id="account_business_key"),
+    )
+
+    messages = diagnostic_messages(diagnostics)
+    assert "uses a reserved generated metadata field id" in messages
+    assert "business key name collides with a target field or generated metadata field" in messages
+
+
+def test_default_surrogate_key_name_must_not_collide_with_target_fields(tmp_path: Path) -> None:
+    _, diagnostics = parse_yaml(
+        tmp_path,
+        complete_spec(field_id="account_key"),
+    )
+
+    assert "uses a reserved generated metadata field id" in diagnostic_messages(diagnostics)
+
+
+def test_surrogate_key_can_be_disabled(tmp_path: Path) -> None:
     _, diagnostics = parse_yaml(
         tmp_path,
         complete_spec(
             """
             control_data:
               change_type: scd1
-              business_key:
-                mode: raw
-                name: account_id
-                fields:
-                  - account_id
-            """
+              skip_surrogate_key: true
+            """,
+            field_id="account_key",
         ),
     )
 
-    assert "business key name collides with a target field or generated metadata field" in diagnostic_messages(diagnostics)
+    assert diagnostics == []
+
+
+def test_business_key_can_be_disabled(tmp_path: Path) -> None:
+    _, diagnostics = parse_yaml(
+        tmp_path,
+        """
+        id: account_spec
+        control_data:
+          change_type: scd1
+          skip_business_key: true
+        source:
+          format: csv
+          header: true
+        target:
+          id: account
+          schema: business
+          fields:
+            - id: account_id
+              source:
+                pos: 0
+                column: account_id
+              data_type: varchar(20)
+        """,
+        auto_business_key=False,
+    )
+
+    assert diagnostics == []
+
+
+def test_business_key_fields_must_not_reference_surrogate_key(tmp_path: Path) -> None:
+    _, diagnostics = parse_yaml(
+        tmp_path,
+        """
+        id: account_spec
+        control_data:
+          change_type: scd1
+          business_key:
+            fields:
+              - account_key
+        source:
+          format: csv
+          header: true
+        target:
+          id: account
+          schema: business
+          fields:
+            - id: account_id
+              source:
+                pos: 0
+                column: account_id
+              data_type: varchar(20)
+        """,
+    )
+
+    assert "business key field must not reference generated surrogate key" in diagnostic_messages(diagnostics)
 
 
 def test_scd2_auto_accepts_insert_time_and_business_key(tmp_path: Path) -> None:
@@ -536,7 +787,6 @@ def test_scd2_auto_accepts_insert_time_and_business_key(tmp_path: Path) -> None:
         control_data:
           change_type: scd2_auto
           business_key:
-            mode: raw
             fields:
               - account_id
           scd:
@@ -685,6 +935,23 @@ def test_scd2_auto_rejects_field_delete_detection(tmp_path: Path) -> None:
     assert "`delete_detection.mode = field` is only valid when `change_type` is scd1" in diagnostic_messages(diagnostics)
 
 
+def test_scd2_auto_rejects_update_mode(tmp_path: Path) -> None:
+    _, diagnostics = parse_yaml(
+        tmp_path,
+        complete_spec(
+            """
+            control_data:
+              change_type: scd2_auto
+              scd:
+                insert_time: "{{ var('insert_time') }}"
+                update_mode: upsert
+            """
+        ),
+    )
+
+    assert "`update_mode` is only valid when `change_type` is scd2_manual" in diagnostic_messages(diagnostics)
+
+
 def test_scd2_manual_requires_copied_scd_fields(tmp_path: Path) -> None:
     _, diagnostics = parse_yaml(
         tmp_path,
@@ -748,7 +1015,156 @@ def test_scd2_manual_accepts_copied_scd_fields(tmp_path: Path) -> None:
     assert diagnostics == []
 
 
-def test_scd2_manual_rejects_scd_parameters(tmp_path: Path) -> None:
+def test_scd2_manual_accepts_update_mode(tmp_path: Path) -> None:
+    _, diagnostics = parse_yaml(
+        tmp_path,
+        """
+        id: account_spec
+        control_data:
+          change_type: scd2_manual
+          scd:
+            update_mode: upsert
+            update_key:
+              fields:
+                - valid_from_datetime
+        source:
+          format: csv
+          header: true
+        target:
+          id: account
+          schema: business
+          fields:
+            - id: account_id
+              source:
+                pos: 0
+                column: account_id
+              data_type: varchar(20)
+            - id: valid_from_datetime
+              source:
+                pos: 1
+                column: valid_from_datetime
+              data_type: timestamp_tz
+            - id: valid_to_datetime
+              source:
+                pos: 2
+                column: valid_to_datetime
+              data_type: timestamp_tz
+            - id: is_current
+              source:
+                pos: 3
+                column: is_current
+              data_type: varchar(1)
+            - id: is_deleted
+              source:
+                pos: 4
+                column: is_deleted
+              data_type: varchar(1)
+        """,
+    )
+
+    assert diagnostics == []
+
+
+def test_scd2_manual_rejects_update_key_without_upsert(tmp_path: Path) -> None:
+    _, diagnostics = parse_yaml(
+        tmp_path,
+        """
+        id: account_spec
+        control_data:
+          change_type: scd2_manual
+          scd:
+            update_key:
+              fields:
+                - valid_from_datetime
+        source:
+          format: csv
+          header: true
+        target:
+          id: account
+          schema: business
+          fields:
+            - id: account_id
+              source:
+                pos: 0
+                column: account_id
+              data_type: varchar(20)
+            - id: valid_from_datetime
+              source:
+                pos: 1
+                column: valid_from_datetime
+              data_type: timestamp_tz
+            - id: valid_to_datetime
+              source:
+                pos: 2
+                column: valid_to_datetime
+              data_type: timestamp_tz
+            - id: is_current
+              source:
+                pos: 3
+                column: is_current
+              data_type: varchar(1)
+            - id: is_deleted
+              source:
+                pos: 4
+                column: is_deleted
+              data_type: varchar(1)
+        """,
+    )
+
+    assert "`scd.update_key` is only valid when `scd.update_mode` is upsert" in diagnostic_messages(diagnostics)
+
+
+def test_scd2_manual_update_key_fields_must_reference_target_fields(tmp_path: Path) -> None:
+    _, diagnostics = parse_yaml(
+        tmp_path,
+        """
+        id: account_spec
+        control_data:
+          change_type: scd2_manual
+          scd:
+            update_mode: upsert
+            update_key:
+              fields:
+                - missing_field
+        source:
+          format: csv
+          header: true
+        target:
+          id: account
+          schema: business
+          fields:
+            - id: account_id
+              source:
+                pos: 0
+                column: account_id
+              data_type: varchar(20)
+            - id: valid_from_datetime
+              source:
+                pos: 1
+                column: valid_from_datetime
+              data_type: timestamp_tz
+            - id: valid_to_datetime
+              source:
+                pos: 2
+                column: valid_to_datetime
+              data_type: timestamp_tz
+            - id: is_current
+              source:
+                pos: 3
+                column: is_current
+              data_type: varchar(1)
+            - id: is_deleted
+              source:
+                pos: 4
+                column: is_deleted
+              data_type: varchar(1)
+        """,
+    )
+
+    assert "update key field does not exist in target.fields" in diagnostic_messages(diagnostics)
+
+
+def test_scd2_manual_rejects_non_manual_scd_parameters(tmp_path: Path) -> None:
     _, diagnostics = parse_yaml(
         tmp_path,
         complete_spec(
@@ -761,7 +1177,7 @@ def test_scd2_manual_rejects_scd_parameters(tmp_path: Path) -> None:
         ),
     )
 
-    assert "`scd` must be omitted for `change_type` scd2_manual" in diagnostic_messages(diagnostics)
+    assert "`scd2_manual` supports only `scd.update_mode` and `scd.update_key`" in diagnostic_messages(diagnostics)
 
 
 def test_scd1_delete_detection_field_must_reference_target_field(tmp_path: Path) -> None:

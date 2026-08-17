@@ -1,0 +1,25 @@
+name: scd1_table_source_json_flatten
+description: Materialises nested and flattened Snowflake JSON variant values into an SCD1 table.
+spec: spec/account_order.yaml
+target:
+  expected_columns:
+    - account_id
+    - customer_name
+    - order_id
+    - order_amount
+    - order_date
+    - priority_customer
+    - ACCOUNT_ORDER_BUSINESS_KEY
+    - audit_data_process_key
+  order_by:
+    - order_id
+checks:
+  - The source table is loaded with a PAYLOAD VARIANT column from JSON.
+  - The generated source model flattens customer.orders with Snowflake LATERAL FLATTEN.
+  - Nested scalar values are extracted as varchar before TMS transforms and target casts.
+loads:
+  - name: load_001
+    source_json: data/load_001_source.json
+    expected_target: data/expected_after_load_001.csv
+    dbt_vars:
+      audit_data_process_key: JSON_FLATTEN_001

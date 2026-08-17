@@ -83,7 +83,8 @@ Run CSV validation:
 
 ```bash
 tms validate --spec samples/yaml/account_csv.yaml --input-file samples/csv/account_csv.csv
-tms validate --spec samples/yaml/account_csv_seed.yaml --input-file samples/csv/account_csv.csv
+tms validate --spec samples/yaml/account_csv_seed.yaml
+tms validate --spec samples/yaml/reference_core_country.yaml --vars "{country_csv_file: ./samples/csv/REFERENCE.CORE.COUNTRY.csv}"
 tms validate --spec samples/yaml/account_csv.yaml --input-file samples/csv/broken/account_csv_bad_account_number.csv
 tms validate --spec samples/yaml/account_csv.yaml --input-file samples/csv/broken/account_csv_header_mismatch.csv
 tms validate --spec path/to/child.yaml --spec-path path/to/parents --input-file path/to/input.csv
@@ -96,6 +97,7 @@ tms generate-dbt --spec samples/yaml/account_csv.yaml
 tms generate-dbt --spec samples/yaml/account_csv.yaml --unit-test-csv samples/csv/account_csv.csv --output-dir tmp/dbt-account
 tms generate-dbt --spec samples/yaml/account_csv.yaml --output-dir tmp/dbt-account --csv-stage RAW.PUBLIC.ACCOUNT_STAGE
 tms generate-dbt --spec samples/yaml/account_csv_seed.yaml --output-dir tmp/dbt-account-seed
+tms generate-dbt --spec samples/yaml/reference_core_country.yaml --vars "{country_csv_file: ./samples/csv/REFERENCE.CORE.COUNTRY.csv}"
 tms generate-dbt --spec path/to/child.yaml --spec-path path/to/parents
 ```
 
@@ -150,7 +152,7 @@ Generated dbt projects write load lifecycle events to the job details table.
 The default table name is `TYPE_MATERIALISATION_JOBS`; the default schema is
 `BUSINESS`, and generated projects allow the schema to be overridden at runtime
 with the `tms_job_schema` dbt variable. See
-[SPEC.md §5.2 Job Table](./SPEC.md#52-job-table) for the full column contract.
+[SPEC.md §5.4 Job Table](./SPEC.md#54-job-table) for the full column contract.
 
 Each load writes one `JOB_START` row and one `JOB_END` row with the same
 `job_id`. `JOB_END` records the final result, optional diagnostic details,
@@ -184,9 +186,12 @@ adapter/session context. CSV upload is planned as a Python `tms` step outside
 dbt generation, but is not implemented yet. CSV sources may alternatively use
 `source.load_method: dbt_seed`, which copies `source.seed.file` into the
 generated dbt project's `seeds/` directory and generates a source model that
-reads from the seed relation. The generated project currently covers CSV-stage,
-CSV-seed, and table-source materialisation slices, including generated job run
-hooks and append-only quarantine models; see
+reads from the seed relation. When `source.seed.file` contains `tms_var`
+expressions, `tms validate` and `tms generate-dbt` resolve them from `--vars`
+before validating or copying the seed file. Relative `source.seed.file` paths
+are resolved from the directory where the `tms` command is run. The generated project
+currently covers CSV-stage, CSV-seed, and table-source materialisation slices,
+including generated job run hooks and append-only quarantine models; see
 [IMPLEMENTATION_STATUS.md](./IMPLEMENTATION_STATUS.md) for unsupported features.
 
 Generated dbt projects refer to a local user-managed dbt profile named
@@ -233,6 +238,9 @@ description: Account file mapping.
 control_data:
   materialisation_type: table
   change_type: scd1
+  business_key:
+    fields:
+      - account_id
   failure_mode: quarantine_row
   quarantine:
     table: account__QUARANTINE
