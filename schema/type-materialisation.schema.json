@@ -229,6 +229,9 @@
           "type": "boolean",
           "default": false
         },
+        "business_data_hash": {
+          "$ref": "#/$defs/businessDataHash"
+        },
         "staging_schema": {
           "$ref": "#/$defs/templatedString"
         },
@@ -251,6 +254,27 @@
         "fields": {
           "type": "array",
           "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/specificationId"
+          }
+        }
+      }
+    },
+    "businessDataHash": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "skip_business_data_hash": {
+          "type": "boolean",
+          "default": false
+        },
+        "business_data_hash_mode": {
+          "type": "string",
+          "enum": ["exclude", "include"],
+          "default": "exclude"
+        },
+        "fields": {
+          "type": "array",
           "items": {
             "$ref": "#/$defs/specificationId"
           }
@@ -1029,7 +1053,7 @@
     },
     "reservedGeneratedFieldId": {
       "type": "string",
-      "pattern": "^([Aa][Uu][Dd][Ii][Tt]_[Dd][Aa][Tt][Aa]_[Pp][Rr][Oo][Cc][Ee][Ss][Ss]_[Kk][Ee][Yy]|[Aa][Uu][Dd][Ii][Tt]_[Cc][Rr][Ee][Aa][Tt][Ee][Dd]_[Dd][Aa][Tt][Ee][Tt][Ii][Mm][Ee]|[Aa][Uu][Dd][Ii][Tt]_[Ll][Aa][Ss][Tt]_[Cc][Hh][Aa][Nn][Gg][Ee][Dd]_[Dd][Aa][Tt][Ee][Tt][Ii][Mm][Ee]|[Ii][Ss]_[Cc][Uu][Rr][Rr][Ee][Nn][Tt]_[Ff][Ll][Aa][Gg]|[Ii][Ss]_[Dd][Ee][Ll][Ee][Tt][Ee][Dd]_[Ff][Ll][Aa][Gg]|[Bb][Uu][Ss][Ii][Nn][Ee][Ss][Ss]_[Dd][Aa][Tt][Aa]_[Hh][Aa][Ss][Hh])$"
+      "pattern": "^([Aa][Uu][Dd][Ii][Tt]_[Dd][Aa][Tt][Aa]_[Pp][Rr][Oo][Cc][Ee][Ss][Ss]_[Kk][Ee][Yy]|[Aa][Uu][Dd][Ii][Tt]_[Cc][Rr][Ee][Aa][Tt][Ee][Dd]_[Dd][Aa][Tt][Ee][Tt][Ii][Mm][Ee]|[Aa][Uu][Dd][Ii][Tt]_[Ll][Aa][Ss][Tt]_[Cc][Hh][Aa][Nn][Gg][Ee][Dd]_[Dd][Aa][Tt][Ee][Tt][Ii][Mm][Ee]|[Bb][Uu][Ss][Ii][Nn][Ee][Ss][Ss]_[Dd][Aa][Tt][Aa]_[Hh][Aa][Ss][Hh])$"
     }
   }
 }

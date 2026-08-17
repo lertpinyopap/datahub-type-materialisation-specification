@@ -11,6 +11,7 @@ target:
     - IS_DELETED_FLAG
     - VALID_FROM_DATETIME
     - VALID_TO_DATETIME
+    - BUSINESS_DATA_HASH
   order_by:
     - ACCOUNT_ID
     - VALID_FROM_DATETIME
@@ -19,6 +20,7 @@ checks:
   - The first A1 version starts at platform start of time.
   - The A1 version is current and open-ended at platform end of time.
   - No A1 version is marked as deleted.
+  - BUSINESS_DATA_HASH is SHA2-256 of the pipe-joined business data `A1|Acme`.
 loads:
   - name: load_001
     source_csv: data/load_001_source.csv

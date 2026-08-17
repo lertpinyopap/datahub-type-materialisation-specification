@@ -34,10 +34,10 @@ target:
         column: account_value
       data_type: number(10,0)
       nullable: false
-    - id: is_current
+    - id: is_current_flag
       source:
         pos: 2
-        column: is_current
+        column: IS_CURRENT_FLAG
       data_type: varchar(1)
       nullable: false
       validations:
@@ -45,10 +45,10 @@ target:
           values:
             - "Y"
             - "N"
-    - id: is_deleted
+    - id: is_deleted_flag
       source:
         pos: 3
-        column: is_deleted
+        column: IS_DELETED_FLAG
       data_type: varchar(1)
       nullable: false
       validations:
@@ -59,7 +59,7 @@ target:
     - id: valid_from_datetime
       source:
         pos: 4
-        column: valid_from_datetime
+        column: VALID_FROM_DATETIME
       data_type: timestamp_tz
       nullable: false
       transforms:
@@ -70,7 +70,7 @@ target:
     - id: valid_to_datetime
       source:
         pos: 5
-        column: valid_to_datetime
+        column: VALID_TO_DATETIME
       data_type: timestamp_tz
       nullable: false
       transforms:

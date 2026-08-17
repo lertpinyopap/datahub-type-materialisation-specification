@@ -15,6 +15,7 @@ from .spec import (
     BUSINESS_KEY_DATA_TYPE,
     GENERATED_METADATA_FIELD_TYPES,
     RESERVED_GENERATED_FIELDS,
+    SCD2_MANUAL_FIELD_TYPES,
     SURROGATE_KEY_DATA_TYPE,
     case_key,
     fields,
@@ -479,6 +480,7 @@ def _write_final_model(spec: dict[str, Any], result: DbtGenerationResult) -> Non
         field_select_lines.append(f"    cast({expression} as {data_type}) as {_quote_identifier(field['id'])}")
     business_key_select_lines = _business_key_select_lines(spec)
     surrogate_key_select_lines = _surrogate_key_select_lines(spec)
+    business_data_hash_select_lines = _business_data_hash_select_lines(spec)
     audit_select_lines = _audit_select_lines()
     extra_config_lines: list[str] = []
     if _scd2_uses_target_merge(spec):
@@ -527,6 +529,7 @@ def _write_final_model(spec: dict[str, Any], result: DbtGenerationResult) -> Non
             *field_select_lines,
             *surrogate_key_select_lines,
             *business_key_select_lines,
+            *business_data_hash_select_lines,
             *audit_select_lines,
         ]
         delete_filter_lines = _scd1_delete_filter_lines(spec)
@@ -548,6 +551,7 @@ def _write_final_model(spec: dict[str, Any], result: DbtGenerationResult) -> Non
             *field_select_lines,
             *surrogate_key_select_lines,
             *business_key_select_lines,
+            *business_data_hash_select_lines,
             *audit_select_lines,
         ]
         delete_filter_lines = _scd1_delete_filter_lines(spec)
@@ -576,6 +580,7 @@ def _write_final_model(spec: dict[str, Any], result: DbtGenerationResult) -> Non
             *field_select_lines,
             *surrogate_key_select_lines,
             *business_key_select_lines,
+            *business_data_hash_select_lines,
             *audit_select_lines,
         ]
         delete_filter_lines = _scd1_delete_filter_lines(spec)
@@ -728,7 +733,7 @@ def _scd2_duplicate_hash_runtime_log_lines(
         return []
     change_row_columns = _scd2_change_row_columns(spec)
     return [
-        "{% if execute and is_incremental() %}",
+        "{% if execute and is_incremental() and not var('tms_unit_test', false) %}",
         "{% set tms_scd2_duplicate_hash_log_sql %}",
         *_scd2_valid_rows_lines(spec, source_model, quarantine_enabled, fail_load_enabled),
         "typed_rows as (",
@@ -1502,7 +1507,7 @@ def _fail_load_validation_failure_lines(spec: dict[str, Any]) -> list[str]:
     target = spec["target"]
     validation_guard_model = _validation_guard_model_name(target["id"])
     return [
-        "{% if execute %}",
+        "{% if execute and not var('tms_unit_test', false) %}",
         "{% set tms_validation_failure_sql %}",
         "select",
         "    VALIDATION_FAILURE_COUNT,",
@@ -1666,9 +1671,8 @@ def _write_unit_tests(
         "expect": {
             "rows": expected_rows,
         },
+        "overrides": _unit_test_overrides(scd2_non_incremental=_scd2_uses_target_merge(spec)),
     }
-    if _scd2_uses_target_merge(spec):
-        unit_test["overrides"] = _unit_test_non_incremental_overrides()
     unit_tests = [unit_test]
     if _quarantine_enabled(spec):
         unit_tests.append(
@@ -1685,6 +1689,7 @@ def _write_unit_tests(
                 "expect": {
                     "rows": [],
                 },
+                "overrides": _unit_test_overrides(),
             }
         )
     data = {"unit_tests": unit_tests}
@@ -1703,8 +1708,11 @@ def _unit_test_validation_guard_fixture_sql() -> str:
     )
 
 
-def _unit_test_non_incremental_overrides() -> dict[str, dict[str, bool]]:
-    return {"macros": {"is_incremental": False}}
+def _unit_test_overrides(*, scd2_non_incremental: bool = False) -> dict[str, dict[str, bool]]:
+    overrides = {"vars": {"tms_unit_test": True}}
+    if scd2_non_incremental:
+        overrides["macros"] = {"is_incremental": False}
+    return overrides
 
 
 def _unit_test_fixture_sql(rows: list[dict[str, Any]], column_types: dict[str, str]) -> str:
@@ -1762,7 +1770,7 @@ def _unit_test_rows(
                 business_key_value = _unit_test_business_key(spec, transformed_values, warnings)
                 if business_key_value is not _SKIP_EXPECTED:
                     expected_row[_business_key_column(spec)] = business_key_value
-            if _change_type(spec) == "scd2_auto":
+            if _business_data_hash_enabled(spec):
                 hash_value = _unit_test_business_data_hash(spec, transformed_values, warnings)
                 if hash_value is not _SKIP_EXPECTED:
                     expected_row["BUSINESS_DATA_HASH"] = hash_value
@@ -2331,7 +2339,7 @@ def _scd2_manual_validation_rows_cte(spec: dict[str, Any], *, trailing_comma: bo
     partition_by = ", ".join(business_key_columns)
     valid_from_column = _physical_name("valid_from_datetime")
     valid_to_column = _physical_name("valid_to_datetime")
-    is_current_column = _physical_name("is_current")
+    is_current_column = _physical_name("is_current_flag")
     return [
         _dbt_relation_lookup(target_relation, "tms_manual_scd2_target_relation", schema_var="target_schema"),
         "base_validation_rows as (",
@@ -2753,6 +2761,17 @@ def _business_data_hash_expression(spec: dict[str, Any]) -> str:
     )
 
 
+def _business_data_hash_select_lines(spec: dict[str, Any]) -> list[str]:
+    if not _business_data_hash_enabled(spec):
+        return []
+    return [f"    {_business_data_hash_expression(spec)} as BUSINESS_DATA_HASH"]
+
+
+def _business_data_hash_enabled(spec: dict[str, Any]) -> bool:
+    config = _business_data_hash_config(spec)
+    return config.get("skip_business_data_hash") is not True
+
+
 def _field_concat_expression(configured_fields: list[dict[str, Any]], separator: str) -> str:
     if not configured_fields:
         return "''"
@@ -2767,16 +2786,57 @@ def _field_concat_expression(configured_fields: list[dict[str, Any]], separator:
 
 
 def _business_data_hash_fields(spec: dict[str, Any]) -> list[dict[str, Any]]:
-    excluded_generated_fields = set(RESERVED_GENERATED_FIELDS)
-    if _surrogate_key_enabled(spec):
-        excluded_generated_fields.add(case_key(_surrogate_key_column(spec)))
+    target_fields = fields(spec)
+    fields_by_id = {
+        case_key(field["id"]): field
+        for field in target_fields
+        if isinstance(field, dict) and isinstance(field.get("id"), str)
+    }
+    config = _business_data_hash_config(spec)
+    mode = config.get("business_data_hash_mode", "exclude")
+    configured_fields = _business_data_hash_field_ids(spec)
+    excluded_fields = _business_data_hash_ineligible_field_ids(spec)
+    if mode == "include":
+        return [
+            fields_by_id[field_id]
+            for field_id in configured_fields
+            if field_id in fields_by_id and field_id not in excluded_fields
+        ]
+    excluded_fields.update(configured_fields)
     return [
         field
-        for field in fields(spec)
+        for field in target_fields
         if isinstance(field, dict)
         and isinstance(field.get("id"), str)
-        and case_key(field["id"]) not in excluded_generated_fields
+        and case_key(field["id"]) not in excluded_fields
     ]
+
+
+def _business_data_hash_config(spec: dict[str, Any]) -> dict[str, Any]:
+    control_data = spec.get("control_data", {})
+    if not isinstance(control_data, dict):
+        return {}
+    config = control_data.get("business_data_hash", {})
+    return config if isinstance(config, dict) else {}
+
+
+def _business_data_hash_field_ids(spec: dict[str, Any]) -> list[str]:
+    configured_fields = _business_data_hash_config(spec).get("fields", [])
+    if not isinstance(configured_fields, list):
+        return []
+    return [case_key(field_id) for field_id in configured_fields if isinstance(field_id, str)]
+
+
+def _business_data_hash_ineligible_field_ids(spec: dict[str, Any]) -> set[str]:
+    excluded_fields = set(RESERVED_GENERATED_FIELDS)
+    if _surrogate_key_enabled(spec):
+        excluded_fields.add(case_key(_surrogate_key_column(spec)))
+    if _business_key_enabled(spec):
+        excluded_fields.add(case_key(_business_key_column(spec)))
+    if _change_type(spec) == "scd2_manual":
+        excluded_fields.update(SCD2_MANUAL_FIELD_TYPES)
+        excluded_fields.update(case_key(field_id) for field_id in _scd2_manual_update_key_field_ids(spec))
+    return excluded_fields
 
 
 def _source_model_name(target_id: str) -> str:
@@ -3222,6 +3282,9 @@ def _job_hooks(spec: dict[str, Any], spec_file_name: str) -> tuple[list[str], li
         "{% if result.status in ['error', 'fail'] and result.node.name == "
         + _sql_string(_validation_guard_model_name(spec["target"]["id"]))
         + " %}{% set validation_guard_failed.value = true %}{% endif %}"
+        "{% if result.status in ['error', 'fail'] and "
+        "'TYPE_MATERIALISATION_VALIDATION_FAILED' in (result.message | string) "
+        "%}{% set validation_guard_failed.value = true %}{% endif %}"
         "{% endfor %}"
     )
     details_expression = (

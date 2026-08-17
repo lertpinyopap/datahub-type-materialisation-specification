@@ -439,7 +439,7 @@ def test_csv_dbt_seed_generation_outputs_fixed_values_without_seed_columns(tmp_p
               source:
                 column: account_id
               data_type: varchar(20)
-            - id: is_current
+            - id: is_current_flag
               source:
                 fixed_value: "Y"
               data_type: varchar(1)
@@ -452,7 +452,7 @@ def test_csv_dbt_seed_generation_outputs_fixed_values_without_seed_columns(tmp_p
     assert seed_config["+column_types"] == {"ACCOUNT_ID": "varchar"}
     source_sql = (output_dir / "models" / "generated" / "account__source.sql").read_text(encoding="utf-8")
     assert "cast(ACCOUNT_ID as string) as ACCOUNT_ID" in source_sql
-    assert "cast('Y' as string) as IS_CURRENT" in source_sql
+    assert "cast('Y' as string) as IS_CURRENT_FLAG" in source_sql
 
 
 def test_csv_dbt_seed_generation_reports_missing_seed_file(tmp_path: Path) -> None:
@@ -521,7 +521,7 @@ def test_generated_source_model_uses_fixed_values(tmp_path: Path) -> None:
             pos: 0
             column: account_id
           data_type: varchar(20)
-        - id: is_current
+        - id: is_current_flag
           source:
             fixed_value: "Y"
           data_type: varchar(1)
@@ -533,8 +533,8 @@ def test_generated_source_model_uses_fixed_values(tmp_path: Path) -> None:
     source_sql = (output_dir / "models" / "generated" / "account__source.sql").read_text(encoding="utf-8")
     model_sql = (output_dir / "models" / "generated" / "account.sql").read_text(encoding="utf-8")
     assert "$1::string as ACCOUNT_ID" in source_sql
-    assert "cast('Y' as string) as IS_CURRENT" in source_sql
-    assert "cast(IS_CURRENT as varchar(1)) as IS_CURRENT" in model_sql
+    assert "cast('Y' as string) as IS_CURRENT_FLAG" in source_sql
+    assert "cast(IS_CURRENT_FLAG as varchar(1)) as IS_CURRENT_FLAG" in model_sql
 
 
 def test_headerless_csv_stage_generation_aliases_positions_to_col_names(tmp_path: Path) -> None:
@@ -740,7 +740,7 @@ def test_parse_date_and_timestamp_transforms_generate_snowflake_sql(tmp_path: Pa
         - id: valid_to_datetime
           source:
             pos: 3
-            column: valid_to_datetime
+            column: VALID_TO_DATETIME
           data_type: timestamp_tz
           transforms:
             - type: parse_timestamp
@@ -917,7 +917,7 @@ def test_table_source_generation_uses_fixed_values(tmp_path: Path) -> None:
               source:
                 column: account_id
               data_type: varchar(20)
-            - id: is_current
+            - id: is_current_flag
               source:
                 fixed_value: "Y"
               data_type: varchar(1)
@@ -927,7 +927,7 @@ def test_table_source_generation_uses_fixed_values(tmp_path: Path) -> None:
     assert result.errors == []
     source_sql = (output_dir / "models" / "generated" / "account__source.sql").read_text(encoding="utf-8")
     assert "source_query.ACCOUNT_ID as ACCOUNT_ID" in source_sql
-    assert "cast('Y' as string) as IS_CURRENT" in source_sql
+    assert "cast('Y' as string) as IS_CURRENT_FLAG" in source_sql
     assert "from source_query" in source_sql
 
 
@@ -1006,6 +1006,7 @@ def test_job_event_hooks_are_generated_at_project_run_level(tmp_path: Path) -> N
     assert 'var("job_result", "COMPLETED")' not in project["on-run-end"][1]
     assert 'var("job_details", none)' in project["on-run-end"][1]
     assert "validation_guard_failed.value" in project["on-run-end"][1]
+    assert "'TYPE_MATERIALISATION_VALIDATION_FAILED' in (result.message | string)" in project["on-run-end"][1]
     assert "'validation errors failed the load'" in project["on-run-end"][1]
     assert "'dbt run failed; inspect dbt artifacts for runtime details'" in project["on-run-end"][1]
     assert "case when quarantine_counts.QUARANTINE_COUNT > 0 then 'COMPLETED_WITH_QUARANTINE' else 'COMPLETED' end" in project["on-run-end"][1]
@@ -1159,8 +1160,10 @@ def test_generated_unit_tests_include_final_and_quarantine_models(tmp_path: Path
     assert unit_test_yaml["unit_tests"][0]["given"][0]["input"] == "ref('account__source')"
     assert unit_test_yaml["unit_tests"][0]["given"][0]["format"] == "sql"
     assert "cast('ACCT000000000001' as varchar) as ACCOUNT_ID" in unit_test_yaml["unit_tests"][0]["given"][0]["rows"]
+    assert unit_test_yaml["unit_tests"][0]["overrides"]["vars"] == {"tms_unit_test": True}
     assert unit_test_yaml["unit_tests"][1]["given"][0]["format"] == "sql"
     assert unit_test_yaml["unit_tests"][1]["expect"]["rows"] == []
+    assert unit_test_yaml["unit_tests"][1]["overrides"]["vars"] == {"tms_unit_test": True}
 
 
 def test_scd2_auto_generation_adds_business_data_hash(tmp_path: Path) -> None:
@@ -1254,6 +1257,92 @@ def test_business_key_generation_can_be_disabled(tmp_path: Path) -> None:
     assert result.errors == []
     model_sql = (output_dir / "models" / "generated" / "account.sql").read_text(encoding="utf-8")
     assert "ACCOUNT_BUSINESS_KEY" not in model_sql
+
+
+def test_scd1_generation_adds_business_data_hash_by_default(tmp_path: Path) -> None:
+    result, output_dir = generate(
+        tmp_path,
+        csv_generation_spec(
+            fields="""
+        - id: account_id
+          source:
+            pos: 0
+            column: account_id
+          data_type: varchar(20)
+        - id: account_name
+          source:
+            pos: 1
+            column: account_name
+          data_type: varchar(255)
+            """,
+        ),
+    )
+
+    assert result.errors == []
+    model_sql = (output_dir / "models" / "generated" / "account.sql").read_text(encoding="utf-8")
+    assert (
+        "cast(sha2(concat_ws('|', coalesce(cast(cast(ACCOUNT_ID as varchar(20)) as varchar), ''), "
+        "coalesce(cast(cast(ACCOUNT_NAME as varchar(255)) as varchar), '')), 256) as varchar(64)) "
+        "as BUSINESS_DATA_HASH"
+        in model_sql
+    )
+    assert "cast(cast(ACCOUNT_KEY" not in model_sql
+    assert "cast(cast(ACCOUNT_BUSINESS_KEY" not in model_sql
+
+
+def test_business_data_hash_generation_can_be_disabled(tmp_path: Path) -> None:
+    result, output_dir = generate(
+        tmp_path,
+        csv_generation_spec(
+            extra_control="""
+            control_data:
+              change_type: scd1
+              business_data_hash:
+                skip_business_data_hash: true
+            """,
+        ),
+    )
+
+    assert result.errors == []
+    model_sql = (output_dir / "models" / "generated" / "account.sql").read_text(encoding="utf-8")
+    assert "BUSINESS_DATA_HASH" not in model_sql
+
+
+def test_business_data_hash_include_uses_configured_fields(tmp_path: Path) -> None:
+    result, output_dir = generate(
+        tmp_path,
+        csv_generation_spec(
+            extra_control="""
+            control_data:
+              change_type: scd1
+              business_data_hash:
+                business_data_hash_mode: include
+                fields:
+                  - account_name
+            """,
+            fields="""
+        - id: account_id
+          source:
+            pos: 0
+            column: account_id
+          data_type: varchar(20)
+        - id: account_name
+          source:
+            pos: 1
+            column: account_name
+          data_type: varchar(255)
+          transforms:
+            - type: trim
+            """,
+        ),
+    )
+
+    assert result.errors == []
+    model_sql = (output_dir / "models" / "generated" / "account.sql").read_text(encoding="utf-8")
+    hash_line = next(line for line in model_sql.splitlines() if " as BUSINESS_DATA_HASH" in line)
+    assert "trim(ACCOUNT_NAME)" in hash_line
+    assert "varchar(255)" in hash_line
+    assert "ACCOUNT_ID" not in hash_line
 
 
 def test_surrogate_key_generation_can_be_disabled(tmp_path: Path) -> None:
@@ -1480,22 +1569,22 @@ def test_scd2_manual_generation_copies_declared_scd_fields(tmp_path: Path) -> No
         - id: valid_from_datetime
           source:
             pos: 2
-            column: valid_from_datetime
+            column: VALID_FROM_DATETIME
           data_type: timestamp_tz
         - id: valid_to_datetime
           source:
             pos: 3
-            column: valid_to_datetime
+            column: VALID_TO_DATETIME
           data_type: timestamp_tz
-        - id: is_current
+        - id: is_current_flag
           source:
             pos: 4
-            column: is_current
+            column: IS_CURRENT_FLAG
           data_type: varchar(1)
-        - id: is_deleted
+        - id: is_deleted_flag
           source:
             pos: 5
-            column: is_deleted
+            column: IS_DELETED_FLAG
           data_type: varchar(1)
             """,
         ),
@@ -1508,10 +1597,15 @@ def test_scd2_manual_generation_copies_declared_scd_fields(tmp_path: Path) -> No
     assert "unique_key=['ACCOUNT_BUSINESS_KEY', 'VALID_FROM_DATETIME']" in model_sql
     assert "cast(VALID_FROM_DATETIME as timestamp_tz) as VALID_FROM_DATETIME" in model_sql
     assert "cast(VALID_TO_DATETIME as timestamp_tz) as VALID_TO_DATETIME" in model_sql
-    assert "cast(IS_CURRENT as varchar(1)) as IS_CURRENT" in model_sql
-    assert "cast(IS_DELETED as varchar(1)) as IS_DELETED" in model_sql
-    assert "BUSINESS_DATA_HASH" not in model_sql
-    assert "IS_CURRENT_FLAG" not in model_sql
+    assert "cast(IS_CURRENT_FLAG as varchar(1)) as IS_CURRENT_FLAG" in model_sql
+    assert "cast(IS_DELETED_FLAG as varchar(1)) as IS_DELETED_FLAG" in model_sql
+    hash_line = next(line for line in model_sql.splitlines() if " as BUSINESS_DATA_HASH" in line)
+    assert "ACCOUNT_ID" in hash_line
+    assert "ACCOUNT_NAME" in hash_line
+    assert "VALID_FROM_DATETIME" not in hash_line
+    assert "VALID_TO_DATETIME" not in hash_line
+    assert "IS_CURRENT_FLAG" not in hash_line
+    assert "IS_DELETED_FLAG" not in hash_line
 
 
 def test_scd2_manual_generation_rejects_multiple_current_rows_for_entity_key(tmp_path: Path) -> None:
@@ -1539,22 +1633,22 @@ def test_scd2_manual_generation_rejects_multiple_current_rows_for_entity_key(tmp
         - id: valid_from_datetime
           source:
             pos: 1
-            column: valid_from_datetime
+            column: VALID_FROM_DATETIME
           data_type: timestamp_tz
         - id: valid_to_datetime
           source:
             pos: 2
-            column: valid_to_datetime
+            column: VALID_TO_DATETIME
           data_type: timestamp_tz
-        - id: is_current
+        - id: is_current_flag
           source:
             pos: 3
-            column: is_current
+            column: IS_CURRENT_FLAG
           data_type: varchar(1)
-        - id: is_deleted
+        - id: is_deleted_flag
           source:
             pos: 4
-            column: is_deleted
+            column: IS_DELETED_FLAG
           data_type: varchar(1)
             """,
         ),
@@ -1567,7 +1661,7 @@ def test_scd2_manual_generation_rejects_multiple_current_rows_for_entity_key(tmp
     assert "existing_manual_rows as (" in guard_sql
     assert "remaining_existing_manual_rows as (" in guard_sql
     assert "manual_candidate_rows as (" in guard_sql
-    assert "count_if(IS_CURRENT = 'Y') over (partition by ACCOUNT_BUSINESS_KEY)" in guard_sql
+    assert "count_if(IS_CURRENT_FLAG = 'Y') over (partition by ACCOUNT_BUSINESS_KEY)" in guard_sql
     assert "where ((incoming_manual_rows.ACCOUNT_BUSINESS_KEY = existing_target.ACCOUNT_BUSINESS_KEY)" in guard_sql
     assert "incoming_manual_rows.VALID_FROM_DATETIME = existing_manual_rows.VALID_FROM_DATETIME" in guard_sql
 
@@ -1594,22 +1688,22 @@ def test_scd2_manual_generation_rejects_live_target_validity_window_overlap(tmp_
         - id: valid_from_datetime
           source:
             pos: 1
-            column: valid_from_datetime
+            column: VALID_FROM_DATETIME
           data_type: timestamp_tz
         - id: valid_to_datetime
           source:
             pos: 2
-            column: valid_to_datetime
+            column: VALID_TO_DATETIME
           data_type: timestamp_tz
-        - id: is_current
+        - id: is_current_flag
           source:
             pos: 3
-            column: is_current
+            column: IS_CURRENT_FLAG
           data_type: varchar(1)
-        - id: is_deleted
+        - id: is_deleted_flag
           source:
             pos: 4
-            column: is_deleted
+            column: IS_DELETED_FLAG
           data_type: varchar(1)
             """,
         ),
@@ -1646,22 +1740,22 @@ def test_scd2_manual_quarantine_uses_live_target_validity_window_validation(tmp_
         - id: valid_from_datetime
           source:
             pos: 1
-            column: valid_from_datetime
+            column: VALID_FROM_DATETIME
           data_type: timestamp_tz
         - id: valid_to_datetime
           source:
             pos: 2
-            column: valid_to_datetime
+            column: VALID_TO_DATETIME
           data_type: timestamp_tz
-        - id: is_current
+        - id: is_current_flag
           source:
             pos: 3
-            column: is_current
+            column: IS_CURRENT_FLAG
           data_type: varchar(1)
-        - id: is_deleted
+        - id: is_deleted_flag
           source:
             pos: 4
-            column: is_deleted
+            column: IS_DELETED_FLAG
           data_type: varchar(1)
             """,
         ),
@@ -1699,22 +1793,22 @@ def test_scd2_manual_upsert_defaults_update_key_to_valid_from_datetime(tmp_path:
         - id: valid_from_datetime
           source:
             pos: 1
-            column: valid_from_datetime
+            column: VALID_FROM_DATETIME
           data_type: timestamp_tz
         - id: valid_to_datetime
           source:
             pos: 2
-            column: valid_to_datetime
+            column: VALID_TO_DATETIME
           data_type: timestamp_tz
-        - id: is_current
+        - id: is_current_flag
           source:
             pos: 3
-            column: is_current
+            column: IS_CURRENT_FLAG
           data_type: varchar(1)
-        - id: is_deleted
+        - id: is_deleted_flag
           source:
             pos: 4
-            column: is_deleted
+            column: IS_DELETED_FLAG
           data_type: varchar(1)
             """,
         ),
@@ -1742,22 +1836,22 @@ def test_scd2_manual_defaults_to_append_only_incremental_mode(tmp_path: Path) ->
         - id: valid_from_datetime
           source:
             pos: 1
-            column: valid_from_datetime
+            column: VALID_FROM_DATETIME
           data_type: timestamp_tz
         - id: valid_to_datetime
           source:
             pos: 2
-            column: valid_to_datetime
+            column: VALID_TO_DATETIME
           data_type: timestamp_tz
-        - id: is_current
+        - id: is_current_flag
           source:
             pos: 3
-            column: is_current
+            column: IS_CURRENT_FLAG
           data_type: varchar(1)
-        - id: is_deleted
+        - id: is_deleted_flag
           source:
             pos: 4
-            column: is_deleted
+            column: IS_DELETED_FLAG
           data_type: varchar(1)
             """,
         ),
@@ -1788,22 +1882,22 @@ def test_scd2_manual_truncate_before_load_uses_table_materialization(tmp_path: P
         - id: valid_from_datetime
           source:
             pos: 1
-            column: valid_from_datetime
+            column: VALID_FROM_DATETIME
           data_type: timestamp_tz
         - id: valid_to_datetime
           source:
             pos: 2
-            column: valid_to_datetime
+            column: VALID_TO_DATETIME
           data_type: timestamp_tz
-        - id: is_current
+        - id: is_current_flag
           source:
             pos: 3
-            column: is_current
+            column: IS_CURRENT_FLAG
           data_type: varchar(1)
-        - id: is_deleted
+        - id: is_deleted_flag
           source:
             pos: 4
-            column: is_deleted
+            column: IS_DELETED_FLAG
           data_type: varchar(1)
             """,
         ),
@@ -2073,7 +2167,10 @@ def test_scd2_auto_unit_tests_override_is_incremental(tmp_path: Path) -> None:
 
     assert result.errors == []
     unit_test_yaml = load_yaml(output_dir / "models" / "generated" / "account_unit_tests.yml")
-    assert unit_test_yaml["unit_tests"][0]["overrides"] == {"macros": {"is_incremental": False}}
+    assert unit_test_yaml["unit_tests"][0]["overrides"] == {
+        "vars": {"tms_unit_test": True},
+        "macros": {"is_incremental": False},
+    }
 
 
 def test_scd2_unit_tests_include_business_data_hash_expectation(tmp_path: Path) -> None:

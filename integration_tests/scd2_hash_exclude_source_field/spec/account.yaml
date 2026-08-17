@@ -1,0 +1,40 @@
+id: scd2_hash_exclude_source_field
+control_data:
+  materialisation_type: table
+  change_type: scd2_auto
+  business_key:
+    fields:
+      - account_id
+  business_data_hash:
+    business_data_hash_mode: exclude
+    fields:
+      - source_batch_id
+  scd:
+    insert_time: '{{ var("insert_time") }}'
+source:
+  format: csv
+  header: true
+  load_method: dbt_seed
+  seed:
+    file: ../data/load_001_source.csv
+    name: account_hash_exclude_source_seed
+target:
+  id: account
+  schema: business
+  fields:
+    - id: account_id
+      source:
+        pos: 0
+        column: account_id
+      data_type: varchar(20)
+      unique: true
+    - id: account_value
+      source:
+        pos: 1
+        column: account_value
+      data_type: number(10,0)
+    - id: source_batch_id
+      source:
+        pos: 2
+        column: source_batch_id
+      data_type: varchar(20)

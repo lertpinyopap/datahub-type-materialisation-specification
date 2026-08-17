@@ -6,8 +6,8 @@ target:
   expected_columns:
     - ACCOUNT_ID
     - ACCOUNT_VALUE
-    - IS_CURRENT
-    - IS_DELETED
+    - IS_CURRENT_FLAG
+    - IS_DELETED_FLAG
     - VALID_FROM_DATETIME
     - VALID_TO_DATETIME
     - ACCOUNT_BUSINESS_KEY

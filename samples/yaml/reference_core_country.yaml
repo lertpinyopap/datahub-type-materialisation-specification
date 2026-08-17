@@ -12,7 +12,7 @@ control_data:
       - country_code
   scd:
     # Upsert means we can update records if the business key and update_key(s) match, this allows us to end date old values to add new ones, delete value, etc
-    update_mode: upsert    
+    update_mode: upsert
     update_key:
       # Here we define the update condition to be the business key plus valid_from_datetime
       fields:
@@ -86,7 +86,7 @@ target:
         # Validation must be 3 numbers or NA
         - type: regex
           pattern: "^([0-9]{3}|NA)$"
-    - id: is_current
+    - id: is_current_flag
       source:
         pos: 4
         column: IS_CURRENT_FLAG
@@ -99,7 +99,7 @@ target:
           values:
             - "Y"
             - "N"
-    - id: is_deleted
+    - id: is_deleted_flag
       source:
         pos: 5
         column: IS_DELETED_FLAG

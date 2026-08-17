@@ -22,8 +22,8 @@ RESERVED_GENERATED_FIELDS = set(GENERATED_METADATA_FIELD_TYPES)
 SCD2_MANUAL_FIELD_TYPES = {
     "valid_from_datetime": "timestamp",
     "valid_to_datetime": "timestamp",
-    "is_current": "varchar(1)",
-    "is_deleted": "varchar(1)",
+    "is_current_flag": "varchar(1)",
+    "is_deleted_flag": "varchar(1)",
 }
 
 SUPPORTED_TYPE_RE = re.compile(r"^\s*([A-Za-z][A-Za-z0-9_]*)(?:\(([^)]*)\))?\s*$")
@@ -122,6 +122,7 @@ def validate_semantics(spec: dict[str, Any], *, abstract: bool) -> list[Diagnost
     diagnostics.extend(_validate_table_query(spec))
     diagnostics.extend(_validate_surrogate_key(spec))
     diagnostics.extend(_validate_business_key(spec, abstract=abstract))
+    diagnostics.extend(_validate_business_data_hash(spec))
     diagnostics.extend(_validate_scd(spec, abstract=abstract))
     return diagnostics
 
@@ -303,8 +304,7 @@ def _reserved_generated_fields(spec: dict[str, Any]) -> set[str]:
     if _surrogate_key_enabled(spec):
         reserved.add(_surrogate_key_name(spec))
     if _change_type(spec) == "scd2_manual":
-        reserved.discard("valid_from_datetime")
-        reserved.discard("valid_to_datetime")
+        reserved.difference_update(SCD2_MANUAL_FIELD_TYPES)
     return reserved
 
 
@@ -582,6 +582,50 @@ def _validate_business_key(spec: dict[str, Any], *, abstract: bool) -> list[Diag
     return diagnostics
 
 
+def _validate_business_data_hash(spec: dict[str, Any]) -> list[Diagnostic]:
+    diagnostics: list[Diagnostic] = []
+    control_data = spec.get("control_data")
+    if not isinstance(control_data, dict):
+        return diagnostics
+    config = control_data.get("business_data_hash")
+    if not isinstance(config, dict):
+        return diagnostics
+    if config.get("skip_business_data_hash") is True:
+        return diagnostics
+    mode = config.get("business_data_hash_mode", "exclude")
+    configured_fields = config.get("fields", [])
+    if mode == "include" and not configured_fields:
+        diagnostics.append(
+            Diagnostic("include mode requires at least one field", "$.control_data.business_data_hash.fields")
+        )
+    if not isinstance(configured_fields, list):
+        return diagnostics
+    target_field_ids = {
+        case_key(field["id"])
+        for field in fields(spec)
+        if isinstance(field, dict) and isinstance(field.get("id"), str)
+    }
+    if not target_field_ids:
+        return diagnostics
+    ineligible_fields = _business_data_hash_ineligible_field_ids(spec)
+    for index, field_id in enumerate(configured_fields):
+        if not isinstance(field_id, str):
+            continue
+        field_key = case_key(field_id)
+        location = f"$.control_data.business_data_hash.fields[{index}]"
+        if mode == "include" and field_key in ineligible_fields:
+            diagnostics.append(
+                Diagnostic(
+                    "business data hash include field must not reference generated keys or SCD2 metadata fields",
+                    location,
+                )
+            )
+            continue
+        if field_key not in target_field_ids:
+            diagnostics.append(Diagnostic("business data hash field does not exist in target.fields", location))
+    return diagnostics
+
+
 def _business_key_generated_name(spec: dict[str, Any]) -> str:
     return _default_business_key_name(spec)
 
@@ -622,6 +666,34 @@ def _target_key_base(target_id: str) -> str:
     return target_id.rsplit("__", 1)[-1]
 
 
+def _business_data_hash_ineligible_field_ids(spec: dict[str, Any]) -> set[str]:
+    excluded_fields = set(RESERVED_GENERATED_FIELDS)
+    if _business_key_enabled(spec):
+        excluded_fields.add(_business_key_generated_name(spec))
+    if _surrogate_key_enabled(spec):
+        excluded_fields.add(_surrogate_key_name(spec))
+    if _change_type(spec) == "scd2_manual":
+        excluded_fields.update(SCD2_MANUAL_FIELD_TYPES)
+        excluded_fields.update(_scd2_manual_update_key_field_ids(spec))
+    return excluded_fields
+
+
+def _scd2_manual_update_key_field_ids(spec: dict[str, Any]) -> set[str]:
+    control_data = spec.get("control_data")
+    if not isinstance(control_data, dict):
+        return set()
+    scd = control_data.get("scd")
+    if not isinstance(scd, dict) or scd.get("update_mode", "append_only") != "upsert":
+        return set()
+    update_key = scd.get("update_key")
+    if not isinstance(update_key, dict):
+        return {"valid_from_datetime"}
+    configured_fields = update_key.get("fields")
+    if not isinstance(configured_fields, list) or not configured_fields:
+        return {"valid_from_datetime"}
+    return {case_key(field_id) for field_id in configured_fields if isinstance(field_id, str)}
+
+
 def _validate_scd2_manual_fields(spec: dict[str, Any]) -> list[Diagnostic]:
     diagnostics: list[Diagnostic] = []
     fields_by_id = {
@@ -639,6 +711,15 @@ def _validate_scd2_manual_fields(spec: dict[str, Any]) -> list[Diagnostic]:
             )
             continue
         index, field = fields_by_id[required_id]
+        source = field.get("source")
+        required_column = required_id.upper()
+        if not isinstance(source, dict) or source.get("column") != required_column:
+            diagnostics.append(
+                Diagnostic(
+                    f"`{required_id}` must map from source column `{required_column}` for `scd2_manual`",
+                    f"$.target.fields[{index}].source.column",
+                )
+            )
         data_type = field.get("data_type")
         if not isinstance(data_type, str):
             continue

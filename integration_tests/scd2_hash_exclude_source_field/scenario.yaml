@@ -1,0 +1,28 @@
+name: scd2_hash_exclude_source_field
+description: SCD2 auto excludes a configured field from business_data_hash.
+spec: spec/account.yaml
+initial_target: data/initial_target.csv
+target:
+  expected_columns:
+    - ACCOUNT_ID
+    - ACCOUNT_VALUE
+    - SOURCE_BATCH_ID
+    - ACCOUNT_BUSINESS_KEY
+    - IS_CURRENT_FLAG
+    - IS_DELETED_FLAG
+    - VALID_FROM_DATETIME
+    - VALID_TO_DATETIME
+    - BUSINESS_DATA_HASH
+  order_by:
+    - ACCOUNT_ID
+    - VALID_FROM_DATETIME
+checks:
+  - The source changes only source_batch_id.
+  - source_batch_id is excluded from business_data_hash.
+  - The incoming row is skipped because SHA2('A1|1') still matches the current target hash.
+loads:
+  - name: load_001
+    source_csv: data/load_001_source.csv
+    expected_target: data/expected_after_load_001.csv
+    dbt_vars:
+      insert_time: "2026-09-02T00:00:00Z"

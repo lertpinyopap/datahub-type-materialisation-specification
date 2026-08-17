@@ -96,6 +96,7 @@ def test_integration_scenarios_are_discoverable_and_self_contained() -> None:
         "scd1_table_source_query_quarantine",
         "scd1_table_source_varchar_load",
         "scd2_continuous_field_validity",
+        "scd2_hash_exclude_source_field",
         "scd2_hash_skip_current_duplicate",
         "scd2_hash_update_historical_boundary",
         "scd2_manual_multiple_current_failure_rollback",
@@ -150,7 +151,12 @@ def test_integration_scenarios_generate_dbt_unit_tests(tmp_path: Path) -> None:
         assert unit_test_yaml["unit_tests"][0]["given"][1]["input"] == "ref('tms_int__account__validation_guard')"
         assert "VALIDATION_FAILURE_GUARD" in unit_test_yaml["unit_tests"][0]["given"][1]["rows"]
         if scenario.name == "scd2_missing_from_source_delete":
-            assert unit_test_yaml["unit_tests"][0]["overrides"] == {"macros": {"is_incremental": False}}
+            assert unit_test_yaml["unit_tests"][0]["overrides"] == {
+                "vars": {"tms_unit_test": True},
+                "macros": {"is_incremental": False},
+            }
+        else:
+            assert unit_test_yaml["unit_tests"][0]["overrides"]["vars"] == {"tms_unit_test": True}
         assert unit_test_yaml["unit_tests"][0]["expect"]["rows"]
 
 
@@ -888,6 +894,24 @@ def test_hash_skip_scenario_generates_business_hash_skip_sql(tmp_path: Path) -> 
     assert "SCD2 duplicate hash handling: historical duplicate boundaries updated=" in model_sql
 
 
+def test_hash_exclude_scenario_omits_configured_field_from_business_hash(tmp_path: Path) -> None:
+    scenario = load_scenario(INTEGRATION_ROOT / "scd2_hash_exclude_source_field")
+    output_dir = tmp_path / scenario.name
+
+    generated_project = generate_project_for_scenario(scenario, output_dir)
+
+    spec = load_yaml(generated_project.spec_path)
+    model_sql = (output_dir / "models" / "generated" / "tms_int__account.sql").read_text(encoding="utf-8")
+    hash_line = next(line for line in model_sql.splitlines() if "as BUSINESS_DATA_HASH" in line)
+    assert spec["control_data"]["business_data_hash"] == {
+        "business_data_hash_mode": "exclude",
+        "fields": ["source_batch_id"],
+    }
+    assert "ACCOUNT_ID" in hash_line
+    assert "ACCOUNT_VALUE" in hash_line
+    assert "SOURCE_BATCH_ID" not in hash_line
+
+
 def test_continuous_scd2_scenario_dbt_unit_test_uses_start_and_end_of_time(tmp_path: Path) -> None:
     scenario = load_scenario(INTEGRATION_ROOT / "scd2_continuous_field_validity")
     output_dir = tmp_path / scenario.name
@@ -950,7 +974,7 @@ def test_scd2_manual_failure_rollback_scenarios_generate_live_target_guards(tmp_
         assert "remaining_existing_manual_rows as (" in guard_sql
         assert "manual_candidate_rows as (" in guard_sql
         assert "manual_state_failures as (" in guard_sql
-        assert "count_if(IS_CURRENT = 'Y') over (partition by ACCOUNT_BUSINESS_KEY)" in guard_sql
+        assert "count_if(IS_CURRENT_FLAG = 'Y') over (partition by ACCOUNT_BUSINESS_KEY)" in guard_sql
         assert "TMS_NEXT_VALID_FROM_DATETIME <= VALID_TO_DATETIME" in guard_sql
 
 

@@ -222,7 +222,7 @@ def test_fixed_value_source_is_allowed_without_column_or_position(tmp_path: Path
           id: account
           schema: business
           fields:
-            - id: is_current
+            - id: load_status_flag
               source:
                 fixed_value: "Y"
               data_type: varchar(1)
@@ -241,7 +241,7 @@ def test_fixed_value_source_rejects_other_selectors(tmp_path: Path) -> None:
           change_type: scd1
           business_key:
             fields:
-              - is_current
+              - load_status_flag
         source:
           format: table
           schema: raw
@@ -250,7 +250,7 @@ def test_fixed_value_source_rejects_other_selectors(tmp_path: Path) -> None:
           id: account
           schema: business
           fields:
-            - id: is_current
+            - id: load_status_flag
               source:
                 column: payload
                 fixed_value: "Y"
@@ -688,6 +688,120 @@ def test_business_key_fields_must_exist(tmp_path: Path) -> None:
     assert "business key field does not exist in target.fields" in diagnostic_messages(diagnostics)
 
 
+def test_business_data_hash_control_accepts_include_fields(tmp_path: Path) -> None:
+    _, diagnostics = parse_yaml(
+        tmp_path,
+        complete_spec(
+            """
+            control_data:
+              change_type: scd1
+              business_data_hash:
+                business_data_hash_mode: include
+                fields:
+                  - account_id
+            """
+        ),
+    )
+
+    assert diagnostic_messages(diagnostics) == []
+
+
+def test_business_data_hash_include_requires_fields(tmp_path: Path) -> None:
+    _, diagnostics = parse_yaml(
+        tmp_path,
+        complete_spec(
+            """
+            control_data:
+              change_type: scd1
+              business_data_hash:
+                business_data_hash_mode: include
+            """
+        ),
+    )
+
+    assert diagnostic_messages(diagnostics) == ["include mode requires at least one field"]
+
+
+def test_business_data_hash_include_rejects_generated_business_key(tmp_path: Path) -> None:
+    _, diagnostics = parse_yaml(
+        tmp_path,
+        complete_spec(
+            """
+            control_data:
+              change_type: scd1
+              business_data_hash:
+                business_data_hash_mode: include
+                fields:
+                  - account_business_key
+            """
+        ),
+    )
+
+    assert diagnostic_messages(diagnostics) == [
+        "business data hash include field must not reference generated keys or SCD2 metadata fields"
+    ]
+
+
+def test_business_data_hash_include_rejects_scd2_manual_metadata_field(tmp_path: Path) -> None:
+    _, diagnostics = parse_yaml(
+        tmp_path,
+        """
+        id: account_spec
+        control_data:
+          change_type: scd2_manual
+          business_key:
+            fields:
+              - account_id
+          business_data_hash:
+            business_data_hash_mode: include
+            fields:
+              - valid_from_datetime
+          scd:
+            update_mode: upsert
+            update_key:
+              fields:
+                - valid_from_datetime
+        source:
+          format: csv
+          header: true
+        target:
+          id: account
+          schema: business
+          fields:
+            - id: account_id
+              source:
+                pos: 0
+                column: account_id
+              data_type: varchar(20)
+            - id: valid_from_datetime
+              source:
+                pos: 1
+                column: VALID_FROM_DATETIME
+              data_type: timestamp_tz
+            - id: valid_to_datetime
+              source:
+                pos: 2
+                column: VALID_TO_DATETIME
+              data_type: timestamp_tz
+            - id: is_current_flag
+              source:
+                pos: 3
+                column: IS_CURRENT_FLAG
+              data_type: varchar(1)
+            - id: is_deleted_flag
+              source:
+                pos: 4
+                column: IS_DELETED_FLAG
+              data_type: varchar(1)
+        """,
+        auto_business_key=False,
+    )
+
+    assert diagnostic_messages(diagnostics) == [
+        "business data hash include field must not reference generated keys or SCD2 metadata fields"
+    ]
+
+
 def test_default_business_key_name_must_not_collide_with_target_fields(tmp_path: Path) -> None:
     _, diagnostics = parse_yaml(
         tmp_path,
@@ -963,8 +1077,8 @@ def test_scd2_manual_requires_copied_scd_fields(tmp_path: Path) -> None:
     messages = diagnostic_messages(diagnostics)
     assert "`scd2_manual` requires target field `valid_from_datetime`" in messages
     assert "`scd2_manual` requires target field `valid_to_datetime`" in messages
-    assert "`scd2_manual` requires target field `is_current`" in messages
-    assert "`scd2_manual` requires target field `is_deleted`" in messages
+    assert "`scd2_manual` requires target field `is_current_flag`" in messages
+    assert "`scd2_manual` requires target field `is_deleted_flag`" in messages
 
 
 def test_scd2_manual_accepts_copied_scd_fields(tmp_path: Path) -> None:
@@ -989,27 +1103,72 @@ def test_scd2_manual_accepts_copied_scd_fields(tmp_path: Path) -> None:
             - id: valid_from_datetime
               source:
                 pos: 1
-                column: valid_from_datetime
+                column: VALID_FROM_DATETIME
               data_type: timestamp_tz
             - id: valid_to_datetime
               source:
                 pos: 2
-                column: valid_to_datetime
+                column: VALID_TO_DATETIME
               data_type: timestamp_tz
-            - id: is_current
+            - id: is_current_flag
               source:
                 pos: 3
-                column: is_current
+                column: IS_CURRENT_FLAG
               data_type: varchar(1)
-            - id: is_deleted
+            - id: is_deleted_flag
               source:
                 pos: 4
-                column: is_deleted
+                column: IS_DELETED_FLAG
               data_type: varchar(1)
         """,
     )
 
     assert diagnostics == []
+
+
+def test_scd2_manual_scd_fields_must_use_canonical_source_columns(tmp_path: Path) -> None:
+    _, diagnostics = parse_yaml(
+        tmp_path,
+        """
+        id: account_spec
+        control_data:
+          change_type: scd2_manual
+        source:
+          format: csv
+          header: true
+        target:
+          id: account
+          schema: business
+          fields:
+            - id: account_id
+              source:
+                pos: 0
+                column: account_id
+              data_type: varchar(20)
+            - id: valid_from_datetime
+              source:
+                pos: 1
+                column: source_valid_from
+              data_type: timestamp_tz
+            - id: valid_to_datetime
+              source:
+                pos: 2
+                column: VALID_TO_DATETIME
+              data_type: timestamp_tz
+            - id: is_current_flag
+              source:
+                pos: 3
+                column: IS_CURRENT_FLAG
+              data_type: varchar(1)
+            - id: is_deleted_flag
+              source:
+                pos: 4
+                column: IS_DELETED_FLAG
+              data_type: varchar(1)
+        """,
+    )
+
+    assert "`valid_from_datetime` must map from source column `VALID_FROM_DATETIME` for `scd2_manual`" in diagnostic_messages(diagnostics)
 
 
 def test_scd2_manual_accepts_update_mode(tmp_path: Path) -> None:
@@ -1039,22 +1198,22 @@ def test_scd2_manual_accepts_update_mode(tmp_path: Path) -> None:
             - id: valid_from_datetime
               source:
                 pos: 1
-                column: valid_from_datetime
+                column: VALID_FROM_DATETIME
               data_type: timestamp_tz
             - id: valid_to_datetime
               source:
                 pos: 2
-                column: valid_to_datetime
+                column: VALID_TO_DATETIME
               data_type: timestamp_tz
-            - id: is_current
+            - id: is_current_flag
               source:
                 pos: 3
-                column: is_current
+                column: IS_CURRENT_FLAG
               data_type: varchar(1)
-            - id: is_deleted
+            - id: is_deleted_flag
               source:
                 pos: 4
-                column: is_deleted
+                column: IS_DELETED_FLAG
               data_type: varchar(1)
         """,
     )
@@ -1088,22 +1247,22 @@ def test_scd2_manual_rejects_update_key_without_upsert(tmp_path: Path) -> None:
             - id: valid_from_datetime
               source:
                 pos: 1
-                column: valid_from_datetime
+                column: VALID_FROM_DATETIME
               data_type: timestamp_tz
             - id: valid_to_datetime
               source:
                 pos: 2
-                column: valid_to_datetime
+                column: VALID_TO_DATETIME
               data_type: timestamp_tz
-            - id: is_current
+            - id: is_current_flag
               source:
                 pos: 3
-                column: is_current
+                column: IS_CURRENT_FLAG
               data_type: varchar(1)
-            - id: is_deleted
+            - id: is_deleted_flag
               source:
                 pos: 4
-                column: is_deleted
+                column: IS_DELETED_FLAG
               data_type: varchar(1)
         """,
     )
@@ -1138,22 +1297,22 @@ def test_scd2_manual_update_key_fields_must_reference_target_fields(tmp_path: Pa
             - id: valid_from_datetime
               source:
                 pos: 1
-                column: valid_from_datetime
+                column: VALID_FROM_DATETIME
               data_type: timestamp_tz
             - id: valid_to_datetime
               source:
                 pos: 2
-                column: valid_to_datetime
+                column: VALID_TO_DATETIME
               data_type: timestamp_tz
-            - id: is_current
+            - id: is_current_flag
               source:
                 pos: 3
-                column: is_current
+                column: IS_CURRENT_FLAG
               data_type: varchar(1)
-            - id: is_deleted
+            - id: is_deleted_flag
               source:
                 pos: 4
-                column: is_deleted
+                column: IS_DELETED_FLAG
               data_type: varchar(1)
         """,
     )
