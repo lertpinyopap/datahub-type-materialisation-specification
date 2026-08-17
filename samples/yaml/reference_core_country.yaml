@@ -72,7 +72,7 @@ target:
         - type: trim
       nullable: false
       validations:
-        # Sample validation must be 3 numbers or a word starting with DQ
+        # Sample validation must be 3 numbers or NA
         - type: regex
           pattern: "^([0-9]{3}|NA)$"
     - id: is_current
