@@ -1,0 +1,80 @@
+id: scd2_manual_multiple_current_failure_rollback
+control_data:
+  materialisation_type: table
+  change_type: scd2_manual
+  business_key:
+    fields:
+      - account_id
+  scd:
+    update_mode: upsert
+    update_key:
+      fields:
+        - valid_from_datetime
+  failure_mode: fail_load
+source:
+  format: csv
+  header: true
+  load_method: dbt_seed
+  seed:
+    file: ../data/load_001_source.csv
+    name: account_scd2_manual_multiple_current_source_seed
+target:
+  id: account
+  schema: business
+  fields:
+    - id: account_id
+      source:
+        pos: 0
+        column: account_id
+      data_type: varchar(20)
+      nullable: false
+    - id: account_value
+      source:
+        pos: 1
+        column: account_value
+      data_type: number(10,0)
+      nullable: false
+    - id: is_current
+      source:
+        pos: 2
+        column: is_current
+      data_type: varchar(1)
+      nullable: false
+      validations:
+        - type: allowed_values
+          values:
+            - "Y"
+            - "N"
+    - id: is_deleted
+      source:
+        pos: 3
+        column: is_deleted
+      data_type: varchar(1)
+      nullable: false
+      validations:
+        - type: allowed_values
+          values:
+            - "Y"
+            - "N"
+    - id: valid_from_datetime
+      source:
+        pos: 4
+        column: valid_from_datetime
+      data_type: timestamp_tz
+      nullable: false
+      transforms:
+        - type: parse_timestamp
+          format: "%d/%m/%Y"
+          timezone_if_missing: UTC
+          time_if_missing: start_of_day
+    - id: valid_to_datetime
+      source:
+        pos: 5
+        column: valid_to_datetime
+      data_type: timestamp_tz
+      nullable: false
+      transforms:
+        - type: parse_timestamp
+          format: "%d/%m/%Y"
+          timezone_if_missing: UTC
+          time_if_missing: end_of_day

@@ -28,6 +28,7 @@ DBT_PROFILE_NAME = "datahub_type_materialisation"
 SCD2_START_OF_TIME = "0001-01-01T00:00:00Z"
 SCD2_END_OF_TIME = "9999-12-31T23:59:59Z"
 SCD2_END_OF_TIME_VALIDATION_THRESHOLD = "9999-12-30 00:00:00"
+STAGING_SCHEMA_DEFAULT = "INTERMEDIATE"
 
 NOT_IMPLEMENTED = [
     "generated Snowflake file-format objects for CSV stages",
@@ -320,7 +321,17 @@ def _write_csv_source_model(spec: dict[str, Any], options: GenerateDbtOptions, r
             select_lines.append(f"    ${ordinal}::string as {_quote_identifier(column)}")
     sql = "\n".join(
         [
-            f"{{{{ config(materialized='view', alias='{_physical_name(model_name)}') }}}}",
+            "{{",
+            "  config(",
+            *_model_config_lines(
+                materialized="view",
+                database=_target_relation_config(spec).database,
+                schema=_staging_schema_config_expression(spec),
+                alias=model_name,
+                schema_is_expression=True,
+            ),
+            "  )",
+            "}}",
             "",
             "select",
             ",\n".join(select_lines),
@@ -351,7 +362,17 @@ def _write_csv_seed_source_model(spec: dict[str, Any], options: GenerateDbtOptio
             select_lines.append(f"    cast({_quote_identifier(column)} as string) as {_quote_identifier(column)}")
     sql = "\n".join(
         [
-            f"{{{{ config(materialized='view', alias='{_physical_name(model_name)}') }}}}",
+            "{{",
+            "  config(",
+            *_model_config_lines(
+                materialized="view",
+                database=_target_relation_config(spec).database,
+                schema=_staging_schema_config_expression(spec),
+                alias=model_name,
+                schema_is_expression=True,
+            ),
+            "  )",
+            "}}",
             "",
             "select",
             ",\n".join(select_lines),
@@ -421,7 +442,17 @@ def _write_table_source_model(spec: dict[str, Any], options: GenerateDbtOptions,
     type_guard_lines = _semistructured_source_type_guard_lines(spec)
     sql = "\n".join(
         [
-            f"{{{{ config(materialized='view', alias='{_physical_name(model_name)}') }}}}",
+            "{{",
+            "  config(",
+            *_model_config_lines(
+                materialized="view",
+                database=_target_relation_config(spec).database,
+                schema=_staging_schema_config_expression(spec),
+                alias=model_name,
+                schema_is_expression=True,
+            ),
+            "  )",
+            "}}",
             "",
             *type_guard_lines,
             *source_sql,
@@ -472,10 +503,11 @@ def _write_final_model(spec: dict[str, Any], result: DbtGenerationResult) -> Non
             ]
     config_lines = _model_config_lines(
         materialized=materialized,
-        schema=target["schema"],
+        schema=_target_schema_config_expression(spec),
         alias=table_name,
         database=target.get("database"),
         extra_config_lines=extra_config_lines,
+        schema_is_expression=True,
     )
     if _change_type(spec) == "scd2_auto":
         body_lines = _scd2_final_body_lines(
@@ -561,6 +593,7 @@ def _write_final_model(spec: dict[str, Any], result: DbtGenerationResult) -> Non
         fail_load_enabled=fail_load_enabled,
     )
     truncate_guard_lines = _truncate_guard_lines(spec)
+    validation_failure_lines = _fail_load_validation_failure_lines(spec) if fail_load_enabled else []
     sql = "\n".join(
         [
             "{{",
@@ -571,6 +604,7 @@ def _write_final_model(spec: dict[str, Any], result: DbtGenerationResult) -> Non
             "",
             *truncate_guard_lines,
             *runtime_log_lines,
+            *validation_failure_lines,
             *body_lines,
         ]
     )
@@ -1014,7 +1048,9 @@ def _scd2_target_merge_body_lines(
         "    where TMS_VERSION_ROW_NUMBER = 1",
         "),",
         *_scd2_duplicate_boundary_lines(spec),
-        *_scd2_window_and_flag_lines(spec, "deduplicated_version_rows"),
+        *_scd2_window_and_flag_lines(spec, "deduplicated_version_rows", include_validation=False),
+        *_scd2_post_load_validation_rows_lines(spec),
+        *_scd2_validation_cte_lines(spec, input_cte="post_load_validation_rows"),
         "",
         "select",
         ",\n".join(output_lines),
@@ -1089,11 +1125,15 @@ def _scd2_manual_update_key_field_ids(spec: dict[str, Any]) -> list[str]:
 
 
 def _scd2_manual_incremental_unique_key(spec: dict[str, Any]) -> str:
-    columns = [
+    columns = _scd2_manual_incremental_unique_key_columns(spec)
+    return "[" + ", ".join(_sql_string(column) for column in columns) + "]"
+
+
+def _scd2_manual_incremental_unique_key_columns(spec: dict[str, Any]) -> list[str]:
+    return [
         *_business_key_unique_key_columns(spec),
         *(_physical_name(field_id) for field_id in _scd2_manual_update_key_field_ids(spec)),
     ]
-    return "[" + ", ".join(_sql_string(column) for column in columns) + "]"
 
 
 def _truncate_guard_lines(spec: dict[str, Any]) -> list[str]:
@@ -1273,7 +1313,12 @@ def _scd2_version_row_key_columns(spec: dict[str, Any]) -> str:
     return ", ".join([*_business_key_partition_columns(spec), "TMS_VALID_FROM_DATETIME_CANDIDATE"])
 
 
-def _scd2_window_and_flag_lines(spec: dict[str, Any], input_cte: str) -> list[str]:
+def _scd2_window_and_flag_lines(
+    spec: dict[str, Any],
+    input_cte: str,
+    *,
+    include_validation: bool = True,
+) -> list[str]:
     if _scd2_auto_from_sot(spec):
         valid_from_expression_lines = [
             "        case",
@@ -1286,7 +1331,7 @@ def _scd2_window_and_flag_lines(spec: dict[str, Any], input_cte: str) -> list[st
         valid_from_expression_lines = [
             "        TMS_VALID_FROM_DATETIME_CANDIDATE as VALID_FROM_DATETIME",
         ]
-    return [
+    lines = [
         "valid_from_rows as (",
         "    select",
         "        *,",
@@ -1310,21 +1355,50 @@ def _scd2_window_and_flag_lines(spec: dict[str, Any], input_cte: str) -> list[st
         "        TMS_IS_DELETED_FLAG_CANDIDATE as IS_DELETED_FLAG",
         "    from windowed_rows",
         "),",
-        *_scd2_validation_cte_lines(spec),
+    ]
+    if include_validation:
+        lines.extend(_scd2_validation_cte_lines(spec))
+    return lines
+
+
+def _scd2_post_load_validation_rows_lines(spec: dict[str, Any]) -> list[str]:
+    columns = [*_business_key_partition_columns(spec), "VALID_FROM_DATETIME", "VALID_TO_DATETIME"]
+    # Incremental SCD2 emits affected keys only. Validation still covers the
+    # post-load target as a whole: rewritten keys plus untouched existing keys.
+    return [
+        "post_load_validation_rows as (",
+        "    select",
+        ",\n".join(f"        {_quote_identifier(column)}" for column in columns),
+        "    from flagged_rows",
+        "    union all",
+        "    select",
+        ",\n".join(f"        existing_target.{_quote_identifier(column)}" for column in columns),
+        "    from existing_target_rows as existing_target",
+        "    where not exists (",
+        "        select 1",
+        "        from affected_key_rows as affected_key",
+        f"        where {_business_key_join_condition(spec, 'existing_target', 'affected_key')}",
+        "    )",
+        "),",
     ]
 
 
-def _scd2_validation_cte_lines(spec: dict[str, Any]) -> list[str]:
+def _scd2_validation_cte_lines(spec: dict[str, Any], *, input_cte: str = "flagged_rows") -> list[str]:
+    # SCD2 validity windows are inclusive: VALID_TO_DATETIME is still live.
+    # Adjacent continuous rows must therefore start one timestamp tick after the previous row ends.
     conditions = [
         "VALID_FROM_DATETIME is null",
         "VALID_TO_DATETIME is null",
         "VALID_TO_DATETIME <= VALID_FROM_DATETIME",
-        "TMS_NEXT_VALID_FROM_DATETIME < VALID_TO_DATETIME",
+        "TMS_NEXT_VALID_FROM_DATETIME <= VALID_TO_DATETIME",
     ]
     if _scd2_validation_mode(spec) == "continuous":
         conditions.extend(
             [
-                "TMS_NEXT_VALID_FROM_DATETIME is not null and VALID_TO_DATETIME <> TMS_NEXT_VALID_FROM_DATETIME",
+                (
+                    "TMS_NEXT_VALID_FROM_DATETIME is not null "
+                    "and TMS_NEXT_VALID_FROM_DATETIME <> dateadd(nanosecond, 1, VALID_TO_DATETIME)"
+                ),
                 (
                     "TMS_NEXT_VALID_FROM_DATETIME is null "
                     f"and VALID_TO_DATETIME < cast({_sql_string(SCD2_END_OF_TIME_VALIDATION_THRESHOLD)} as timestamp_tz)"
@@ -1340,7 +1414,7 @@ def _scd2_validation_cte_lines(spec: dict[str, Any]) -> list[str]:
             f"        lead(VALID_FROM_DATETIME) over ({_scd2_window_clause(spec, 'VALID_FROM_DATETIME')}) "
             "as TMS_NEXT_VALID_FROM_DATETIME"
         ),
-        "    from flagged_rows",
+        f"    from {input_cte}",
         "),",
         "scd2_invalid_validity_rows as (",
         "    select *",
@@ -1379,8 +1453,12 @@ def _write_validation_guard_model(spec: dict[str, Any], result: DbtGenerationRes
     config_lines = _model_config_lines(
         materialized="table",
         database=relation.database,
-        schema=relation.schema,
+        schema=_staging_schema_config_expression(spec),
         alias=alias,
+        extra_config_lines=[
+            "    pre_hook='drop table if exists {{ this }}',",
+        ],
+        schema_is_expression=True,
     )
     sql = "\n".join(
         [
@@ -1400,21 +1478,51 @@ def _write_validation_guard_model(spec: dict[str, Any], result: DbtGenerationRes
             "    where FAILURE_DETAILS is not null",
             "),",
             "failure_count as (",
-            "    select count(*) as FAILURE_COUNT",
+            "    select",
+            "        count(*) as FAILURE_COUNT,",
+            "        min(FAILURE_DETAILS) as FAILURE_DETAILS",
             "    from failed_validation_rows",
             ")",
             "",
-            "select 0 as VALIDATION_FAILURE_GUARD",
+            "select",
+            "    case when FAILURE_COUNT = 0 then 0 else 1 end as VALIDATION_FAILURE_GUARD,",
+            "    FAILURE_COUNT as VALIDATION_FAILURE_COUNT,",
+            "    FAILURE_DETAILS as VALIDATION_FAILURE_DETAILS",
             "from failure_count",
-            "where FAILURE_COUNT = 0",
-            "union all",
-            "select cast('TYPE_MATERIALISATION_VALIDATION_FAILED' as number) as VALIDATION_FAILURE_GUARD",
-            "from failure_count",
-            "where FAILURE_COUNT > 0",
             "",
         ]
     )
     _write(result.output_dir / "models" / "generated" / f"{model_name}.sql", sql, result)
+
+
+def _fail_load_validation_failure_lines(spec: dict[str, Any]) -> list[str]:
+    target = spec["target"]
+    validation_guard_model = _validation_guard_model_name(target["id"])
+    return [
+        "{% if execute %}",
+        "{% set tms_validation_failure_sql %}",
+        "select",
+        "    VALIDATION_FAILURE_COUNT,",
+        "    VALIDATION_FAILURE_DETAILS",
+        f"from {{{{ ref('{validation_guard_model}') }}}}",
+        "where VALIDATION_FAILURE_GUARD <> 0",
+        "limit 1",
+        "{% endset %}",
+        "{% set tms_validation_failure_result = run_query(tms_validation_failure_sql) %}",
+        "{% if tms_validation_failure_result is not none and (tms_validation_failure_result.rows | length) > 0 %}",
+        "{% set tms_validation_failure_count = tms_validation_failure_result.columns[0].values()[0] | int %}",
+        "{% set tms_validation_failure_details = tms_validation_failure_result.columns[1].values()[0] %}",
+        (
+            "{{ exceptions.raise_compiler_error("
+            "'TYPE_MATERIALISATION_VALIDATION_FAILED: ' "
+            "~ tms_validation_failure_count "
+            "~ ' validation row(s) failed. First failure: ' "
+            "~ tms_validation_failure_details) }}"
+        ),
+        "{% endif %}",
+        "{% endif %}",
+        "",
+    ]
 
 
 def _model_config_lines(
@@ -1424,10 +1532,12 @@ def _model_config_lines(
     alias: str,
     database: str | None,
     extra_config_lines: list[str] | None = None,
+    schema_is_expression: bool = False,
 ) -> list[str]:
+    schema_config = schema if schema_is_expression else f"'{_physical_name(schema)}'"
     config_lines = [
         f"    materialized='{materialized}',",
-        f"    schema='{_physical_name(schema)}',",
+        f"    schema={schema_config},",
         f"    alias='{_physical_name(alias)}',",
     ]
     if database:
@@ -1452,12 +1562,17 @@ def _write_quarantine_model(spec: dict[str, Any], result: DbtGenerationResult) -
     config_lines = _model_config_lines(
         materialized="incremental",
         database=quarantine.database,
-        schema=quarantine.schema,
+        schema=(
+            _physical_name(quarantine.schema)
+            if _quarantine_has_explicit_schema(spec)
+            else _staging_schema_config_expression(spec)
+        ),
         alias=quarantine.table,
         extra_config_lines=[
             "    incremental_strategy='append',",
             "    on_schema_change='append_new_columns',",
         ],
+        schema_is_expression=not _quarantine_has_explicit_schema(spec),
     )
     sql = "\n".join(
         [
@@ -1504,10 +1619,7 @@ def _generate_schema_name_macro() -> str:
     return "\n".join(
         [
             "{% macro generate_schema_name(custom_schema_name, node) -%}",
-            "    {%- set override_schema = var('target_schema', none) -%}",
-            "    {%- if override_schema is not none -%}",
-            "        {{ override_schema | trim | upper }}",
-            "    {%- elif custom_schema_name is none -%}",
+            "    {%- if custom_schema_name is none -%}",
             "        {{ target.schema | upper }}",
             "    {%- else -%}",
             "        {{ custom_schema_name | trim | upper }}",
@@ -1581,7 +1693,9 @@ def _unit_test_validation_guard_fixture_sql() -> str:
     return "\n".join(
         [
             "select",
-            "    cast(0 as number) as VALIDATION_FAILURE_GUARD",
+            "    cast(0 as number) as VALIDATION_FAILURE_GUARD,",
+            "    cast(0 as number) as VALIDATION_FAILURE_COUNT,",
+            "    cast(null as varchar) as VALIDATION_FAILURE_DETAILS",
         ]
     )
 
@@ -1992,7 +2106,7 @@ def _time_if_missing_expression(expression: str, transform: dict[str, Any], pyth
     if mode == "start_of_day":
         return f"date_trunc('day', {expression})"
     if mode == "end_of_day":
-        return f"dateadd(second, 86399, date_trunc('day', {expression}))"
+        return f"dateadd(nanosecond, -1, dateadd(day, 1, date_trunc('day', {expression})))"
     return expression
 
 
@@ -2072,7 +2186,6 @@ def _failure_details_expression(spec: dict[str, Any]) -> str:
     for field in fields(spec):
         expressions.extend(_field_failure_expressions(field))
         expressions.extend(_field_uniqueness_failure_expressions(field))
-    expressions.extend(_scd2_manual_current_row_failure_expressions(spec))
     if not expressions:
         return "null"
     return f"coalesce({', '.join(expressions)})"
@@ -2186,36 +2299,13 @@ def _field_uniqueness_failure_expressions(field: dict[str, Any]) -> list[str]:
     ]
 
 
-def _scd2_manual_current_row_failure_expressions(spec: dict[str, Any]) -> list[str]:
-    if _change_type(spec) != "scd2_manual":
-        return []
-    is_current_field = _field_by_id(spec, "is_current")
-    is_current_expression = _try_cast_expression(_field_expression(is_current_field), "varchar(1)")
-    partition_expressions = [
-        _try_cast_expression(_field_expression(field), str(field["data_type"]))
-        for field in _scd2_manual_current_row_key_fields(spec)
-    ]
-    if not partition_expressions:
-        return []
-    partition_by = ", ".join(partition_expressions)
-    return [
-        "case "
-        f"when {is_current_expression} = 'Y' "
-        f"and count_if({is_current_expression} = 'Y') over (partition by {partition_by}) > 1 "
-        f"then {_sql_string('scd2_manual has multiple current rows for the same current-row key')} "
-        "end"
-    ]
-
-
-def _scd2_manual_current_row_key_fields(spec: dict[str, Any]) -> list[dict[str, Any]]:
-    return _business_key_fields(spec)
-
-
 def _try_cast_expression(expression: str, data_type: str) -> str:
     return f"try_cast(cast({expression} as varchar) as {data_type})"
 
 
 def _validation_rows_cte(spec: dict[str, Any], *, trailing_comma: bool) -> list[str]:
+    if _change_type(spec) == "scd2_manual":
+        return _scd2_manual_validation_rows_cte(spec, trailing_comma=trailing_comma)
     suffix = "," if trailing_comma else ""
     return [
         "validation_rows as (",
@@ -2225,6 +2315,175 @@ def _validation_rows_cte(spec: dict[str, Any], *, trailing_comma: bool) -> list[
         "    from source_rows",
         f"){suffix}",
     ]
+
+
+def _scd2_manual_validation_rows_cte(spec: dict[str, Any], *, trailing_comma: bool) -> list[str]:
+    suffix = "," if trailing_comma else ""
+    target_relation = _target_relation_config(spec)
+    business_key_columns = _business_key_partition_columns(spec)
+    incremental_key_columns = _scd2_manual_incremental_unique_key_columns(spec)
+    business_key_join = _candidate_join_condition("incoming_manual_rows", "existing_target", business_key_columns)
+    replaced_row_join = _candidate_join_condition("incoming_manual_rows", "existing_manual_rows", incremental_key_columns)
+    invalid_key_join = _candidate_join_condition("incoming_manual_rows", "manual_invalid_candidate_rows", business_key_columns)
+    partition_by = ", ".join(business_key_columns)
+    valid_from_column = _physical_name("valid_from_datetime")
+    valid_to_column = _physical_name("valid_to_datetime")
+    is_current_column = _physical_name("is_current")
+    return [
+        _dbt_relation_lookup(target_relation, "tms_manual_scd2_target_relation", schema_var="target_schema"),
+        "base_validation_rows as (",
+        "    select",
+        "        *,",
+        "        row_number() over (order by " + ", ".join(_source_output_columns(spec)) + ") as TMS_SOURCE_ROW_NUMBER,",
+        f"        {_failure_details_expression(spec)} as TMS_FIELD_FAILURE_DETAILS",
+        "    from source_rows",
+        "),",
+        "source_valid_rows as (",
+        "    select *",
+        "    from base_validation_rows",
+        "    where TMS_FIELD_FAILURE_DETAILS is null",
+        "),",
+        "incoming_manual_rows as (",
+        "    select",
+        ",\n".join(_scd2_manual_incoming_candidate_select_lines(spec)),
+        "    from source_valid_rows",
+        "),",
+        "existing_manual_rows as (",
+        "{% if tms_manual_scd2_target_relation is not none %}",
+        "    select",
+        ",\n".join(_scd2_manual_existing_candidate_select_lines(spec)),
+        "    from {{ tms_manual_scd2_target_relation }} as existing_target",
+        "    where exists (",
+        "        select 1",
+        "        from incoming_manual_rows",
+        f"        where {business_key_join}",
+        "    )",
+        "{% else %}",
+        "    select",
+        ",\n".join(_scd2_manual_empty_candidate_select_lines(spec)),
+        "    where 1 = 0",
+        "{% endif %}",
+        "),",
+        "remaining_existing_manual_rows as (",
+        "    select *",
+        "    from existing_manual_rows",
+        *_scd2_manual_replaced_existing_filter_lines(spec, replaced_row_join),
+        "),",
+        "manual_candidate_rows as (",
+        "    select * from remaining_existing_manual_rows",
+        "    union all",
+        "    select * from incoming_manual_rows",
+        "),",
+        "manual_windowed_candidate_rows as (",
+        "    select",
+        "        *,",
+        f"        count_if({is_current_column} = 'Y') over (partition by {partition_by}) as TMS_CURRENT_ROW_COUNT,",
+        f"        lead({valid_from_column}) over (partition by {partition_by} order by {valid_from_column}) as TMS_NEXT_VALID_FROM_DATETIME",
+        "    from manual_candidate_rows",
+        "),",
+        "manual_invalid_candidate_rows as (",
+        "    select",
+        "        *,",
+        "        coalesce(",
+        (
+            f"            case when TMS_CURRENT_ROW_COUNT > 1 "
+            f"then {_sql_string('scd2_manual has multiple current rows for the same current-row key')} end,"
+        ),
+        (
+            f"            case when {valid_to_column} is not null and {valid_from_column} is not null "
+            f"and {valid_to_column} <= {valid_from_column} "
+            f"then {_sql_string('scd2_manual valid_to_datetime must be after valid_from_datetime')} end,"
+        ),
+        (
+            f"            case when TMS_NEXT_VALID_FROM_DATETIME is not null and {valid_to_column} is not null "
+            f"and TMS_NEXT_VALID_FROM_DATETIME <= {valid_to_column} "
+            f"then {_sql_string('scd2_manual validity windows overlap for the same business key')} end"
+        ),
+        "        ) as TMS_MANUAL_SCD2_FAILURE_DETAILS",
+        "    from manual_windowed_candidate_rows",
+        "    where TMS_CURRENT_ROW_COUNT > 1",
+        f"       or ({valid_to_column} is not null and {valid_from_column} is not null and {valid_to_column} <= {valid_from_column})",
+        f"       or (TMS_NEXT_VALID_FROM_DATETIME is not null and {valid_to_column} is not null and TMS_NEXT_VALID_FROM_DATETIME <= {valid_to_column})",
+        "),",
+        "manual_state_failures as (",
+        "    select",
+        "        incoming_manual_rows.TMS_SOURCE_ROW_NUMBER,",
+        "        max(manual_invalid_candidate_rows.TMS_MANUAL_SCD2_FAILURE_DETAILS) as FAILURE_DETAILS",
+        "    from incoming_manual_rows",
+        "    join manual_invalid_candidate_rows",
+        f"      on {invalid_key_join}",
+        "    group by incoming_manual_rows.TMS_SOURCE_ROW_NUMBER",
+        "),",
+        "validation_rows as (",
+        "    select",
+        "        base_validation_rows.*,",
+        "        coalesce(base_validation_rows.TMS_FIELD_FAILURE_DETAILS, manual_state_failures.FAILURE_DETAILS) as FAILURE_DETAILS",
+        "    from base_validation_rows",
+        "    left join manual_state_failures",
+        "      on manual_state_failures.TMS_SOURCE_ROW_NUMBER = base_validation_rows.TMS_SOURCE_ROW_NUMBER",
+        f"){suffix}",
+    ]
+
+
+def _scd2_manual_replaced_existing_filter_lines(spec: dict[str, Any], replaced_row_join: str) -> list[str]:
+    if not _scd2_manual_uses_business_key_upsert(spec):
+        return []
+    return [
+        "    where not exists (",
+        "        select 1",
+        "        from incoming_manual_rows",
+        f"        where {replaced_row_join}",
+        "    )",
+    ]
+
+
+def _scd2_manual_incoming_candidate_select_lines(spec: dict[str, Any]) -> list[str]:
+    lines = [
+        "        TMS_SOURCE_ROW_NUMBER",
+        "        'Y' as TMS_IS_INCOMING_ROW",
+    ]
+    for field in fields(spec):
+        lines.append(
+            f"        cast({_field_expression(field)} as {field['data_type']}) as {_quote_identifier(field['id'])}"
+        )
+    lines.extend(f"        {line.strip()}" for line in _business_key_select_lines(spec))
+    return lines
+
+
+def _scd2_manual_existing_candidate_select_lines(spec: dict[str, Any]) -> list[str]:
+    lines = [
+        "        cast(null as number) as TMS_SOURCE_ROW_NUMBER",
+        "        'N' as TMS_IS_INCOMING_ROW",
+    ]
+    for field in fields(spec):
+        column = _quote_identifier(field["id"])
+        lines.append(f"        existing_target.{column} as {column}")
+    if _business_key_enabled(spec):
+        business_key_column = _business_key_column(spec)
+        lines.append(f"        existing_target.{business_key_column} as {business_key_column}")
+    return lines
+
+
+def _scd2_manual_empty_candidate_select_lines(spec: dict[str, Any]) -> list[str]:
+    lines = [
+        "        cast(null as number) as TMS_SOURCE_ROW_NUMBER",
+        "        cast(null as varchar(1)) as TMS_IS_INCOMING_ROW",
+    ]
+    for field in fields(spec):
+        lines.append(f"        cast(null as {field['data_type']}) as {_quote_identifier(field['id'])}")
+    if _business_key_enabled(spec):
+        lines.append(f"        cast(null as {BUSINESS_KEY_DATA_TYPE}) as {_business_key_column(spec)}")
+    return lines
+
+
+def _candidate_join_condition(left_alias: str, right_alias: str, columns: list[str]) -> str:
+    if not columns:
+        return "1 = 1"
+    return " and ".join(
+        f"(({left_alias}.{column} = {right_alias}.{column}) or "
+        f"({left_alias}.{column} is null and {right_alias}.{column} is null))"
+        for column in columns
+    )
 
 
 def _valid_rows_cte() -> list[str]:
@@ -2319,9 +2578,12 @@ def _valid_from_datetime_expression(spec: dict[str, Any]) -> str:
 
 
 def _valid_to_datetime_expression(spec: dict[str, Any]) -> str:
+    # Validity windows are inclusive, so an auto-SCD2 row ends one timestamp tick
+    # before the next version starts.
     return (
         "coalesce("
-        f"lead(VALID_FROM_DATETIME) over ({_scd2_window_clause(spec, 'VALID_FROM_DATETIME')})"
+        "dateadd(nanosecond, -1, "
+        f"lead(VALID_FROM_DATETIME) over ({_scd2_window_clause(spec, 'VALID_FROM_DATETIME')}))"
         ", "
         f"cast({_sql_string(SCD2_END_OF_TIME)} as timestamp_tz)"
         ")"
@@ -2537,14 +2799,18 @@ def _seed_project_config(spec: dict[str, Any]) -> dict[str, Any] | None:
     if not isinstance(source, dict) or source.get("format") != "csv" or csv_load_method(source) != "dbt_seed":
         return None
 
-    target = spec["target"]
     seed = source.get("seed", {})
     if not isinstance(seed, dict):
         seed = {}
     seed_name = _csv_seed_name(spec)
+    seed_schema = seed.get("schema")
     config: dict[str, Any] = {
         "+quote_columns": False,
-        "+schema": _physical_name(seed.get("schema", target["schema"])),
+        "+schema": (
+            _physical_name(seed_schema)
+            if seed_schema
+            else "{{ var('tms_staging_schema', '" + _staging_schema(spec) + "') | upper }}"
+        ),
         "+alias": _physical_name(seed_name),
         "+column_types": {
             _physical_name(column): "varchar"
@@ -2756,6 +3022,22 @@ def _failure_mode(spec: dict[str, Any]) -> str:
     return str(control_data.get("failure_mode", "fail_load"))
 
 
+def _staging_schema(spec: dict[str, Any]) -> str:
+    control_data = spec.get("control_data", {})
+    if isinstance(control_data, dict) and control_data.get("staging_schema"):
+        return _physical_name(control_data["staging_schema"])
+    return STAGING_SCHEMA_DEFAULT
+
+
+def _staging_schema_config_expression(spec: dict[str, Any]) -> str:
+    return "var('tms_staging_schema', '" + _staging_schema(spec) + "') | upper"
+
+
+def _target_schema_config_expression(spec: dict[str, Any]) -> str:
+    target = spec["target"]
+    return "var('target_schema', '" + _physical_name(target["schema"]) + "') | upper"
+
+
 def _target_relation_config(spec: dict[str, Any]) -> RelationConfig:
     target = spec["target"]
     return RelationConfig(
@@ -2772,9 +3054,14 @@ def _quarantine_relation_config(spec: dict[str, Any]) -> RelationConfig:
         quarantine = {}
     return RelationConfig(
         database=_physical_name(quarantine["database"]) if quarantine.get("database") else target.database,
-        schema=_physical_name(quarantine["schema"]) if quarantine.get("schema") else target.schema,
+        schema=_physical_name(quarantine["schema"]) if quarantine.get("schema") else _staging_schema(spec),
         table=_physical_name(quarantine.get("table", f"{target.table}__QUARANTINE")),
     )
+
+
+def _quarantine_has_explicit_schema(spec: dict[str, Any]) -> bool:
+    quarantine = spec.get("control_data", {}).get("quarantine", {})
+    return isinstance(quarantine, dict) and bool(quarantine.get("schema"))
 
 
 def _job_relation_config(spec: dict[str, Any]) -> RelationConfig:
@@ -2896,9 +3183,11 @@ def _job_hooks(spec: dict[str, Any], spec_file_name: str) -> tuple[list[str], li
     relation = _relation_name(_job_relation_config(spec))
     target_relation = _target_relation_config(spec)
     generated_table = _runtime_relation_label(target_relation, schema_var="target_schema")
+    quarantine_relation = _quarantine_relation_config(spec) if _quarantine_enabled(spec) else None
+    quarantine_schema_var = None if _quarantine_has_explicit_schema(spec) else "tms_staging_schema"
     quarantine_table = (
-        _runtime_relation_label(_quarantine_relation_config(spec), schema_var="target_schema")
-        if _quarantine_enabled(spec)
+        _runtime_relation_label(quarantine_relation, schema_var=quarantine_schema_var)
+        if quarantine_relation is not None
         else None
     )
     generated_relation_lookup = _dbt_relation_lookup(
@@ -2908,11 +3197,11 @@ def _job_hooks(spec: dict[str, Any], spec_file_name: str) -> tuple[list[str], li
     )
     quarantine_relation_lookup = (
         _dbt_relation_lookup(
-            _quarantine_relation_config(spec),
+            quarantine_relation,
             "tms_quarantine_relation",
-            schema_var="target_schema",
+            schema_var=quarantine_schema_var,
         )
-        if _quarantine_enabled(spec)
+        if quarantine_relation is not None
         else "{% set tms_quarantine_relation = none %}"
     )
     result_expression = (

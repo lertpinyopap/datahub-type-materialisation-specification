@@ -98,8 +98,11 @@ def test_integration_scenarios_are_discoverable_and_self_contained() -> None:
         "scd2_continuous_field_validity",
         "scd2_hash_skip_current_duplicate",
         "scd2_hash_update_historical_boundary",
+        "scd2_manual_multiple_current_failure_rollback",
+        "scd2_manual_overlap_failure_rollback",
         "scd2_missing_from_source_delete",
         "scd2_validation_continuous_failure_rollback",
+        "scd2_validation_continuous_gap_failure_rollback",
         "scd2_validation_sparse_failure_rollback",
     ]
     for scenario_root in scenario_roots:
@@ -436,6 +439,7 @@ def test_integration_dbt_runner_uses_tms_dbt_build(monkeypatch, tmp_path: Path) 
                 {
                     "target_schema": "TMP",
                     "tms_job_schema": "TMP",
+                    "tms_staging_schema": "TMP",
                     "insert_time": "2026-09-02T00:00:00Z",
                 }
             ),
@@ -831,7 +835,10 @@ def test_job_failure_scenario_generates_fail_load_validation_guard(tmp_path: Pat
         output_dir / "models" / "generated" / "tms_int__account__validation_guard.sql"
     ).read_text(encoding="utf-8")
     assert "ref('tms_int__account__validation_guard')" in model_sql
-    assert "cast('TYPE_MATERIALISATION_VALIDATION_FAILED' as number)" in guard_sql
+    assert "TYPE_MATERIALISATION_VALIDATION_FAILED:" in model_sql
+    assert "pre_hook='drop table if exists {{ this }}'" in guard_sql
+    assert "VALIDATION_FAILURE_COUNT" in guard_sql
+    assert "VALIDATION_FAILURE_DETAILS" in guard_sql
     assert "field `account_id` does not match regex" in guard_sql
 
 
@@ -896,6 +903,7 @@ def test_continuous_scd2_scenario_dbt_unit_test_uses_start_and_end_of_time(tmp_p
 def test_scd2_validation_failure_rollback_scenarios_generate_guards(tmp_path: Path) -> None:
     scenarios = {
         "scd2_validation_continuous_failure_rollback": True,
+        "scd2_validation_continuous_gap_failure_rollback": True,
         "scd2_validation_sparse_failure_rollback": False,
     }
     for scenario_name, expects_continuity_check in scenarios.items():
@@ -911,8 +919,39 @@ def test_scd2_validation_failure_rollback_scenarios_generate_guards(tmp_path: Pa
         assert "unique_key=['ACCOUNT_BUSINESS_KEY']" in model_sql
         assert "VALID_TO_DATETIME <= VALID_FROM_DATETIME" in model_sql
         assert "TYPE_MATERIALISATION_SCD2_VALIDATION_FAILED" in model_sql
-        assert ("VALID_TO_DATETIME <> TMS_NEXT_VALID_FROM_DATETIME" in model_sql) is expects_continuity_check
+        assert "post_load_validation_rows as (" in model_sql
+        assert ("dateadd(nanosecond, 1, VALID_TO_DATETIME)" in model_sql) is expects_continuity_check
         assert "ACCOUNT_BUSINESS_KEY" in model_sql
+
+
+def test_scd2_manual_failure_rollback_scenarios_generate_live_target_guards(tmp_path: Path) -> None:
+    scenarios = [
+        "scd2_manual_multiple_current_failure_rollback",
+        "scd2_manual_overlap_failure_rollback",
+    ]
+    for scenario_name in scenarios:
+        scenario = load_scenario(INTEGRATION_ROOT / scenario_name)
+        output_dir = tmp_path / scenario.name
+
+        generate_project_for_scenario(scenario, output_dir)
+
+        guard_sql = (
+            output_dir / "models" / "generated" / "tms_int__account__validation_guard.sql"
+        ).read_text(encoding="utf-8")
+        assert scenario.loads[0].expect_dbt_success is False
+        assert scenario.loads[0].expected_target_csv is not None
+        assert "AUDIT_LAST_CHANGED_DATETIME" in scenario.expected_columns
+        assert (
+            "adapter.get_relation(database=(target.database | upper), "
+            "schema=(var(\"target_schema\", \"BUSINESS\") | upper), identifier='TMS_INT__ACCOUNT')"
+            in guard_sql
+        )
+        assert "existing_manual_rows as (" in guard_sql
+        assert "remaining_existing_manual_rows as (" in guard_sql
+        assert "manual_candidate_rows as (" in guard_sql
+        assert "manual_state_failures as (" in guard_sql
+        assert "count_if(IS_CURRENT = 'Y') over (partition by ACCOUNT_BUSINESS_KEY)" in guard_sql
+        assert "TMS_NEXT_VALID_FROM_DATETIME <= VALID_TO_DATETIME" in guard_sql
 
 
 def test_integration_row_comparison_normalises_case_order_and_whitespace(tmp_path: Path) -> None:

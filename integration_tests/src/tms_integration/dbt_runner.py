@@ -32,7 +32,11 @@ def run_tms_dbt_project(
 ) -> TmsResult:
     validate_dbt_build_environment()
     executable = _tms_executable()
-    merged_vars = {"target_schema": target_schema, "tms_job_schema": target_schema}
+    merged_vars = {
+        "target_schema": target_schema,
+        "tms_job_schema": target_schema,
+        "tms_staging_schema": target_schema,
+    }
     if dbt_vars:
         merged_vars.update(dbt_vars)
     command = [

@@ -1,0 +1,2 @@
+account_id,account_value,is_current,is_deleted,valid_from_datetime,valid_to_datetime
+A1,2,Y,N,1/01/2026,31/12/9999

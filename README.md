@@ -189,9 +189,13 @@ generated dbt project's `seeds/` directory and generates a source model that
 reads from the seed relation. When `source.seed.file` contains `tms_var`
 expressions, `tms validate` and `tms generate-dbt` resolve them from `--vars`
 before validating or copying the seed file. Relative `source.seed.file` paths
-are resolved from the directory where the `tms` command is run. The generated project
-currently covers CSV-stage, CSV-seed, and table-source materialisation slices,
-including generated job run hooks and append-only quarantine models; see
+are resolved from the directory where the `tms` command is run. Generated
+source-record views, intermediate guard models, default seed relations, and
+default quarantine tables use `control_data.staging_schema`, defaulting to
+`INTERMEDIATE`, and can be redirected at runtime with the `tms_staging_schema`
+dbt variable. The generated project currently covers CSV-stage, CSV-seed, and
+table-source materialisation slices, including generated job run hooks and
+append-only quarantine models; see
 [IMPLEMENTATION_STATUS.md](./IMPLEMENTATION_STATUS.md) for unsupported features.
 
 Generated dbt projects refer to a local user-managed dbt profile named

@@ -186,6 +186,7 @@ control_data ::=
   skip_surrogate_key?
   materialisation_type?
   failure_mode?
+  staging_schema?
   scd?
   quarantine?
   job?
@@ -196,6 +197,7 @@ change_type ::= scd1 | scd2_manual | scd2_auto
 business_key ::= business_key_config
 skip_business_key ::= true | false
 skip_surrogate_key ::= true | false
+staging_schema ::= string
 scd ::= scd_config
 quarantine ::= quarantine_table
 job ::= job_table
@@ -226,6 +228,13 @@ omitted from the target output. If omitted, implementations should default to
 `skip_surrogate_key` controls whether the generated surrogate-key column is
 omitted from the target output. If omitted, implementations should default to
 `false`.
+
+`staging_schema` declares the default schema for generated source-record,
+staging, intermediate, validation guard, seed, and quarantine relations that are
+not the core target output and are not job control tables. If omitted,
+implementations should default to `INTERMEDIATE`. dbt implementations should
+allow this default to be overridden at runtime with the `tms_staging_schema`
+variable.
 
 `scd` configures delete handling for SCD1, update behavior for `scd2_manual`,
 and generated validity-window behavior and protected full-history rebuilds for
@@ -261,6 +270,7 @@ control_data:
   materialisation_type: table
   failure_mode: quarantine_row
   change_type: scd2_auto
+  staging_schema: INTERMEDIATE
   business_key:
     fields:
       - account_id
@@ -389,7 +399,7 @@ If `quarantine.database` is omitted, implementations should use
 session context.
 
 If `quarantine.schema` is omitted, implementations should default it to the
-resolved target schema.
+resolved staging schema.
 
 If `quarantine.table` is omitted, implementations should default it to the
 resolved target table name with `__QUARANTINE` appended.
@@ -601,8 +611,16 @@ These fields are typed, transformed, validated, and copied like any other target
 field. Implementations must not derive SCD2 validity windows or state flags for
 `scd2_manual`.
 
-Implementations must reject a manual SCD2 load when more than one incoming row
-for the same configured `business_key` has `is_current = 'Y'`.
+Implementations must reject a manual SCD2 load when the post-load candidate
+state for any affected configured `business_key` would contain more than one row
+with `is_current = 'Y'`, a validity window where `valid_to_datetime` is not
+after `valid_from_datetime`, or overlapping validity windows. For dbt
+implementations, this validation must run against the live target relation plus
+the incoming rows after applying the configured manual SCD2 append or upsert
+semantics. Under `failure_mode: fail_load`, invalid candidate state must fail
+the dbt build before the target table is changed. Under
+`failure_mode: quarantine_row`, incoming rows for invalid candidate keys must be
+written to quarantine rather than materialised.
 
 For incremental dbt loads, `scd2_manual` uses `scd.update_mode` to control
 whether incoming rows may replace existing target rows:
@@ -688,21 +706,23 @@ For `scd2_auto`, incoming changed rows use `insert_time` as their proposed
 `valid_from_datetime`. When a generated row is the earliest known version for a
 business key, `scd2_auto_from_sot` controls whether that row starts at the
 platform start-of-time timestamp or at `insert_time`. Later versions start at
-their own `insert_time`. Generated `valid_to_datetime` values are derived from
-the next later version for the same generated business key; the latest version
-ends at the platform end-of-time timestamp.
+their own `insert_time`. SCD2 validity windows are inclusive: a row is valid
+through `valid_to_datetime`. Generated `valid_to_datetime` values are therefore
+derived as the timestamp tick immediately before the next later version starts
+for the same generated business key; the latest version ends at the platform
+end-of-time timestamp.
 
 dbt implementations must validate generated `scd2_auto` windows before loading
 them into the target. Under `sparse` validation, rows are invalid when
 `valid_to_datetime` is not greater than `valid_from_datetime`, or when the next
-row for the same generated business key starts before the current row's
+row for the same generated business key starts at or before the current row's
 `valid_to_datetime`. Under `continuous` validation, rows are also invalid when
-the current row's `valid_to_datetime` is not equal to the next row's
-`valid_from_datetime`, or when the latest row for the generated business key
-does not end at or after `9999-12-30 00:00:00`. This near-end-of-time threshold
-allows timezone-normalised end-of-time timestamps to validate reliably. Invalid
-rows must fail the dbt load rather than being materialised, leaving the existing
-target state unchanged.
+the next row's `valid_from_datetime` is not the timestamp tick immediately after
+the current row's `valid_to_datetime`, or when the latest row for the generated
+business key does not end at or after `9999-12-30 00:00:00`. This
+near-end-of-time threshold allows timezone-normalised end-of-time timestamps to
+validate reliably. Invalid rows must fail the dbt load rather than being
+materialised, leaving the existing target state unchanged.
 
 SCD2 change detection compares the incoming `business_data_hash` with the
 current target row for the same generated business key where
@@ -863,7 +883,8 @@ second `@`.
 - `name`: dbt seed resource name. Defaults to `<target.id>__seed`.
 - `database`: database for the seed relation. If omitted, the active dbt
   adapter and database session context resolves it.
-- `schema`: schema for the seed relation. Defaults to `target.schema`.
+- `schema`: schema for the seed relation. Defaults to the resolved staging
+  schema.
 
 For `load_method: dbt_seed`, `seed.file` is required. When `header` is `true`,
 each non-fixed target field must specify `field.source.column`. When `header` is
@@ -1358,7 +1379,7 @@ If `mode` is omitted, implementations should default to `half_up`.
 - `start_of_day`: when the timestamp format has no time component, set the
   parsed time to `00:00:00`.
 - `end_of_day`: when the timestamp format has no time component, set the parsed
-  time to `23:59:59`.
+  time to the last representable instant of that day.
 
 Date and timestamp `format` values use Python `datetime` `strptime` /
 `strftime`-style format codes. Timestamp formats must include a timezone offset

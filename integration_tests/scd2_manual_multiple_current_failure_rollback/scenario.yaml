@@ -1,0 +1,29 @@
+name: scd2_manual_multiple_current_failure_rollback
+description: Manual SCD2 multiple-current validation failure leaves the target unchanged.
+spec: spec/account.yaml
+initial_target: data/initial_target.csv
+target:
+  expected_columns:
+    - ACCOUNT_ID
+    - ACCOUNT_VALUE
+    - IS_CURRENT
+    - IS_DELETED
+    - VALID_FROM_DATETIME
+    - VALID_TO_DATETIME
+    - ACCOUNT_BUSINESS_KEY
+    - AUDIT_DATA_PROCESS_KEY
+    - AUDIT_CREATED_DATETIME
+    - AUDIT_LAST_CHANGED_DATETIME
+  order_by:
+    - ACCOUNT_ID
+    - VALID_FROM_DATETIME
+checks:
+  - A1 starts with one open current manual SCD2 row.
+  - Load 001 inserts another current row for the same business key.
+  - Manual SCD2 target-state validation fails the dbt model.
+  - The target row and audit metadata remain unchanged after the failed load.
+loads:
+  - name: load_001
+    source_csv: data/load_001_source.csv
+    expect_dbt_success: false
+    expected_target: data/expected_after_load_001.csv

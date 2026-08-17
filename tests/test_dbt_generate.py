@@ -134,6 +134,29 @@ def test_csv_stage_location_omits_database_when_not_supplied(tmp_path: Path) -> 
     assert result.errors == []
     source_sql = (output_dir / "models" / "generated" / "account__source.sql").read_text(encoding="utf-8")
     assert "from @AD_HOC.CSV_STAGE/account.csv" in source_sql
+    assert "schema=var('tms_staging_schema', 'INTERMEDIATE') | upper" in source_sql
+
+
+def test_control_data_staging_schema_overrides_generated_staging_defaults(tmp_path: Path) -> None:
+    result, output_dir = generate(
+        tmp_path,
+        csv_generation_spec(
+            extra_control="""
+            control_data:
+              change_type: scd1
+              staging_schema: scratch
+              failure_mode: quarantine_row
+            """
+        ),
+    )
+
+    assert result.errors == []
+    project = load_yaml(output_dir / "dbt_project.yml")
+    source_sql = (output_dir / "models" / "generated" / "account__source.sql").read_text(encoding="utf-8")
+    quarantine_sql = (output_dir / "models" / "generated" / "account__quarantine.sql").read_text(encoding="utf-8")
+    assert "schema=var('tms_staging_schema', 'SCRATCH') | upper" in source_sql
+    assert "schema=var('tms_staging_schema', 'SCRATCH') | upper" in quarantine_sql
+    assert "{{ var(\"tms_staging_schema\", \"SCRATCH\") | upper }}.ACCOUNT__QUARANTINE" in project["on-run-start"][1]
 
 
 def test_csv_stage_location_includes_database_when_supplied(tmp_path: Path) -> None:
@@ -235,6 +258,9 @@ def test_csv_dbt_seed_file_can_use_generation_var(monkeypatch, tmp_path: Path) -
 
     assert result.errors == []
     assert (output_dir / "seeds" / "account_seed.csv").read_text(encoding="utf-8") == seed_file.read_text(encoding="utf-8")
+    project = load_yaml(output_dir / "dbt_project.yml")
+    seed_config = project["seeds"]["type_materialisation_generated"]["account_seed"]
+    assert seed_config["+schema"] == "{{ var('tms_staging_schema', 'INTERMEDIATE') | upper }}"
 
 
 def test_csv_dbt_seed_file_can_use_generation_var_default(monkeypatch, tmp_path: Path) -> None:
@@ -619,9 +645,14 @@ def test_fail_load_generates_validation_guard_model(tmp_path: Path) -> None:
     guard_sql = (output_dir / "models" / "generated" / "account__validation_guard.sql").read_text(encoding="utf-8")
     not_implemented = (output_dir / "NOT_IMPLEMENTED.md").read_text(encoding="utf-8")
     assert "ref('account__validation_guard')" in model_sql
+    assert "TYPE_MATERIALISATION_VALIDATION_FAILED:" in model_sql
+    assert "First failure:" in model_sql
+    assert "schema=var('tms_staging_schema', 'INTERMEDIATE') | upper" in guard_sql
+    assert "pre_hook='drop table if exists {{ this }}'" in guard_sql
     assert "validation_rows as (" in guard_sql
     assert "field `account_id` is null but not nullable" in guard_sql
-    assert "cast('TYPE_MATERIALISATION_VALIDATION_FAILED' as number)" in guard_sql
+    assert "VALIDATION_FAILURE_COUNT" in guard_sql
+    assert "VALIDATION_FAILURE_DETAILS" in guard_sql
     assert "where FAILURE_DETAILS is not null" in guard_sql
     assert "fail_load validation failure enforcement" not in not_implemented
 
@@ -726,7 +757,11 @@ def test_parse_date_and_timestamp_transforms_generate_snowflake_sql(tmp_path: Pa
     assert "try_to_date(cast(OPENED_ON as varchar), 'DD/MM/YYYY')" in model_sql
     assert "try_to_timestamp_tz(cast(OPENED_AT as varchar), 'YYYY-MM-DD\"T\"HH24:MI:SSTZHTZM')" in model_sql
     assert "try_to_timestamp_tz(concat(cast(REVIEWED_AT as varchar), ' +0000'), 'YYYY-MM-DD HH24:MI:SS TZHTZM')" in model_sql
-    assert "dateadd(second, 86399, date_trunc('day', try_to_timestamp_tz(concat(cast(VALID_TO_DATETIME as varchar), ' +0000'), 'DD/MM/YYYY TZHTZM')))" in model_sql
+    assert (
+        "dateadd(nanosecond, -1, dateadd(day, 1, date_trunc('day', "
+        "try_to_timestamp_tz(concat(cast(VALID_TO_DATETIME as varchar), ' +0000'), 'DD/MM/YYYY TZHTZM'))))"
+        in model_sql
+    )
     assert "field `opened_on` does not match parse_date format `%d/%m/%Y`" in guard_sql
     assert "field `opened_at` does not match parse_timestamp format `%Y-%m-%dT%H:%M:%S%z`" in guard_sql
 
@@ -995,8 +1030,9 @@ def test_generated_schema_name_macro_supports_runtime_schema_override(tmp_path: 
 
     assert result.errors == []
     macro_sql = (output_dir / "macros" / "generated" / "generate_schema_name.sql").read_text(encoding="utf-8")
-    assert "var('target_schema', none)" in macro_sql
-    assert "{{ override_schema | trim | upper }}" in macro_sql
+    model_sql = (output_dir / "models" / "generated" / "account.sql").read_text(encoding="utf-8")
+    assert "schema=var('target_schema', 'BUSINESS') | upper" in model_sql
+    assert "{{ custom_schema_name | trim | upper }}" in macro_sql
 
 
 def test_generated_project_never_creates_schemas(tmp_path: Path) -> None:
@@ -1022,10 +1058,10 @@ def test_job_event_hooks_include_quarantine_relation_when_enabled(tmp_path: Path
 
     assert result.errors == []
     project = load_yaml(output_dir / "dbt_project.yml")
-    expected_quarantine = "cast('{{ target.database | upper }}.{{ var(\"target_schema\", \"BUSINESS\") | upper }}.ACCOUNT__QUARANTINE' as varchar(1024))"
+    expected_quarantine = "cast('{{ target.database | upper }}.{{ var(\"tms_staging_schema\", \"INTERMEDIATE\") | upper }}.ACCOUNT__QUARANTINE' as varchar(1024))"
     assert expected_quarantine in project["on-run-start"][1]
     assert expected_quarantine in project["on-run-end"][1]
-    assert 'adapter.get_relation(database=(target.database | upper), schema=(var("target_schema", "BUSINESS") | upper), identifier=\'ACCOUNT__QUARANTINE\')' in project["on-run-end"][1]
+    assert 'adapter.get_relation(database=(target.database | upper), schema=(var("tms_staging_schema", "INTERMEDIATE") | upper), identifier=\'ACCOUNT__QUARANTINE\')' in project["on-run-end"][1]
 
 
 def test_quarantine_model_is_incremental_and_append_only(tmp_path: Path) -> None:
@@ -1044,6 +1080,7 @@ def test_quarantine_model_is_incremental_and_append_only(tmp_path: Path) -> None
     assert result.errors == []
     quarantine_sql = (output_dir / "models" / "generated" / "account__quarantine.sql").read_text(encoding="utf-8")
     assert "materialized='incremental'" in quarantine_sql
+    assert "schema=var('tms_staging_schema', 'INTERMEDIATE') | upper" in quarantine_sql
     assert "incremental_strategy='append'" in quarantine_sql
     assert "on_schema_change='append_new_columns'" in quarantine_sql
     assert "alias='ACCOUNT__QUARANTINE'" in quarantine_sql
@@ -1308,15 +1345,25 @@ def test_scd2_auto_generation_adds_continuous_validity_windows(tmp_path: Path) -
     assert "row_number() over (partition by ACCOUNT_BUSINESS_KEY order by TMS_VALID_FROM_DATETIME_CANDIDATE) = 1" in model_sql
     assert "cast('0001-01-01T00:00:00Z' as timestamp_tz)" in model_sql
     assert "lead(VALID_FROM_DATETIME) over (partition by ACCOUNT_BUSINESS_KEY order by VALID_FROM_DATETIME)" in model_sql
-    assert "dateadd(second, -1" not in model_sql
+    assert (
+        "dateadd(nanosecond, -1, lead(VALID_FROM_DATETIME) over "
+        "(partition by ACCOUNT_BUSINESS_KEY order by VALID_FROM_DATETIME))"
+        in model_sql
+    )
     assert "cast('9999-12-31T23:59:59Z' as timestamp_tz)" in model_sql
     assert "end as IS_CURRENT_FLAG" in model_sql
     assert "'N' as TMS_IS_DELETED_FLAG_CANDIDATE" in model_sql
     assert "BUSINESS_DATA_HASH" in model_sql
+    assert "post_load_validation_rows as (" in model_sql
+    assert "from post_load_validation_rows" in model_sql
     assert "scd2_invalid_validity_rows as (" in model_sql
     assert "(VALID_TO_DATETIME <= VALID_FROM_DATETIME)" in model_sql
-    assert "(TMS_NEXT_VALID_FROM_DATETIME < VALID_TO_DATETIME)" in model_sql
-    assert "(TMS_NEXT_VALID_FROM_DATETIME is not null and VALID_TO_DATETIME <> TMS_NEXT_VALID_FROM_DATETIME)" in model_sql
+    assert "(TMS_NEXT_VALID_FROM_DATETIME <= VALID_TO_DATETIME)" in model_sql
+    assert (
+        "(TMS_NEXT_VALID_FROM_DATETIME is not null "
+        "and TMS_NEXT_VALID_FROM_DATETIME <> dateadd(nanosecond, 1, VALID_TO_DATETIME))"
+        in model_sql
+    )
     assert (
         "-- Accept near-end-of-time values so timezone normalisation of "
         "9999-12-31 timestamps does not falsely reject open-ended rows."
@@ -1365,8 +1412,8 @@ def test_scd2_auto_sparse_validation_allows_gaps(tmp_path: Path) -> None:
     model_sql = (output_dir / "models" / "generated" / "account.sql").read_text(encoding="utf-8")
     assert "scd2_invalid_validity_rows as (" in model_sql
     assert "(VALID_TO_DATETIME <= VALID_FROM_DATETIME)" in model_sql
-    assert "(TMS_NEXT_VALID_FROM_DATETIME < VALID_TO_DATETIME)" in model_sql
-    assert "VALID_TO_DATETIME <> TMS_NEXT_VALID_FROM_DATETIME" not in model_sql
+    assert "(TMS_NEXT_VALID_FROM_DATETIME <= VALID_TO_DATETIME)" in model_sql
+    assert "dateadd(nanosecond, 1, VALID_TO_DATETIME)" not in model_sql
     assert "TMS_NEXT_VALID_FROM_DATETIME is null and VALID_TO_DATETIME <> cast" not in model_sql
 
 
@@ -1516,9 +1563,118 @@ def test_scd2_manual_generation_rejects_multiple_current_rows_for_entity_key(tmp
     assert result.errors == []
     guard_sql = (output_dir / "models" / "generated" / "account__validation_guard.sql").read_text(encoding="utf-8")
     assert "scd2_manual has multiple current rows for the same current-row key" in guard_sql
-    assert "count_if(try_cast(cast(IS_CURRENT as varchar) as varchar(1)) = 'Y') over" in guard_sql
-    assert "partition by try_cast(cast(ACCOUNT_ID as varchar) as varchar(20))" in guard_sql
-    assert "VALID_FROM_DATETIME" not in guard_sql.split("partition by", 1)[1].split("then", 1)[0]
+    assert "adapter.get_relation(database=(target.database | upper), schema=(var(\"target_schema\", \"BUSINESS\") | upper), identifier='ACCOUNT')" in guard_sql
+    assert "existing_manual_rows as (" in guard_sql
+    assert "remaining_existing_manual_rows as (" in guard_sql
+    assert "manual_candidate_rows as (" in guard_sql
+    assert "count_if(IS_CURRENT = 'Y') over (partition by ACCOUNT_BUSINESS_KEY)" in guard_sql
+    assert "where ((incoming_manual_rows.ACCOUNT_BUSINESS_KEY = existing_target.ACCOUNT_BUSINESS_KEY)" in guard_sql
+    assert "incoming_manual_rows.VALID_FROM_DATETIME = existing_manual_rows.VALID_FROM_DATETIME" in guard_sql
+
+
+def test_scd2_manual_generation_rejects_live_target_validity_window_overlap(tmp_path: Path) -> None:
+    result, output_dir = generate(
+        tmp_path,
+        csv_generation_spec(
+            extra_control="""
+            control_data:
+              change_type: scd2_manual
+              business_key:
+                fields:
+                  - account_id
+              scd:
+                update_mode: upsert
+            """,
+            fields="""
+        - id: account_id
+          source:
+            pos: 0
+            column: account_id
+          data_type: varchar(20)
+        - id: valid_from_datetime
+          source:
+            pos: 1
+            column: valid_from_datetime
+          data_type: timestamp_tz
+        - id: valid_to_datetime
+          source:
+            pos: 2
+            column: valid_to_datetime
+          data_type: timestamp_tz
+        - id: is_current
+          source:
+            pos: 3
+            column: is_current
+          data_type: varchar(1)
+        - id: is_deleted
+          source:
+            pos: 4
+            column: is_deleted
+          data_type: varchar(1)
+            """,
+        ),
+    )
+
+    assert result.errors == []
+    guard_sql = (output_dir / "models" / "generated" / "account__validation_guard.sql").read_text(encoding="utf-8")
+    assert "lead(VALID_FROM_DATETIME) over (partition by ACCOUNT_BUSINESS_KEY order by VALID_FROM_DATETIME)" in guard_sql
+    assert "TMS_NEXT_VALID_FROM_DATETIME <= VALID_TO_DATETIME" in guard_sql
+    assert "scd2_manual validity windows overlap for the same business key" in guard_sql
+    assert "manual_state_failures as (" in guard_sql
+
+
+def test_scd2_manual_quarantine_uses_live_target_validity_window_validation(tmp_path: Path) -> None:
+    result, output_dir = generate(
+        tmp_path,
+        csv_generation_spec(
+            extra_control="""
+            control_data:
+              change_type: scd2_manual
+              failure_mode: quarantine_row
+              business_key:
+                fields:
+                  - account_id
+              scd:
+                update_mode: upsert
+            """,
+            fields="""
+        - id: account_id
+          source:
+            pos: 0
+            column: account_id
+          data_type: varchar(20)
+        - id: valid_from_datetime
+          source:
+            pos: 1
+            column: valid_from_datetime
+          data_type: timestamp_tz
+        - id: valid_to_datetime
+          source:
+            pos: 2
+            column: valid_to_datetime
+          data_type: timestamp_tz
+        - id: is_current
+          source:
+            pos: 3
+            column: is_current
+          data_type: varchar(1)
+        - id: is_deleted
+          source:
+            pos: 4
+            column: is_deleted
+          data_type: varchar(1)
+            """,
+        ),
+    )
+
+    assert result.errors == []
+    model_sql = (output_dir / "models" / "generated" / "account.sql").read_text(encoding="utf-8")
+    quarantine_sql = (output_dir / "models" / "generated" / "account__quarantine.sql").read_text(encoding="utf-8")
+    assert "from valid_rows" in model_sql
+    assert "where FAILURE_DETAILS is null" in model_sql
+    assert "existing_manual_rows as (" in quarantine_sql
+    assert "manual_candidate_rows as (" in quarantine_sql
+    assert "scd2_manual validity windows overlap for the same business key" in quarantine_sql
 
 
 def test_scd2_manual_upsert_defaults_update_key_to_valid_from_datetime(tmp_path: Path) -> None:

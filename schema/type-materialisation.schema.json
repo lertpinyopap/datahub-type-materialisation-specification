@@ -225,6 +225,9 @@
           "type": "boolean",
           "default": false
         },
+        "staging_schema": {
+          "$ref": "#/$defs/templatedString"
+        },
         "scd": {
           "$ref": "#/$defs/scdConfig"
         },

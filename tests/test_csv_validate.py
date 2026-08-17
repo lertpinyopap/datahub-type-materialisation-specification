@@ -204,7 +204,7 @@ def test_parse_timestamp_can_apply_configured_timezone_when_missing(
     ("time_if_missing", "expected"),
     [
         ("start_of_day", datetime(2026, 8, 13, 0, 0, 0, tzinfo=timezone.utc)),
-        ("end_of_day", datetime(2026, 8, 13, 23, 59, 59, tzinfo=timezone.utc)),
+        ("end_of_day", datetime(2026, 8, 13, 23, 59, 59, 999999, tzinfo=timezone.utc)),
     ],
 )
 def test_parse_timestamp_can_apply_configured_time_when_missing(
@@ -230,39 +230,6 @@ def test_parse_timestamp_can_apply_configured_time_when_missing(
     )
 
     assert transformed == expected
-
-
-def test_scd2_manual_rejects_multiple_current_rows_for_business_key(tmp_path: Path) -> None:
-    spec = csv_spec(
-        fields=[
-            field("account_id", "varchar(20)", pos=0),
-            field("valid_from_datetime", "timestamp_tz", pos=1),
-            field("valid_to_datetime", "timestamp_tz", pos=2),
-            field("is_current", "varchar(1)", pos=3),
-            field("is_deleted", "varchar(1)", pos=4),
-        ]
-    )
-    spec["control_data"] = {
-        "change_type": "scd2_manual",
-        "business_key": {
-            "fields": ["account_id"],
-        },
-    }
-
-    result = validate(
-        tmp_path,
-        spec,
-        "\n".join(
-            [
-                "account_id,valid_from_datetime,valid_to_datetime,is_current,is_deleted",
-                "A1,2026-01-01T00:00:00Z,2026-06-30T23:59:59Z,Y,N",
-                "A1,2026-07-01T00:00:00Z,9999-12-31T23:59:59Z,Y,N",
-            ]
-        ),
-    )
-
-    assert result.rows_checked == 2
-    assert "scd2_manual has multiple current rows for the same current-row key" in diagnostic_messages(result.errors)
 
 
 def test_custom_python_validator_failure_is_reported_on_the_row(tmp_path: Path) -> None:

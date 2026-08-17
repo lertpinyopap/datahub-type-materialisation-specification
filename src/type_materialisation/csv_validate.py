@@ -68,7 +68,6 @@ def validate_csv_file(
             _validate_header_mappings(target_fields, header, result)
 
         unique_values: dict[str, set[Any]] = defaultdict(set)
-        current_row_keys: dict[tuple[Any, ...], int] = {}
         for row_number, row in enumerate(reader, start=2 if header_enabled else 1):
             result.rows_checked += 1
             row_values: dict[str, Any] = {}
@@ -90,7 +89,6 @@ def validate_csv_file(
                     row_values[str(field_id)] = value
                 except ValueError as exc:
                     result.errors.append(Diagnostic(str(exc), location))
-            _validate_scd2_manual_current_row_key(spec, row_values, row_number, current_row_keys, result)
     return result
 
 
@@ -336,7 +334,7 @@ def _apply_time_if_missing(value: datetime, transform: dict[str, Any]) -> dateti
     if mode == "start_of_day":
         return value.replace(hour=0, minute=0, second=0, microsecond=0)
     if mode == "end_of_day":
-        return value.replace(hour=23, minute=59, second=59, microsecond=0)
+        return value.replace(hour=23, minute=59, second=59, microsecond=999999)
     return value
 
 
@@ -404,42 +402,6 @@ def _validate_rules(
                 raise ValueError("custom validation failed")
             if isinstance(result, str) and result:
                 raise ValueError(result)
-
-
-def _validate_scd2_manual_current_row_key(
-    spec: dict[str, Any],
-    row_values: dict[str, Any],
-    row_number: int,
-    current_row_keys: dict[tuple[Any, ...], int],
-    result: CsvValidationResult,
-) -> None:
-    control_data = spec.get("control_data", {})
-    if not isinstance(control_data, dict) or control_data.get("change_type") != "scd2_manual":
-        return
-    field_lookup = _field_id_lookup(spec)
-    is_current_id = field_lookup.get("is_current")
-    if is_current_id is None or row_values.get(is_current_id) != "Y":
-        return
-    key_ids = [
-        field_lookup[field_key]
-        for field_key in _business_key_field_keys(spec)
-        if field_key in field_lookup
-    ]
-    if not key_ids:
-        return
-    try:
-        key = tuple(row_values[field_id] for field_id in key_ids)
-    except KeyError:
-        return
-    if key in current_row_keys:
-        result.errors.append(
-            Diagnostic(
-                "scd2_manual has multiple current rows for the same current-row key",
-                f"row {row_number}, field `is_current`",
-            )
-        )
-    else:
-        current_row_keys[key] = row_number
 
 
 def _business_key_field_keys(spec: dict[str, Any]) -> list[str]:

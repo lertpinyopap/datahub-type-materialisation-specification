@@ -117,7 +117,7 @@ def create_target_table_from_spec(connection: Any, spec_path: Path, schema: str)
         columns.append(f"{quote_identifier(_surrogate_key_column(spec))} {SURROGATE_KEY_DATA_TYPE}")
     if _business_key_enabled(spec):
         columns.append(f"{quote_identifier(_business_key_column(spec))} {BUSINESS_KEY_DATA_TYPE}")
-    for name, data_type in GENERATED_METADATA_FIELD_TYPES.items():
+    for name, data_type in _generated_metadata_field_types_for_target(spec).items():
         columns.append(f"{quote_identifier(name)} {data_type}")
     ddl = f"create or replace table {quote_identifier(schema)}.{quote_identifier(table)} ({', '.join(columns)})"
     _execute(connection, ddl)
@@ -267,8 +267,23 @@ def _target_column_types(spec_path: Path) -> dict[str, str]:
         column_types[_surrogate_key_column(spec)] = SURROGATE_KEY_DATA_TYPE
     if _business_key_enabled(spec):
         column_types[_business_key_column(spec)] = BUSINESS_KEY_DATA_TYPE
-    column_types.update({_physical_name(name): data_type for name, data_type in GENERATED_METADATA_FIELD_TYPES.items()})
+    column_types.update(
+        {
+            _physical_name(name): data_type
+            for name, data_type in _generated_metadata_field_types_for_target(spec).items()
+        }
+    )
     return column_types
+
+
+def _generated_metadata_field_types_for_target(spec: dict[str, Any]) -> dict[str, str]:
+    if _change_type(spec) == "scd2_auto":
+        return dict(GENERATED_METADATA_FIELD_TYPES)
+    return {
+        name: data_type
+        for name, data_type in GENERATED_METADATA_FIELD_TYPES.items()
+        if name.startswith("audit_")
+    }
 
 
 def _load_spec(spec_path: Path) -> dict[str, Any]:
@@ -281,6 +296,14 @@ def _load_spec(spec_path: Path) -> dict[str, Any]:
 
 def _physical_name(value: Any) -> str:
     return str(value).upper()
+
+
+def _change_type(spec: dict[str, Any]) -> str | None:
+    control_data = spec.get("control_data", {})
+    if not isinstance(control_data, dict):
+        return None
+    value = control_data.get("change_type")
+    return str(value) if value is not None else None
 
 
 def _business_key_column(spec: dict[str, Any]) -> str:

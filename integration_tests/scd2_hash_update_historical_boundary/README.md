@@ -18,7 +18,8 @@ business data hash.
 
 The test creates a target table with two versions for `A1`:
 
-- `account_value = 1` from platform start of time to `2026-09-03`.
+- `account_value = 1` from platform start of time through the instant before
+  `2026-09-03`.
 - `account_value = 2` from `2026-09-03` to platform end of time.
 
 ## Load Steps
