@@ -59,6 +59,68 @@ python -m pip install -r requirements.txt
 python -m pip install --no-build-isolation --no-deps -e .
 ```
 
+Build an installable package:
+
+```bash
+make package
+```
+
+One-command package helper:
+
+```bash
+bash scripts/build_tms_package.sh
+```
+
+This writes artifacts to `dist/`, including:
+
+```text
+dist/type_materialisation_tools-0.1.0-py3-none-any.whl
+dist/tms-env/
+dist/tms-env.tar.gz
+```
+
+Build only the wheel:
+
+```bash
+make package-wheel
+```
+
+Build and install directly into an Airflow-side `tms-env`:
+
+```bash
+bash scripts/build_tms_package.sh \
+  --install-venv /usr/local/airflow/python3-virtualenv/tms-env \
+  --archive dist/tms-env.tar.gz
+```
+
+Use `--install-venv` only when the machine running the script is also the
+machine where that virtualenv path should exist. For normal local or CI
+packaging, omit it and use the default `dist/tms-env` plus
+`dist/tms-env.tar.gz` artifacts.
+
+Clean packaging output:
+
+```bash
+make clean-package
+```
+
+### Installing the built wheel into Airflow-side `tms-env`
+
+If MWAA or another Airflow environment already has a separate Python 3.12
+virtualenv for TMS, install the built wheel into that environment:
+
+```bash
+/usr/local/airflow/python3-virtualenv/tms-env/bin/python -m pip install \
+  dist/type_materialisation_tools-0.1.0-py3-none-any.whl
+```
+
+If that environment also needs to resolve dependencies from `requirements.txt`,
+it must have network access to the package index or an internal package mirror.
+
+The TMS wheel itself is pure Python and can be built on macOS or Linux. If you
+later want to prebuild a full dependency wheelhouse for MWAA, build that on
+Linux so platform-specific dependency wheels match the MWAA runtime.
+
 On macOS ARM, if `pip install -r requirements.txt` fails while preparing
 metadata for `dbt-core-experimental-parser`, install the dbt parser wheel
 directly first, then rerun the requirements install:
