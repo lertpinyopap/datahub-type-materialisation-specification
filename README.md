@@ -53,7 +53,7 @@ Local development uses the root `requirements.txt`, which installs the dbt
 Install:
 
 ```bash
-python3.13 -m venv .venv
+python3.12 -m venv .venv
 source .venv/bin/activate
 python -m pip install -r requirements.txt
 python -m pip install --no-build-isolation --no-deps -e .

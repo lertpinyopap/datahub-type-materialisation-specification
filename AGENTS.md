@@ -53,7 +53,7 @@ The Python implementation in `src/type_materialisation/` is product
 implementation code, not miscellaneous utility code. The installed CLI command
 is `tms`.
 
-- Target Python 3.13.
+- Target Python 3.12 for MWAA compatibility.
 - Local development uses the repository-root `requirements.txt`, which stays on
   the dbt 1.12 Snowflake adapter line until an upgrade is intentionally planned.
 - Use idiomatic, typed Python with standard-library facilities where practical.
