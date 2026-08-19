@@ -1,0 +1,4 @@
+jsonschema>=4.22
+referencing>=0.37
+PyYAML>=6.0
+rich>=13.7
