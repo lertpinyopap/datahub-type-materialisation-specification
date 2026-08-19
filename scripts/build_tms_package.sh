@@ -10,6 +10,7 @@ INSTALL_VENV="${INSTALL_VENV:-$DIST_DIR/tms-env}"
 ARCHIVE_PATH="${ARCHIVE_PATH:-$DIST_DIR/tms-env.tar.gz}"
 CLEAN_FIRST="true"
 BUILD_VENV_DIR="${BUILD_VENV_DIR:-$REPO_ROOT/.tmp-build-venv}"
+INSTALL_VENV_TMP=""
 
 usage() {
   cat <<'EOF'
@@ -31,6 +32,7 @@ Examples:
   scripts/build_tms_package.sh
   scripts/build_tms_package.sh --python /opt/homebrew/bin/python3.12
   scripts/build_tms_package.sh --install-venv /usr/local/airflow/python3-virtualenv/tms-env
+  scripts/build_tms_package.sh --install-venv "$PWD/libs/tms-env" --archive "$PWD/libs/tms-env.tar.gz"
   scripts/build_tms_package.sh --install-venv dist/tms-env --archive dist/tms-env.tar.gz
 EOF
 }
@@ -82,6 +84,9 @@ command -v "$PYTHON_BIN" >/dev/null || {
 
 if [[ "$CLEAN_FIRST" == "true" ]]; then
   rm -rf "$REPO_ROOT/build" "$DIST_DIR" "$REPO_ROOT"/src/*.egg-info
+  if [[ -n "$ARCHIVE_PATH" ]]; then
+    rm -f "$ARCHIVE_PATH"
+  fi
 fi
 
 mkdir -p "$DIST_DIR"
@@ -102,24 +107,41 @@ echo "Built wheel:"
 echo "  $WHEEL_PATH"
 
 if [[ -n "$INSTALL_VENV" ]]; then
-  if [[ ! -d "$INSTALL_VENV" ]]; then
-    "$PYTHON_BIN" -m venv "$INSTALL_VENV"
-  fi
+  INSTALL_VENV_TMP="${INSTALL_VENV}.tmp-build"
+  rm -rf "$INSTALL_VENV_TMP"
+  "$PYTHON_BIN" -m venv "$INSTALL_VENV_TMP"
 
-  TARGET_PYTHON="$INSTALL_VENV/bin/python"
+  TARGET_PYTHON="$INSTALL_VENV_TMP/bin/python"
   if [[ ! -x "$TARGET_PYTHON" ]]; then
     echo "Target virtualenv Python not found: $TARGET_PYTHON" >&2
     exit 1
   fi
 
   echo "Installing wheel into:"
-  echo "  $INSTALL_VENV"
+  echo "  $INSTALL_VENV_TMP"
   "$TARGET_PYTHON" -m pip install --upgrade "$WHEEL_PATH"
+
+  rm -rf "$INSTALL_VENV"
+  mv "$INSTALL_VENV_TMP" "$INSTALL_VENV"
+  INSTALL_VENV_TMP=""
+
+  # Reinstall the wheel in the final location so console-script shebangs point
+  # at INSTALL_VENV rather than the temporary staging venv path.
+  TARGET_PYTHON="$INSTALL_VENV/bin/python"
+  "$TARGET_PYTHON" -m pip install --no-deps --force-reinstall "$WHEEL_PATH"
+
+  STDLIB_DIR="$("$TARGET_PYTHON" -c 'import sys; from pathlib import Path; print(Path(sys.executable).parent.parent / "lib" / f"python{sys.version_info.major}.{sys.version_info.minor}")')"
+  SCHEMA_TARGET_DIR="$STDLIB_DIR/schema"
+  mkdir -p "$SCHEMA_TARGET_DIR"
+  cp "$REPO_ROOT/schema/type-materialisation.schema.json" "$SCHEMA_TARGET_DIR/"
+  cp "$REPO_ROOT/schema/type-materialisation-abstract.schema.json" "$SCHEMA_TARGET_DIR/"
+
+  echo "Installed schema files into:"
+  echo "  $SCHEMA_TARGET_DIR"
 fi
 
 if [[ -n "$ARCHIVE_PATH" ]]; then
   mkdir -p "$(dirname "$ARCHIVE_PATH")"
-  rm -f "$ARCHIVE_PATH"
   tar -C "$(dirname "$INSTALL_VENV")" -czf "$ARCHIVE_PATH" "$(basename "$INSTALL_VENV")"
 
   echo "Built runtime archive:"
