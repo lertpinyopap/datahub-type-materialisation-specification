@@ -1266,21 +1266,39 @@ fields:
 
 ```text
 field.source ::= csv_field_source | table_field_source
+field.lookup ::= table_lookup_source
 
 csv_field_source ::=
   pos?
   column?
+  default_value?
   | fixed_value
 
 table_field_source ::=
   column
   snowflake_path?
+  default_value?
+  default_from_field?
+  | default_value
+  | default_from_field
   | fixed_value
 
 pos ::= integer >= 0
 column ::= string
 snowflake_path ::= Snowflake semi-structured path
+default_value ::= scalar
+default_from_field ::= target field id
 fixed_value ::= scalar
+table_lookup_source ::=
+  reference_entity
+  reference_attribute
+  source_expression
+  required?
+
+reference_entity ::= database.schema.table
+reference_attribute ::= reference field id
+source_expression ::= SQL expression evaluated against source_query
+required ::= boolean
 ```
 
 For CSV sources, a field may be selected by position, column name, or both. If
@@ -1306,6 +1324,30 @@ every generated source row. It is mutually exclusive with `pos`, `column`, and
 `snowflake_path`. The fixed value enters the TMS transform and validation
 pipeline as a `varchar` source value; target typing still happens in the normal
 TMS field pipeline.
+
+For any source format, `default_value` supplies a fallback scalar source value
+when the selected source value is null or an empty string. For table sources, it
+may also be used on its own to generate a literal source value without requiring
+a dummy source query column. It may be combined with `pos`, `column`, or
+`snowflake_path`, and enters the TMS transform and validation pipeline as a
+`varchar` source value before target typing. It is mutually exclusive with
+`fixed_value`.
+
+For table sources, `default_from_field` supplies a source value from another
+target field. It may be used on its own, or combined with `column`,
+`snowflake_path`, and `default_value`. When combined with `column`, TMS uses the
+selected source value first, the referenced field second, and the scalar default
+last. It is mutually exclusive with `fixed_value`.
+
+For table sources, `lookup` supplies a target field value from a reference
+table. `reference_entity` names the reference table, `reference_attribute` names
+the reference column matched by `source_expression`, and TMS generates a
+current/non-deleted reference join. `lookup` is mutually exclusive with
+`source`.
+
+TMS renders `reference_entity` as declared. If the physical database is
+environment-prefixed, include that Jinja directly in the spec. For example,
+`{{ var("ENV_PREFIX", "") }}REFERENCE.CORE.CUSTOMER_STATUS`.
 
 Any `field.source.column` value specified without `snowflake_path` in
 `target.fields` must be unique within the resolved target field list. Column
@@ -1364,6 +1406,38 @@ fields:
     source:
       fixed_value: "Y"
     data_type: varchar(1)
+```
+
+Sample: field source using a default value fallback.
+
+```yaml
+fields:
+  - id: country_code
+    source:
+      column: country_code
+      default_value: "UNKNOWN"
+    data_type: varchar(20)
+```
+
+Sample: table field using a reference lookup.
+
+```yaml
+fields:
+  - id: customer_status_key
+    data_type: varchar(64)
+    nullable: false
+    lookup:
+      reference_entity: '{{ var("ENV_PREFIX", "") }}REFERENCE.CORE.CUSTOMER_STATUS'
+      reference_attribute: CUSTOMER_STATUS_CODE
+      source_expression: |
+        case
+          when AMNA_ADD_STATUS != 99 then 'PROF'
+          when AMNA_STATUS = 0 then 'ENAB'
+          when AMNA_STATUS = 1 then 'DISA'
+          when AMNA_STATUS = 2 then 'DELE'
+          else 'DQMapping'
+        end
+      required: true
 ```
 
 ## 10. Data Types
@@ -1845,13 +1919,21 @@ Parse-time rules:
 - For `source.format = csv`, `source.load_method = dbt_seed`, and
   `source.header = false`, each field source must specify `pos` or
   `fixed_value`.
-- For `source.format = table`, each field source must specify `column` or
-  `fixed_value`.
+- For `source.format = table`, each field must specify `source` or `lookup`.
+- For `source.format = table`, each `field.source` must specify `column`,
+  `default_value`, `default_from_field`, or `fixed_value`.
+- For `source.format = table`, `field.lookup` is mutually exclusive with
+  `field.source`.
 - For `source.format = table`, `field.source.pos` is invalid.
 - For `source.format = table`, `field.source.snowflake_path` is valid only with
   `field.source.column`.
 - `field.source.fixed_value` is mutually exclusive with `field.source.pos`,
   `field.source.column`, and `field.source.snowflake_path`.
+- `field.source.default_value` is mutually exclusive with
+  `field.source.fixed_value`.
+- `field.source.default_from_field` is supported only for table sources, must
+  reference another target field, and is mutually exclusive with
+  `field.source.fixed_value`.
 - For `source.format = table`, each `source.flatten.alias` must be unique and
   must not duplicate a physical source column used without `snowflake_path`.
 - For `source.format = table`, if `source.query` is supplied, it must be a

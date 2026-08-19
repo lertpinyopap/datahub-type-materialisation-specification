@@ -182,23 +182,33 @@ def _extract_value(field: dict[str, Any], row: list[str], header: list[str] | No
         raise ValueError("field source is missing")
     pos = source.get("pos")
     column = source.get("column")
+    value: Any
     if isinstance(pos, int):
         if pos >= len(row):
             raise ValueError(f"CSV row does not contain position {pos}")
-        return _empty_to_none(row[pos])
-    if isinstance(column, str) and header is not None:
+        value = _empty_to_none(row[pos])
+    elif isinstance(column, str) and header is not None:
         try:
             index = header.index(column)
         except ValueError as exc:
             raise ValueError(f"CSV header does not contain column `{column}`") from exc
         if index >= len(row):
             raise ValueError(f"CSV row does not contain column `{column}`")
-        return _empty_to_none(row[index])
-    raise ValueError("CSV field source must specify pos, or column with header")
+        value = _empty_to_none(row[index])
+    else:
+        raise ValueError("CSV field source must specify pos, or column with header")
+    return _defaulted_source_value(source, value)
 
 
 def _empty_to_none(value: str) -> str | None:
     return None if value == "" else value
+
+
+def _defaulted_source_value(source: dict[str, Any], value: Any) -> Any:
+    if value is None and "default_value" in source:
+        default_value = source["default_value"]
+        return None if default_value is None else str(default_value)
+    return value
 
 
 def _apply_transforms(

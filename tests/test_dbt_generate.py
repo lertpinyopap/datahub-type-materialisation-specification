@@ -537,6 +537,26 @@ def test_generated_source_model_uses_fixed_values(tmp_path: Path) -> None:
     assert "cast(IS_CURRENT_FLAG as varchar(1)) as IS_CURRENT_FLAG" in model_sql
 
 
+def test_generated_source_model_uses_default_values(tmp_path: Path) -> None:
+    result, output_dir = generate(
+        tmp_path,
+        csv_generation_spec(
+            fields="""
+        - id: account_id
+          source:
+            pos: 0
+            column: account_id
+            default_value: "UNKNOWN"
+          data_type: varchar(20)
+            """
+        ),
+    )
+
+    assert result.errors == []
+    source_sql = (output_dir / "models" / "generated" / "account__source.sql").read_text(encoding="utf-8")
+    assert "coalesce(nullif($1::string, ''), cast('UNKNOWN' as string)) as ACCOUNT_ID" in source_sql
+
+
 def test_headerless_csv_stage_generation_aliases_positions_to_col_names(tmp_path: Path) -> None:
     result, output_dir = generate(
         tmp_path,
@@ -929,6 +949,138 @@ def test_table_source_generation_uses_fixed_values(tmp_path: Path) -> None:
     assert "source_query.ACCOUNT_ID as ACCOUNT_ID" in source_sql
     assert "cast('Y' as string) as IS_CURRENT_FLAG" in source_sql
     assert "from source_query" in source_sql
+
+
+def test_table_source_generation_uses_default_values(tmp_path: Path) -> None:
+    result, output_dir = generate(
+        tmp_path,
+        """
+        id: table_spec
+        control_data:
+          change_type: scd1
+        source:
+          format: table
+          schema: landing
+          table: account_events
+        target:
+          id: account
+          schema: business
+          fields:
+            - id: account_id
+              source:
+                column: account_id
+                default_value: "UNKNOWN"
+              data_type: varchar(20)
+        """,
+    )
+
+    assert result.errors == []
+    source_sql = (output_dir / "models" / "generated" / "account__source.sql").read_text(encoding="utf-8")
+    assert "coalesce(nullif(to_varchar(source_query.ACCOUNT_ID), ''), cast('UNKNOWN' as string)) as ACCOUNT_ID" in source_sql
+
+
+def test_table_source_generation_uses_standalone_default_values(tmp_path: Path) -> None:
+    result, output_dir = generate(
+        tmp_path,
+        """
+        id: table_spec
+        control_data:
+          change_type: scd1
+        source:
+          format: table
+          schema: landing
+          table: account_events
+        target:
+          id: account
+          schema: business
+          fields:
+            - id: external_identification_type
+              source:
+                default_value: "AMID"
+              data_type: varchar(20)
+        """,
+    )
+
+    assert result.errors == []
+    source_sql = (output_dir / "models" / "generated" / "account__source.sql").read_text(encoding="utf-8")
+    assert "cast('AMID' as string) as EXTERNAL_IDENTIFICATION_TYPE" in source_sql
+
+
+def test_table_source_generation_uses_default_from_field(tmp_path: Path) -> None:
+    result, output_dir = generate(
+        tmp_path,
+        """
+        id: table_spec
+        control_data:
+          change_type: scd1
+          business_key:
+            fields:
+              - customer_id
+        source:
+          format: table
+          schema: landing
+          table: customer_events
+        target:
+          id: customer
+          schema: business
+          fields:
+            - id: customer_id
+              source:
+                column: customer_id
+              data_type: varchar(20)
+            - id: clv_id
+              source:
+                default_from_field: customer_id
+              data_type: varchar(20)
+        """,
+        auto_business_key=False,
+    )
+
+    assert result.errors == []
+    source_sql = (output_dir / "models" / "generated" / "customer__source.sql").read_text(encoding="utf-8")
+    assert "to_varchar(source_query.CUSTOMER_ID) as CLV_ID" in source_sql
+
+
+def test_table_source_generation_uses_lookup_fields(tmp_path: Path) -> None:
+    result, output_dir = generate(
+        tmp_path,
+        """
+        id: table_spec
+        control_data:
+          change_type: scd1
+        source:
+          format: table
+          query: |
+            select
+              customer_id,
+              status_code
+            from raw.customer
+        target:
+          id: customer
+          schema: business
+          fields:
+            - id: customer_status_key
+              lookup:
+                reference_entity: '{{ var("ENV_PREFIX", "") }}REFERENCE.CORE.CUSTOMER_STATUS'
+                reference_attribute: CUSTOMER_STATUS_CODE
+                source_expression: status_code
+                required: true
+              data_type: varchar(64)
+            - id: customer_id
+              source:
+                column: customer_id
+              data_type: varchar(20)
+        """,
+    )
+
+    assert result.errors == []
+    source_sql = (output_dir / "models" / "generated" / "customer__source.sql").read_text(encoding="utf-8")
+    assert "LOOKUP_CUSTOMER_STATUS.CUSTOMER_STATUS_KEY as CUSTOMER_STATUS_KEY" in source_sql
+    assert "left join {{ var(\"ENV_PREFIX\", \"\") }}REFERENCE.CORE.CUSTOMER_STATUS as LOOKUP_CUSTOMER_STATUS" in source_sql
+    assert "on LOOKUP_CUSTOMER_STATUS.CUSTOMER_STATUS_CODE = (" in source_sql
+    assert "status_code" in source_sql
+    assert "and LOOKUP_CUSTOMER_STATUS.IS_CURRENT_FLAG = 'Y'" in source_sql
+    assert "and LOOKUP_CUSTOMER_STATUS.IS_DELETED_FLAG = 'N'" in source_sql
 
 
 def test_table_source_generation_flattens_snowflake_paths(tmp_path: Path) -> None:

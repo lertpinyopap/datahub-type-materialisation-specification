@@ -262,6 +262,313 @@ def test_fixed_value_source_rejects_other_selectors(tmp_path: Path) -> None:
     assert "field.source.fixed_value cannot be combined with field.source.column" in diagnostic_messages(diagnostics)
 
 
+def test_default_value_source_is_allowed_with_column_selector(tmp_path: Path) -> None:
+    _, diagnostics = parse_yaml(
+        tmp_path,
+        """
+        id: account_spec
+        control_data:
+          change_type: scd1
+        source:
+          format: table
+          schema: raw
+          table: landed_events
+        target:
+          id: account
+          schema: business
+          fields:
+            - id: country_code
+              source:
+                column: country_code
+                default_value: "UNKNOWN"
+              data_type: varchar(20)
+        """,
+    )
+
+    assert diagnostics == []
+
+
+def test_standalone_default_value_source_is_allowed_for_table_source(tmp_path: Path) -> None:
+    _, diagnostics = parse_yaml(
+        tmp_path,
+        """
+        id: account_spec
+        control_data:
+          change_type: scd1
+        source:
+          format: table
+          schema: raw
+          table: landed_events
+        target:
+          id: account
+          schema: business
+          fields:
+            - id: external_identification_type
+              source:
+                default_value: "AMID"
+              data_type: varchar(20)
+        """,
+    )
+
+    assert diagnostics == []
+
+
+def test_default_value_source_rejects_fixed_value(tmp_path: Path) -> None:
+    _, diagnostics = parse_yaml(
+        tmp_path,
+        """
+        id: account_spec
+        control_data:
+          change_type: scd1
+          business_key:
+            fields:
+              - country_code
+        source:
+          format: table
+          schema: raw
+          table: landed_events
+        target:
+          id: account
+          schema: business
+          fields:
+            - id: country_code
+              source:
+                fixed_value: "Y"
+                default_value: "UNKNOWN"
+              data_type: varchar(20)
+        """,
+        auto_business_key=False,
+    )
+
+    assert "field.source.default_value cannot be combined with field.source.fixed_value" in diagnostic_messages(diagnostics)
+
+
+def test_default_from_field_source_is_allowed_with_column_selector(tmp_path: Path) -> None:
+    _, diagnostics = parse_yaml(
+        tmp_path,
+        """
+        id: account_spec
+        control_data:
+          change_type: scd1
+          business_key:
+            fields:
+              - customer_id
+        source:
+          format: table
+          schema: raw
+          table: landed_events
+        target:
+          id: account
+          schema: business
+          fields:
+            - id: customer_id
+              source:
+                column: customer_id
+              data_type: varchar(20)
+            - id: clv_id
+              source:
+                default_from_field: customer_id
+              data_type: varchar(20)
+        """,
+        auto_business_key=False,
+    )
+
+    assert diagnostics == []
+
+
+def test_default_from_field_source_rejects_unknown_field(tmp_path: Path) -> None:
+    _, diagnostics = parse_yaml(
+        tmp_path,
+        """
+        id: account_spec
+        control_data:
+          change_type: scd1
+          business_key:
+            fields:
+              - customer_id
+        source:
+          format: table
+          schema: raw
+          table: landed_events
+        target:
+          id: account
+          schema: business
+          fields:
+            - id: customer_id
+              source:
+                column: customer_id
+              data_type: varchar(20)
+            - id: clv_id
+              source:
+                column: clv_id
+                default_from_field: missing_customer_id
+              data_type: varchar(20)
+        """,
+        auto_business_key=False,
+    )
+
+    assert "field.source.default_from_field must reference another target field" in diagnostic_messages(diagnostics)
+
+
+def test_default_from_field_source_rejects_same_field(tmp_path: Path) -> None:
+    _, diagnostics = parse_yaml(
+        tmp_path,
+        """
+        id: account_spec
+        control_data:
+          change_type: scd1
+          business_key:
+            fields:
+              - customer_id
+        source:
+          format: table
+          schema: raw
+          table: landed_events
+        target:
+          id: account
+          schema: business
+          fields:
+            - id: customer_id
+              source:
+                column: customer_id
+                default_from_field: customer_id
+              data_type: varchar(20)
+        """,
+        auto_business_key=False,
+    )
+
+    assert "field.source.default_from_field cannot reference the same field" in diagnostic_messages(diagnostics)
+
+
+def test_default_from_field_source_rejects_fixed_value(tmp_path: Path) -> None:
+    _, diagnostics = parse_yaml(
+        tmp_path,
+        """
+        id: account_spec
+        control_data:
+          change_type: scd1
+          business_key:
+            fields:
+              - customer_id
+        source:
+          format: table
+          schema: raw
+          table: landed_events
+        target:
+          id: account
+          schema: business
+          fields:
+            - id: customer_id
+              source:
+                column: customer_id
+              data_type: varchar(20)
+            - id: clv_id
+              source:
+                fixed_value: "Y"
+                default_from_field: customer_id
+              data_type: varchar(20)
+        """,
+        auto_business_key=False,
+    )
+
+    assert "field.source.default_from_field cannot be combined with field.source.fixed_value" in diagnostic_messages(diagnostics)
+
+
+def test_default_from_field_source_rejects_csv_source(tmp_path: Path) -> None:
+    _, diagnostics = parse_yaml(
+        tmp_path,
+        """
+        id: account_spec
+        control_data:
+          change_type: scd1
+          business_key:
+            fields:
+              - customer_id
+        source:
+          format: csv
+          load_method: dbt_seed
+          header: true
+          seed:
+            file: account.csv
+            name: account
+        target:
+          id: account
+          schema: business
+          fields:
+            - id: customer_id
+              source:
+                column: customer_id
+              data_type: varchar(20)
+            - id: clv_id
+              source:
+                column: clv_id
+                default_from_field: customer_id
+              data_type: varchar(20)
+        """,
+        auto_business_key=False,
+    )
+
+    assert "field.source.default_from_field is supported only for table sources" in diagnostic_messages(diagnostics)
+
+
+def test_lookup_field_is_allowed_for_table_source(tmp_path: Path) -> None:
+    _, diagnostics = parse_yaml(
+        tmp_path,
+        """
+        id: account_spec
+        control_data:
+          change_type: scd1
+        source:
+          format: table
+          schema: raw
+          table: landed_events
+        target:
+          id: account
+          schema: business
+          fields:
+            - id: customer_status_key
+              lookup:
+                reference_entity: REFERENCE.CORE.CUSTOMER_STATUS
+                reference_attribute: CUSTOMER_STATUS_CODE
+                source_expression: status_code
+                required: true
+              data_type: varchar(64)
+        """,
+    )
+
+    assert diagnostics == []
+
+
+def test_lookup_field_rejects_source_selector(tmp_path: Path) -> None:
+    _, diagnostics = parse_yaml(
+        tmp_path,
+        """
+        id: account_spec
+        control_data:
+          change_type: scd1
+        source:
+          format: table
+          schema: raw
+          table: landed_events
+        target:
+          id: account
+          schema: business
+          fields:
+            - id: customer_status_key
+              source:
+                column: customer_status_key
+              lookup:
+                reference_entity: REFERENCE.CORE.CUSTOMER_STATUS
+                reference_attribute: CUSTOMER_STATUS_CODE
+                source_expression: status_code
+                required: true
+              data_type: varchar(64)
+        """,
+    )
+
+    assert "field.lookup cannot be combined with field.source" in diagnostic_messages(diagnostics)
+
+
 def test_snowflake_path_is_rejected_for_csv_source(tmp_path: Path) -> None:
     _, diagnostics = parse_yaml(
         tmp_path,

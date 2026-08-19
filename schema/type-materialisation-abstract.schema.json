@@ -177,6 +177,12 @@
                   "required": ["column"]
                 },
                 {
+                  "required": ["default_value"]
+                },
+                {
+                  "required": ["default_from_field"]
+                },
+                {
                   "required": ["fixed_value"]
                 }
               ],

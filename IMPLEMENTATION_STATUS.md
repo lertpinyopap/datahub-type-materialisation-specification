@@ -23,6 +23,11 @@ Materialisation Specification.
   from local CSV files.
 - dbt project generation for concrete table-source specifications.
 - Table-source `query` SQL in generated dbt source models.
+- Field-source defaults with `default_value`, `default_from_field`, and
+  `fixed_value`, including standalone generated values for table sources.
+- Table-source field lookups with `lookup.reference_entity`,
+  `lookup.reference_attribute`, `lookup.source_expression`, and generated
+  current/non-deleted reference joins.
 - Generated dbt projects reference the user-managed local
   `datahub_type_materialisation` dbt profile.
 - `fail_load` validation failure enforcement through generated dbt SQL.

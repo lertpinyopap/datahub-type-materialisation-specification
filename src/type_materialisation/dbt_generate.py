@@ -319,7 +319,8 @@ def _write_csv_source_model(spec: dict[str, Any], options: GenerateDbtOptions, r
         else:
             pos = source.get("pos")
             ordinal = int(pos) + 1
-            select_lines.append(f"    ${ordinal}::string as {_quote_identifier(column)}")
+            expression = _apply_default_value_expression(f"${ordinal}::string", source)
+            select_lines.append(f"    {expression} as {_quote_identifier(column)}")
     sql = "\n".join(
         [
             "{{",
@@ -360,7 +361,8 @@ def _write_csv_seed_source_model(spec: dict[str, Any], options: GenerateDbtOptio
         if "fixed_value" in source:
             select_lines.append(f"    {_fixed_value_expression(source['fixed_value'])} as {_quote_identifier(column)}")
         else:
-            select_lines.append(f"    cast({_quote_identifier(column)} as string) as {_quote_identifier(column)}")
+            expression = _apply_default_value_expression(f"cast({_quote_identifier(column)} as string)", source)
+            select_lines.append(f"    {expression} as {_quote_identifier(column)}")
     sql = "\n".join(
         [
             "{{",
@@ -437,7 +439,7 @@ def _write_table_source_model(spec: dict[str, Any], options: GenerateDbtOptions,
     select_lines = []
     for field in fields(spec):
         column = _source_column_name(field)
-        expression = _table_field_source_expression(field, flatten_aliases)
+        expression = _lookup_field_source_expression(field) or _table_field_source_expression(field, flatten_aliases)
         select_lines.append(f"    {expression} as {_quote_identifier(column)}")
     source_sql = _table_source_sql(source)
     type_guard_lines = _semistructured_source_type_guard_lines(spec)
@@ -459,7 +461,7 @@ def _write_table_source_model(spec: dict[str, Any], options: GenerateDbtOptions,
             *source_sql,
             "select",
             ",\n".join(select_lines),
-            *_table_source_from_lines(source),
+            *_table_source_from_lines(spec),
             "",
         ]
     )
@@ -1814,8 +1816,10 @@ def _extract_csv_value(field: dict[str, Any], row: list[str], header: list[str] 
     column = source.get("column")
     if isinstance(column, str) and header is not None and column in header:
         index = header.index(column)
-        return row[index] if index < len(row) else None
-    return None
+        value = row[index] if index < len(row) else None
+    else:
+        value = None
+    return _defaulted_csv_source_value(source, value)
 
 
 def _locally_transformable_value(
@@ -2926,7 +2930,8 @@ def _table_source_sql(source: dict[str, Any]) -> list[str]:
     return ["with source_query as (", f"    select * from {_table_source_relation(source)}", ")", ""]
 
 
-def _table_source_from_lines(source: dict[str, Any]) -> list[str]:
+def _table_source_from_lines(spec: dict[str, Any]) -> list[str]:
+    source = spec["source"]
     lines = ["from source_query"]
     previous_aliases: set[str] = set()
     for entry in _flatten_entries(source):
@@ -2942,19 +2947,74 @@ def _table_source_from_lines(source: dict[str, Any]) -> list[str]:
         arguments.append(f"mode => {_sql_string(mode)}")
         lines.append(f", lateral flatten({', '.join(arguments)}) as {alias}")
         previous_aliases.add(case_key(str(entry["alias"])))
+    lines.extend(_lookup_join_lines(spec))
     return lines
+
+
+def _lookup_field_source_expression(field: dict[str, Any]) -> str | None:
+    lookup = field.get("lookup")
+    if not isinstance(lookup, dict):
+        return None
+    alias = _lookup_alias(field)
+    return f"{alias}.{_quote_identifier(str(field['id']))}"
+
+
+def _lookup_join_lines(spec: dict[str, Any]) -> list[str]:
+    lines: list[str] = []
+    for field in fields(spec):
+        if not isinstance(field, dict):
+            continue
+        lookup = field.get("lookup")
+        if not isinstance(lookup, dict):
+            continue
+        alias = _lookup_alias(field)
+        reference_entity = _lookup_reference_entity(str(lookup["reference_entity"]))
+        reference_attribute = _quote_identifier(str(lookup["reference_attribute"]))
+        source_expression = _indent_lookup_source_expression(str(lookup["source_expression"]).strip())
+        lines.append(f"left join {reference_entity} as {alias}")
+        lines.append(f"  on {alias}.{reference_attribute} = (")
+        lines.append(f"       {source_expression}")
+        lines.append("     )")
+        lines.append(f" and {alias}.IS_CURRENT_FLAG = 'Y'")
+        lines.append(f" and {alias}.IS_DELETED_FLAG = 'N'")
+    return lines
+
+
+def _lookup_alias(field: dict[str, Any]) -> str:
+    field_id = str(field["id"])
+    suffix = "_KEY"
+    if field_id.upper().endswith(suffix):
+        field_id = field_id[: -len(suffix)]
+    return _physical_name(f"lookup_{field_id}")
+
+
+def _lookup_reference_entity(reference_entity: str) -> str:
+    parts = [part.strip() for part in reference_entity.split(".") if part.strip()]
+    return ".".join(_physical_name(part) if "{{" not in part else part for part in parts)
+
+
+def _indent_lookup_source_expression(expression: str) -> str:
+    return "\n".join(f"       {line}" if line.strip() else "" for line in expression.splitlines()).lstrip()
 
 
 def _table_field_source_expression(field: dict[str, Any], flatten_aliases: set[str]) -> str:
     source = field.get("source", {})
     if "fixed_value" in source:
         return _fixed_value_expression(source["fixed_value"])
+    if "column" not in source and "default_value" in source:
+        return _default_value_expression(source["default_value"])
+    if "column" not in source and isinstance(source.get("default_from_field"), str):
+        default_from_field = str(source["default_from_field"])
+        return to_varchar_expression(_table_source_variant_expression(default_from_field, flatten_aliases))
     column = str(source.get("column", field["id"]))
     base_expression = _table_source_variant_expression(column, flatten_aliases)
     path = source.get("snowflake_path")
+    expression: str
     if isinstance(path, str):
-        return f"to_varchar({_snowflake_get_path_expression(base_expression, path)})"
-    return base_expression
+        expression = f"to_varchar({_snowflake_get_path_expression(base_expression, path)})"
+    else:
+        expression = base_expression
+    return _apply_default_source_expression(expression, source, flatten_aliases)
 
 
 def _table_source_variant_expression(column: str, flatten_aliases: set[str]) -> str:
@@ -2969,6 +3029,52 @@ def _snowflake_get_path_expression(expression: str, path: str) -> str:
 
 def _fixed_value_expression(value: Any) -> str:
     return f"cast({_sql_scalar(value)} as string)"
+
+
+def _default_value_expression(value: Any) -> str:
+    return f"cast({_sql_scalar(value)} as string)"
+
+
+def _apply_default_value_expression(expression: str, source: dict[str, Any]) -> str:
+    if "default_value" not in source:
+        return expression
+    return f"coalesce(nullif({expression}, ''), {_default_value_expression(source['default_value'])})"
+
+
+def _apply_default_source_expression(
+    expression: str,
+    source: dict[str, Any],
+    flatten_aliases: set[str],
+) -> str:
+    expressions = [f"nullif({_to_varchar_for_default(expression)}, '')"]
+    default_from_field = source.get("default_from_field")
+    if isinstance(default_from_field, str):
+        default_expression = to_varchar_expression(
+            _table_source_variant_expression(default_from_field, flatten_aliases)
+        )
+        expressions.append(f"nullif({default_expression}, '')")
+    if "default_value" in source:
+        expressions.append(_default_value_expression(source["default_value"]))
+    if len(expressions) == 1:
+        return expression
+    return f"coalesce({', '.join(expressions)})"
+
+
+def to_varchar_expression(expression: str) -> str:
+    return f"to_varchar({expression})"
+
+
+def _to_varchar_for_default(expression: str) -> str:
+    if expression.startswith("to_varchar("):
+        return expression
+    return to_varchar_expression(expression)
+
+
+def _defaulted_csv_source_value(source: dict[str, Any], value: str | None) -> str | None:
+    if value in {None, ""} and "default_value" in source:
+        default_value = source["default_value"]
+        return None if default_value is None else str(default_value)
+    return value
 
 
 def _flatten_entries(source: dict[str, Any]) -> list[dict[str, Any]]:

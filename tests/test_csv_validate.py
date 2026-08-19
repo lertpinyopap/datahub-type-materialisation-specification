@@ -51,6 +51,28 @@ def test_nullable_false_rejects_empty_values(tmp_path: Path) -> None:
     assert result.errors[0].location == "row 2, field `account_id`"
 
 
+def test_default_value_fills_empty_csv_values_before_nullability_check(tmp_path: Path) -> None:
+    spec = csv_spec(
+        fields=[
+            {
+                "id": "country_code",
+                "source": {
+                    "pos": 0,
+                    "column": "country_code",
+                    "default_value": "UNKNOWN",
+                },
+                "data_type": "varchar(20)",
+                "nullable": False,
+            }
+        ]
+    )
+
+    result = validate(tmp_path, spec, 'country_code\n""')
+
+    assert result.rows_checked == 1
+    assert result.errors == []
+
+
 def test_unique_rejects_duplicate_values(tmp_path: Path) -> None:
     spec = csv_spec(fields=[field("account_id", "varchar(20)", unique=True)])
 

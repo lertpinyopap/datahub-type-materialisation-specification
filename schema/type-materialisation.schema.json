@@ -699,6 +699,9 @@
           "items": {
             "$ref": "#/$defs/validationRule"
           }
+        },
+        "lookup": {
+          "$ref": "#/$defs/lookupRule"
         }
       }
     },
@@ -708,9 +711,39 @@
           "$ref": "#/$defs/fieldPatch"
         },
         {
-          "required": ["source", "data_type"]
+          "required": ["data_type"],
+          "anyOf": [
+            {
+              "required": ["source"]
+            },
+            {
+              "required": ["lookup"]
+            }
+          ],
+          "not": {
+            "required": ["source", "lookup"]
+          }
         }
       ]
+    },
+    "lookupRule": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["reference_entity", "reference_attribute", "source_expression"],
+      "properties": {
+        "reference_entity": {
+          "$ref": "#/$defs/templatedString"
+        },
+        "reference_attribute": {
+          "$ref": "#/$defs/specificationId"
+        },
+        "source_expression": {
+          "$ref": "#/$defs/templatedString"
+        },
+        "required": {
+          "type": "boolean"
+        }
+      }
     },
     "fieldSource": {
       "type": "object",
@@ -725,6 +758,12 @@
         },
         "snowflake_path": {
           "$ref": "#/$defs/templatedString"
+        },
+        "default_value": {
+          "$ref": "#/$defs/scalarValue"
+        },
+        "default_from_field": {
+          "$ref": "#/$defs/specificationId"
         },
         "fixed_value": {
           "$ref": "#/$defs/scalarValue"
@@ -790,6 +829,12 @@
               "anyOf": [
                 {
                   "required": ["column"]
+                },
+                {
+                  "required": ["default_value"]
+                },
+                {
+                  "required": ["default_from_field"]
                 },
                 {
                   "required": ["fixed_value"]

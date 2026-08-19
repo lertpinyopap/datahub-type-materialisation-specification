@@ -117,6 +117,9 @@ def validate_semantics(spec: dict[str, Any], *, abstract: bool) -> list[Diagnost
     diagnostics.extend(_validate_jinja(spec))
     diagnostics.extend(_validate_target_fields(spec))
     diagnostics.extend(_validate_fixed_value_sources(spec))
+    diagnostics.extend(_validate_default_value_sources(spec))
+    diagnostics.extend(_validate_default_from_field_sources(spec))
+    diagnostics.extend(_validate_lookup_sources(spec))
     diagnostics.extend(_validate_snowflake_table_extraction(spec))
     diagnostics.extend(_validate_csv_seed_source(spec))
     diagnostics.extend(_validate_table_query(spec))
@@ -252,6 +255,91 @@ def _validate_fixed_value_sources(spec: dict[str, Any]) -> list[Diagnostic]:
                         f"$.target.fields[{index}].source.fixed_value",
                     )
                 )
+    return diagnostics
+
+
+def _validate_default_value_sources(spec: dict[str, Any]) -> list[Diagnostic]:
+    diagnostics: list[Diagnostic] = []
+    for index, field in enumerate(fields(spec)):
+        if not isinstance(field, dict):
+            continue
+        field_source = field.get("source")
+        if not isinstance(field_source, dict) or "default_value" not in field_source:
+            continue
+        if "fixed_value" in field_source:
+            diagnostics.append(
+                Diagnostic(
+                    "field.source.default_value cannot be combined with field.source.fixed_value",
+                    f"$.target.fields[{index}].source.default_value",
+                )
+            )
+    return diagnostics
+
+
+def _validate_default_from_field_sources(spec: dict[str, Any]) -> list[Diagnostic]:
+    diagnostics: list[Diagnostic] = []
+    source = spec.get("source", {})
+    source_format = source.get("format") if isinstance(source, dict) else None
+    field_ids = {case_key(str(field["id"])) for field in fields(spec) if isinstance(field, dict) and "id" in field}
+    for index, field in enumerate(fields(spec)):
+        if not isinstance(field, dict):
+            continue
+        field_source = field.get("source")
+        if not isinstance(field_source, dict) or "default_from_field" not in field_source:
+            continue
+        if source_format != "table":
+            diagnostics.append(
+                Diagnostic(
+                    "field.source.default_from_field is supported only for table sources",
+                    f"$.target.fields[{index}].source.default_from_field",
+                )
+            )
+        if "fixed_value" in field_source:
+            diagnostics.append(
+                Diagnostic(
+                    "field.source.default_from_field cannot be combined with field.source.fixed_value",
+                    f"$.target.fields[{index}].source.default_from_field",
+                )
+            )
+        default_from_field = str(field_source["default_from_field"])
+        if case_key(default_from_field) == case_key(str(field.get("id", ""))):
+            diagnostics.append(
+                Diagnostic(
+                    "field.source.default_from_field cannot reference the same field",
+                    f"$.target.fields[{index}].source.default_from_field",
+                )
+            )
+        if case_key(default_from_field) not in field_ids:
+            diagnostics.append(
+                Diagnostic(
+                    "field.source.default_from_field must reference another target field",
+                    f"$.target.fields[{index}].source.default_from_field",
+                )
+            )
+    return diagnostics
+
+
+def _validate_lookup_sources(spec: dict[str, Any]) -> list[Diagnostic]:
+    diagnostics: list[Diagnostic] = []
+    source = spec.get("source", {})
+    source_format = source.get("format") if isinstance(source, dict) else None
+    for index, field in enumerate(fields(spec)):
+        if not isinstance(field, dict) or "lookup" not in field:
+            continue
+        if source_format != "table":
+            diagnostics.append(
+                Diagnostic(
+                    "field.lookup is supported only for table sources",
+                    f"$.target.fields[{index}].lookup",
+                )
+            )
+        if "source" in field:
+            diagnostics.append(
+                Diagnostic(
+                    "field.lookup cannot be combined with field.source",
+                    f"$.target.fields[{index}].lookup",
+                )
+            )
     return diagnostics
 
 
