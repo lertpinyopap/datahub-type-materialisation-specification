@@ -9,6 +9,7 @@ DIST_DIR="${DIST_DIR:-$REPO_ROOT/dist}"
 INSTALL_VENV="${INSTALL_VENV:-$DIST_DIR/tms-env}"
 ARCHIVE_PATH="${ARCHIVE_PATH:-$DIST_DIR/tms-env.tar.gz}"
 CLEAN_FIRST="true"
+PRUNE_RUNTIME="true"
 BUILD_VENV_DIR="${BUILD_VENV_DIR:-$REPO_ROOT/.tmp-build-venv}"
 INSTALL_VENV_TMP=""
 
@@ -26,6 +27,7 @@ Options:
   --archive <path>        Runtime tar.gz path. Default: dist/tms-env.tar.gz
   --build-venv <path>     Temporary virtualenv used only for packaging tools
   --no-clean              Skip removing build/, dist/, and src/*.egg-info first
+  --no-prune              Keep runtime cache and platform payload files
   --help                  Show this help
 
 Examples:
@@ -63,6 +65,10 @@ while [[ $# -gt 0 ]]; do
       CLEAN_FIRST="false"
       shift
       ;;
+    --no-prune)
+      PRUNE_RUNTIME="false"
+      shift
+      ;;
     --help)
       usage
       exit 0
@@ -90,6 +96,24 @@ if [[ "$CLEAN_FIRST" == "true" ]]; then
 fi
 
 mkdir -p "$DIST_DIR"
+
+prune_runtime_venv() {
+  local venv_dir="$1"
+  local minicore_dir
+  minicore_dir="$(find "$venv_dir/lib" -path '*/site-packages/snowflake/connector/minicore' -type d -print -quit 2>/dev/null || true)"
+
+  echo "Pruning runtime virtualenv:"
+  echo "  $venv_dir"
+
+  find "$venv_dir" -type d -name '__pycache__' -prune -exec rm -rf {} +
+  find "$venv_dir" -type f \( -name '*.pyc' -o -name '*.pyo' \) -delete
+
+  # Snowflake connector wheels include static libraries for platforms MWAA does
+  # not run. Keep Linux/macOS runtime payloads, but drop obvious non-runtime bulk.
+  if [[ -n "$minicore_dir" && -d "$minicore_dir" ]]; then
+    rm -rf "$minicore_dir/aix_ppc64" "$minicore_dir/windows_x86_64"
+  fi
+}
 
 echo "Building TMS wheel with $PYTHON_BIN"
 rm -rf "$BUILD_VENV_DIR"
@@ -119,7 +143,8 @@ if [[ -n "$INSTALL_VENV" ]]; then
 
   echo "Installing wheel into:"
   echo "  $INSTALL_VENV_TMP"
-  "$TARGET_PYTHON" -m pip install --upgrade "$WHEEL_PATH"
+  "$TARGET_PYTHON" -m pip install --upgrade -r "$REPO_ROOT/requirements-runtime.txt"
+  "$TARGET_PYTHON" -m pip install --no-deps --upgrade "$WHEEL_PATH"
 
   rm -rf "$INSTALL_VENV"
   mv "$INSTALL_VENV_TMP" "$INSTALL_VENV"
@@ -138,6 +163,10 @@ if [[ -n "$INSTALL_VENV" ]]; then
 
   echo "Installed schema files into:"
   echo "  $SCHEMA_TARGET_DIR"
+
+  if [[ "$PRUNE_RUNTIME" == "true" ]]; then
+    prune_runtime_venv "$INSTALL_VENV"
+  fi
 fi
 
 if [[ -n "$ARCHIVE_PATH" ]]; then

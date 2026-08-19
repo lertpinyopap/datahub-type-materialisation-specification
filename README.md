@@ -47,8 +47,10 @@ remains the materialisation runtime.
 The Python package is installed as an editable local package and exposes the
 `tms` command.
 
-Local development uses the root `requirements.txt`, which installs the dbt
-1.12 Snowflake adapter line.
+Local development uses the root `requirements.txt`, which installs runtime,
+dbt, Snowflake, build, and test dependencies. The TMS wheel itself declares
+only the small runtime dependency set from `requirements-runtime.txt`; Airflow
+is expected to provide dbt and Snowflake runtime packages separately.
 
 Install:
 
@@ -78,6 +80,12 @@ dist/type_materialisation_tools-0.1.0-py3-none-any.whl
 dist/tms-env/
 dist/tms-env.tar.gz
 ```
+
+The runtime virtualenv is pruned before archiving to remove Python cache files
+and obvious non-Airflow platform payloads. By default, this archive excludes
+`dbt-core`, `dbt-snowflake`, and Snowflake connector dependencies so Airflow can
+provide them separately. Use `--no-prune` only when an unmodified dependency
+install must be archived.
 
 Build only the wheel:
 
@@ -111,11 +119,15 @@ virtualenv for TMS, install the built wheel into that environment:
 
 ```bash
 /usr/local/airflow/python3-virtualenv/tms-env/bin/python -m pip install \
-  dist/type_materialisation_tools-0.1.0-py3-none-any.whl
+  -r requirements-runtime.txt
+/usr/local/airflow/python3-virtualenv/tms-env/bin/python -m pip install \
+  --no-deps dist/type_materialisation_tools-0.1.0-py3-none-any.whl
 ```
 
-If that environment also needs to resolve dependencies from `requirements.txt`,
-it must have network access to the package index or an internal package mirror.
+The dbt execution environment must separately provide `dbt-core`,
+`dbt-snowflake`, and Snowflake connector packages. If MWAA or another Airflow
+environment needs to resolve dependencies during deployment, it must have
+network access to the package index or an internal package mirror.
 
 The TMS wheel itself is pure Python and can be built on macOS or Linux. If you
 later want to prebuild a full dependency wheelhouse for MWAA, build that on

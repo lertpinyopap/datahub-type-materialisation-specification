@@ -16,7 +16,7 @@ tms = "type_materialisation.cli:main"
 where = ["src"]
 
 [tool.setuptools.dynamic]
-dependencies = {file = ["requirements.txt"]}
+dependencies = {file = ["requirements-runtime.txt"]}
 
 [tool.pytest.ini_options]
 filterwarnings = ["error"]
