@@ -119,7 +119,6 @@ def validate_semantics(spec: dict[str, Any], *, abstract: bool) -> list[Diagnost
     diagnostics.extend(_validate_fixed_value_sources(spec))
     diagnostics.extend(_validate_default_value_sources(spec))
     diagnostics.extend(_validate_default_from_field_sources(spec))
-    diagnostics.extend(_validate_lookup_sources(spec))
     diagnostics.extend(_validate_snowflake_table_extraction(spec))
     diagnostics.extend(_validate_csv_seed_source(spec))
     diagnostics.extend(_validate_table_query(spec))
@@ -314,30 +313,6 @@ def _validate_default_from_field_sources(spec: dict[str, Any]) -> list[Diagnosti
                 Diagnostic(
                     "field.source.default_from_field must reference another target field",
                     f"$.target.fields[{index}].source.default_from_field",
-                )
-            )
-    return diagnostics
-
-
-def _validate_lookup_sources(spec: dict[str, Any]) -> list[Diagnostic]:
-    diagnostics: list[Diagnostic] = []
-    source = spec.get("source", {})
-    source_format = source.get("format") if isinstance(source, dict) else None
-    for index, field in enumerate(fields(spec)):
-        if not isinstance(field, dict) or "lookup" not in field:
-            continue
-        if source_format != "table":
-            diagnostics.append(
-                Diagnostic(
-                    "field.lookup is supported only for table sources",
-                    f"$.target.fields[{index}].lookup",
-                )
-            )
-        if "source" in field:
-            diagnostics.append(
-                Diagnostic(
-                    "field.lookup cannot be combined with field.source",
-                    f"$.target.fields[{index}].lookup",
                 )
             )
     return diagnostics

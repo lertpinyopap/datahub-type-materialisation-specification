@@ -1041,7 +1041,20 @@ def test_table_source_generation_uses_default_from_field(tmp_path: Path) -> None
     assert "to_varchar(source_query.CUSTOMER_ID) as CLV_ID" in source_sql
 
 
-def test_table_source_generation_uses_lookup_fields(tmp_path: Path) -> None:
+def test_table_source_generation_uses_source_macro(tmp_path: Path) -> None:
+    macro_dir = tmp_path / "macros"
+    macro_dir.mkdir()
+    (macro_dir / "lookup_macros.py").write_text(
+        """
+class CustomerStatusKey:
+    def generate_dbt_macro(self):
+        return "{% macro customer_status_key(reference_type, source_system, source_code_expression, ref_alias, output_column) %}left join lateral (select '{{ reference_type }}:' || '{{ source_system }}:' || ({{ source_code_expression }}) as {{ output_column }}) as {{ ref_alias }} on true{% endmacro %}"
+
+customer_status_key = CustomerStatusKey()
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
     result, output_dir = generate(
         tmp_path,
         """
@@ -1060,27 +1073,28 @@ def test_table_source_generation_uses_lookup_fields(tmp_path: Path) -> None:
           schema: business
           fields:
             - id: customer_status_key
-              lookup:
-                reference_entity: '{{ var("ENV_PREFIX", "") }}REFERENCE.CORE.CUSTOMER_STATUS'
-                reference_attribute: CUSTOMER_STATUS_CODE
-                source_expression: status_code
-                required: true
+              source:
+                macro: lookup_macros.customer_status_key
+                args:
+                  reference_type: CUSTOMER_STATUS
+                  source_system: V10
+                  source_code_expression: source_query.STATUS_CODE
               data_type: varchar(64)
             - id: customer_id
               source:
                 column: customer_id
               data_type: varchar(20)
         """,
+        macro_paths=[macro_dir],
     )
 
     assert result.errors == []
     source_sql = (output_dir / "models" / "generated" / "customer__source.sql").read_text(encoding="utf-8")
-    assert "LOOKUP_CUSTOMER_STATUS.CUSTOMER_STATUS_KEY as CUSTOMER_STATUS_KEY" in source_sql
-    assert "left join {{ var(\"ENV_PREFIX\", \"\") }}REFERENCE.CORE.CUSTOMER_STATUS as LOOKUP_CUSTOMER_STATUS" in source_sql
-    assert "on LOOKUP_CUSTOMER_STATUS.CUSTOMER_STATUS_CODE = (" in source_sql
-    assert "status_code" in source_sql
-    assert "and LOOKUP_CUSTOMER_STATUS.IS_CURRENT_FLAG = 'Y'" in source_sql
-    assert "and LOOKUP_CUSTOMER_STATUS.IS_DELETED_FLAG = 'N'" in source_sql
+    assert "materialized='view'" in source_sql
+    assert 'LOOKUP_CUSTOMER_STATUS_KEY."CUSTOMER_STATUS_KEY" as CUSTOMER_STATUS_KEY' in source_sql
+    assert '{{ customer_status_key(output_column="customer_status_key", ref_alias="LOOKUP_CUSTOMER_STATUS_KEY", reference_type="CUSTOMER_STATUS", source_code_expression="source_query.STATUS_CODE", source_system="V10") }}' in source_sql
+    macro_sql = (output_dir / "macros" / "generated" / "customer_status_key.sql").read_text(encoding="utf-8")
+    assert "{% macro customer_status_key(" in macro_sql
 
 
 def test_table_source_generation_flattens_snowflake_paths(tmp_path: Path) -> None:

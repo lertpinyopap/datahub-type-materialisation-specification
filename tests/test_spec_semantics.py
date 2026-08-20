@@ -511,64 +511,6 @@ def test_default_from_field_source_rejects_csv_source(tmp_path: Path) -> None:
     assert "field.source.default_from_field is supported only for table sources" in diagnostic_messages(diagnostics)
 
 
-def test_lookup_field_is_allowed_for_table_source(tmp_path: Path) -> None:
-    _, diagnostics = parse_yaml(
-        tmp_path,
-        """
-        id: account_spec
-        control_data:
-          change_type: scd1
-        source:
-          format: table
-          schema: raw
-          table: landed_events
-        target:
-          id: account
-          schema: business
-          fields:
-            - id: customer_status_key
-              lookup:
-                reference_entity: REFERENCE.CORE.CUSTOMER_STATUS
-                reference_attribute: CUSTOMER_STATUS_CODE
-                source_expression: status_code
-                required: true
-              data_type: varchar(64)
-        """,
-    )
-
-    assert diagnostics == []
-
-
-def test_lookup_field_rejects_source_selector(tmp_path: Path) -> None:
-    _, diagnostics = parse_yaml(
-        tmp_path,
-        """
-        id: account_spec
-        control_data:
-          change_type: scd1
-        source:
-          format: table
-          schema: raw
-          table: landed_events
-        target:
-          id: account
-          schema: business
-          fields:
-            - id: customer_status_key
-              source:
-                column: customer_status_key
-              lookup:
-                reference_entity: REFERENCE.CORE.CUSTOMER_STATUS
-                reference_attribute: CUSTOMER_STATUS_CODE
-                source_expression: status_code
-                required: true
-              data_type: varchar(64)
-        """,
-    )
-
-    assert "field.lookup cannot be combined with field.source" in diagnostic_messages(diagnostics)
-
-
 def test_snowflake_path_is_rejected_for_csv_source(tmp_path: Path) -> None:
     _, diagnostics = parse_yaml(
         tmp_path,

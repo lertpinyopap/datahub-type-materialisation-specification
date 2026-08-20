@@ -699,9 +699,6 @@
           "items": {
             "$ref": "#/$defs/validationRule"
           }
-        },
-        "lookup": {
-          "$ref": "#/$defs/lookupRule"
         }
       }
     },
@@ -711,39 +708,9 @@
           "$ref": "#/$defs/fieldPatch"
         },
         {
-          "required": ["data_type"],
-          "anyOf": [
-            {
-              "required": ["source"]
-            },
-            {
-              "required": ["lookup"]
-            }
-          ],
-          "not": {
-            "required": ["source", "lookup"]
-          }
+          "required": ["data_type", "source"]
         }
       ]
-    },
-    "lookupRule": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["reference_entity", "reference_attribute", "source_expression"],
-      "properties": {
-        "reference_entity": {
-          "$ref": "#/$defs/templatedString"
-        },
-        "reference_attribute": {
-          "$ref": "#/$defs/specificationId"
-        },
-        "source_expression": {
-          "$ref": "#/$defs/templatedString"
-        },
-        "required": {
-          "type": "boolean"
-        }
-      }
     },
     "fieldSource": {
       "type": "object",
@@ -764,6 +731,15 @@
         },
         "default_from_field": {
           "$ref": "#/$defs/specificationId"
+        },
+        "macro": {
+          "$ref": "#/$defs/pythonMacroName"
+        },
+        "args": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/scalarValue"
+          }
         },
         "fixed_value": {
           "$ref": "#/$defs/scalarValue"
@@ -835,6 +811,9 @@
                 },
                 {
                   "required": ["default_from_field"]
+                },
+                {
+                  "required": ["macro"]
                 },
                 {
                   "required": ["fixed_value"]

@@ -1,5 +1,6 @@
 import csv
 import hashlib
+import json
 import shutil
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -439,7 +440,10 @@ def _write_table_source_model(spec: dict[str, Any], options: GenerateDbtOptions,
     select_lines = []
     for field in fields(spec):
         column = _source_column_name(field)
-        expression = _lookup_field_source_expression(field) or _table_field_source_expression(field, flatten_aliases)
+        expression = (
+            _source_macro_field_expression(field)
+            or _table_field_source_expression(field, flatten_aliases)
+        )
         select_lines.append(f"    {expression} as {_quote_identifier(column)}")
     source_sql = _table_source_sql(source)
     type_guard_lines = _semistructured_source_type_guard_lines(spec)
@@ -2514,6 +2518,9 @@ def _valid_rows_cte() -> list[str]:
 def _custom_macro_names(spec: dict[str, Any]) -> list[str]:
     names: list[str] = []
     for field in fields(spec):
+        source = field.get("source")
+        if isinstance(source, dict) and isinstance(source.get("macro"), str):
+            names.append(source["macro"])
         for rule_group_name in ("transforms", "validations"):
             for rule in field.get(rule_group_name, []):
                 if isinstance(rule, dict) and rule.get("type") == "custom":
@@ -2947,54 +2954,38 @@ def _table_source_from_lines(spec: dict[str, Any]) -> list[str]:
         arguments.append(f"mode => {_sql_string(mode)}")
         lines.append(f", lateral flatten({', '.join(arguments)}) as {alias}")
         previous_aliases.add(case_key(str(entry["alias"])))
-    lines.extend(_lookup_join_lines(spec))
+    lines.extend(_source_macro_join_lines(spec))
     return lines
 
 
-def _lookup_field_source_expression(field: dict[str, Any]) -> str | None:
-    lookup = field.get("lookup")
-    if not isinstance(lookup, dict):
+def _source_macro_field_expression(field: dict[str, Any]) -> str | None:
+    source = field.get("source")
+    if not isinstance(source, dict) or not isinstance(source.get("macro"), str):
         return None
-    alias = _lookup_alias(field)
+    alias = _source_macro_alias(field)
     return f"{alias}.{_quote_identifier(str(field['id']))}"
 
 
-def _lookup_join_lines(spec: dict[str, Any]) -> list[str]:
+def _source_macro_join_lines(spec: dict[str, Any]) -> list[str]:
     lines: list[str] = []
     for field in fields(spec):
         if not isinstance(field, dict):
             continue
-        lookup = field.get("lookup")
-        if not isinstance(lookup, dict):
+        source = field.get("source")
+        if not isinstance(source, dict) or not isinstance(source.get("macro"), str):
             continue
-        alias = _lookup_alias(field)
-        reference_entity = _lookup_reference_entity(str(lookup["reference_entity"]))
-        reference_attribute = _quote_identifier(str(lookup["reference_attribute"]))
-        source_expression = _indent_lookup_source_expression(str(lookup["source_expression"]).strip())
-        lines.append(f"left join {reference_entity} as {alias}")
-        lines.append(f"  on {alias}.{reference_attribute} = (")
-        lines.append(f"       {source_expression}")
-        lines.append("     )")
-        lines.append(f" and {alias}.IS_CURRENT_FLAG = 'Y'")
-        lines.append(f" and {alias}.IS_DELETED_FLAG = 'N'")
+        args = source.get("args", {})
+        if not isinstance(args, dict):
+            args = {}
+        macro_args = dict(args)
+        macro_args.setdefault("output_column", str(field["id"]))
+        macro_args.setdefault("ref_alias", _source_macro_alias(field))
+        lines.append(_source_macro_expression(str(source["macro"]), macro_args))
     return lines
 
 
-def _lookup_alias(field: dict[str, Any]) -> str:
-    field_id = str(field["id"])
-    suffix = "_KEY"
-    if field_id.upper().endswith(suffix):
-        field_id = field_id[: -len(suffix)]
-    return _physical_name(f"lookup_{field_id}")
-
-
-def _lookup_reference_entity(reference_entity: str) -> str:
-    parts = [part.strip() for part in reference_entity.split(".") if part.strip()]
-    return ".".join(_physical_name(part) if "{{" not in part else part for part in parts)
-
-
-def _indent_lookup_source_expression(expression: str) -> str:
-    return "\n".join(f"       {line}" if line.strip() else "" for line in expression.splitlines()).lstrip()
+def _source_macro_alias(field: dict[str, Any]) -> str:
+    return _physical_name(f"lookup_{field['id']}")
 
 
 def _table_field_source_expression(field: dict[str, Any], flatten_aliases: set[str]) -> str:
@@ -3033,6 +3024,26 @@ def _fixed_value_expression(value: Any) -> str:
 
 def _default_value_expression(value: Any) -> str:
     return f"cast({_sql_scalar(value)} as string)"
+
+
+def _source_macro_expression(macro_reference: str, args: Any) -> str:
+    macro_name = _macro_object_name(macro_reference)
+    if not isinstance(args, dict):
+        args = {}
+    formatted_args = ", ".join(
+        f"{key}={_jinja_literal(value)}" for key, value in sorted(args.items())
+    )
+    return "{{ " + f"{macro_name}({formatted_args})" + " }}"
+
+
+def _jinja_literal(value: Any) -> str:
+    if value is None:
+        return "none"
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, int | float):
+        return str(value)
+    return json.dumps(str(value))
 
 
 def _apply_default_value_expression(expression: str, source: dict[str, Any]) -> str:

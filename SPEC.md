@@ -1281,6 +1281,7 @@ table_field_source ::=
   default_from_field?
   | default_value
   | default_from_field
+  | source_macro
   | fixed_value
 
 pos ::= integer >= 0
@@ -1288,6 +1289,7 @@ column ::= string
 snowflake_path ::= Snowflake semi-structured path
 default_value ::= scalar
 default_from_field ::= target field id
+source_macro ::= macro + args?
 fixed_value ::= scalar
 table_lookup_source ::=
   reference_entity
@@ -1338,6 +1340,12 @@ target field. It may be used on its own, or combined with `column`,
 `snowflake_path`, and `default_value`. When combined with `column`, TMS uses the
 selected source value first, the referenced field second, and the scalar default
 last. It is mutually exclusive with `fixed_value`.
+
+For table sources, `source.macro` supplies the field source expression from a
+custom Python macro object. `source.args` is an optional mapping of scalar values
+passed to the generated dbt macro. This keeps TMS generic while allowing
+consumer projects to provide domain-specific SQL expressions such as reference
+key lookups.
 
 For table sources, `lookup` supplies a target field value from a reference
 table. `reference_entity` names the reference table, `reference_attribute` names
@@ -1426,18 +1434,19 @@ fields:
   - id: customer_status_key
     data_type: varchar(64)
     nullable: false
-    lookup:
-      reference_entity: '{{ var("ENV_PREFIX", "") }}REFERENCE.CORE.CUSTOMER_STATUS'
-      reference_attribute: CUSTOMER_STATUS_CODE
-      source_expression: |
-        case
-          when AMNA_ADD_STATUS != 99 then 'PROF'
-          when AMNA_STATUS = 0 then 'ENAB'
-          when AMNA_STATUS = 1 then 'DISA'
-          when AMNA_STATUS = 2 then 'DELE'
-          else 'DQMapping'
-        end
-      required: true
+    source:
+      macro: reference_macros.reference_lookup
+      args:
+        reference_type: CUSTOMER_STATUS
+        source_system: V10
+        source_code_expression: |
+          case
+            when AMNA_ADD_STATUS != 99 then 'PROF'
+            when AMNA_STATUS = 0 then 'ENAB'
+            when AMNA_STATUS = 1 then 'DISA'
+            when AMNA_STATUS = 2 then 'DELE'
+            else 'DQMapping'
+          end
 ```
 
 ## 10. Data Types
