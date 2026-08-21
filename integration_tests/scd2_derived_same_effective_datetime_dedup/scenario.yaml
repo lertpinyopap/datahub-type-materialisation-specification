@@ -1,0 +1,27 @@
+name: scd2_derived_same_effective_datetime_dedup
+description: Derived SCD2 keeps the highest ingest sequence when duplicate effective datetimes arrive.
+spec: spec/customer_profile.yaml
+target:
+  expected_columns:
+    - CUSTOMER_ID
+    - ACCOUNT_ID
+    - CUSTOMER_STATUS_CODE
+    - CUSTOMER_NAME
+    - EMAIL_ADDRESS
+    - VALID_FROM_DATETIME
+    - VALID_TO_DATETIME
+    - IS_CURRENT_FLAG
+    - IS_DELETED_FLAG
+  order_by:
+    - CUSTOMER_ID
+    - ACCOUNT_ID
+    - VALID_FROM_DATETIME
+checks:
+  - Duplicate bronze rows with the same effective datetime are reduced to one gold SCD2 version.
+  - The highest INGEST_SEQUENCE source row wins the deduplication.
+  - The winning row is current and open ended.
+loads:
+  - name: load_001_duplicate_effective_datetime
+    source_csv: samples/load_001_customer_silver_duplicate_effective_datetime.csv
+    expected_target: data/expected_after_load_001.csv
+

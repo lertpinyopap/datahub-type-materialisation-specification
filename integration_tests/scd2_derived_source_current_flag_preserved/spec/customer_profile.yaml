@@ -1,0 +1,92 @@
+id: scd2_derived_source_current_flag_preserved
+control_data:
+  materialisation_type: table
+  change_type: scd2_derived
+  business_key:
+    fields:
+      - customer_id
+      - account_id
+  business_data_hash:
+    business_data_hash_mode: include
+    fields:
+      - source_system
+      - source_current_flag
+      - customer_status_code
+      - customer_name
+      - email_address
+      - created_datetime
+      - updated_datetime
+  scd:
+    derivation_scope: affected_keys
+    validation_scope: affected_window
+    window_strategy: previous_and_next
+    valid_from_datetime:
+      expression: coalesce(updated_datetime, created_datetime)
+    valid_to_datetime:
+      mode: next_valid_from
+      offset:
+        unit: nanosecond
+        value: -1
+      end_of_time: "9999-12-31 23:59:59 +00:00"
+    current_flag:
+      mode: latest_per_business_key
+    deleted_flag:
+      mode: fixed
+      value: "N"
+source:
+  format: table
+  schema: TMP
+  table: customer_silver_source_current_source
+  query: |
+    select
+        customer_id,
+        account_id,
+        source_system,
+        source_current_flag,
+        customer_status_code,
+        customer_name,
+        email_address,
+        created_datetime,
+        updated_datetime
+    from TMP.customer_silver_source_current_source
+target:
+  id: customer_profile_source_current
+  schema: business
+  fields:
+    - id: customer_id
+      source:
+        column: customer_id
+      data_type: varchar(20)
+    - id: account_id
+      source:
+        column: account_id
+      data_type: varchar(20)
+    - id: source_system
+      source:
+        column: source_system
+      data_type: varchar(20)
+    - id: source_current_flag
+      source:
+        column: source_current_flag
+      data_type: varchar(1)
+    - id: customer_status_code
+      source:
+        column: customer_status_code
+      data_type: varchar(20)
+    - id: customer_name
+      source:
+        column: customer_name
+      data_type: varchar(100)
+    - id: email_address
+      source:
+        column: email_address
+      data_type: varchar(255)
+    - id: created_datetime
+      source:
+        column: created_datetime
+      data_type: date
+    - id: updated_datetime
+      source:
+        column: updated_datetime
+      data_type: date
+

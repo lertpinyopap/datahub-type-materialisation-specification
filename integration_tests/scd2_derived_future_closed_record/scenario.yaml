@@ -1,0 +1,30 @@
+name: scd2_derived_future_closed_record
+description: Derived SCD2 inserts a middle row between existing previous and next versions.
+spec: spec/customer_profile.yaml
+target:
+  expected_columns:
+    - CUSTOMER_ID
+    - ACCOUNT_ID
+    - CUSTOMER_STATUS_CODE
+    - CUSTOMER_NAME
+    - EMAIL_ADDRESS
+    - VALID_FROM_DATETIME
+    - VALID_TO_DATETIME
+    - IS_CURRENT_FLAG
+    - IS_DELETED_FLAG
+  order_by:
+    - CUSTOMER_ID
+    - ACCOUNT_ID
+    - VALID_FROM_DATETIME
+checks:
+  - The second load inserts a closed Silver record between existing Bronze and Gold records.
+  - The affected window uses both the previous and next target rows.
+  - Gold remains the current customer state.
+loads:
+  - name: load_001_bronze_and_gold
+    source_csv: samples/load_001_customer_bronze_and_gold.csv
+    expected_target: data/expected_after_load_001.csv
+  - name: load_002_insert_silver_between_existing_versions
+    source_csv: samples/load_002_customer_silver_middle.csv
+    expected_target: data/expected_after_load_002.csv
+

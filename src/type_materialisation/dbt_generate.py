@@ -192,6 +192,22 @@ def _unsupported_for_initial_dbt_generation(spec: dict[str, Any]) -> list[Diagno
                     "$.control_data.scd.delete_detection.mode",
                 )
             )
+    if _change_type(spec) == "scd2_derived":
+        valid_from_datetime = scd.get("valid_from_datetime")
+        if not isinstance(valid_from_datetime, dict) or not valid_from_datetime.get("expression"):
+            diagnostics.append(
+                Diagnostic(
+                    "`scd.valid_from_datetime.expression` is required when `change_type` is scd2_derived",
+                    "$.control_data.scd.valid_from_datetime.expression",
+                )
+            )
+        if "delete_detection" in scd:
+            diagnostics.append(
+                Diagnostic(
+                    "`delete_detection.mode = field` is only valid when `change_type` is scd1",
+                    "$.control_data.scd.delete_detection.mode",
+                )
+            )
     if _change_type(spec) == "scd1" and "scd2_auto_from_sot" in scd:
         diagnostics.append(
             Diagnostic(
@@ -206,7 +222,7 @@ def _unsupported_for_initial_dbt_generation(spec: dict[str, Any]) -> list[Diagno
                 "$.control_data.scd.scd2_validation",
             )
         )
-    if _change_type(spec) in {"scd1", "scd2_auto"} and "update_mode" in scd:
+    if _change_type(spec) in {"scd1", "scd2_auto", "scd2_derived"} and "update_mode" in scd:
         diagnostics.append(
             Diagnostic(
                 "`update_mode` is only valid when `change_type` is scd2_manual",
@@ -520,7 +536,7 @@ def _write_final_model(spec: dict[str, Any], result: DbtGenerationResult) -> Non
         extra_config_lines=extra_config_lines,
         schema_is_expression=True,
     )
-    if _change_type(spec) == "scd2_auto":
+    if _generated_scd2_enabled(spec):
         body_lines = _scd2_final_body_lines(
             spec,
             source_model,
@@ -707,7 +723,7 @@ def _scd2_final_body_lines(
         "    select",
         "        *,",
         "        case",
-        f"            when VALID_TO_DATETIME = cast({_sql_string(SCD2_END_OF_TIME)} as timestamp_tz)",
+        f"            when VALID_TO_DATETIME = {_scd2_end_of_time_expression(spec)}",
         "            then 'Y'",
         "            else 'N'",
         "        end as IS_CURRENT_FLAG,",
@@ -855,7 +871,7 @@ def _scd2_duplicate_hash_runtime_log_lines(
         "            *,",
         "            row_number() over (",
         f"                partition by {_scd2_version_row_key_columns(spec)}",
-        "                order by case when TMS_IS_EXISTING_TARGET_ROW = 'N' then 0 else 1 end",
+        f"                order by {_scd2_version_row_order_by(spec)}",
         "            ) as TMS_VERSION_ROW_NUMBER",
         "        from version_row_candidates",
         "    )",
@@ -952,6 +968,7 @@ def _scd2_target_merge_body_lines(
         ]
     )
     change_row_columns = _scd2_change_row_columns(spec)
+    source_change_not_exists_lines = _scd2_source_change_not_exists_lines(spec)
     return [
         *_scd2_valid_rows_lines(spec, source_model, quarantine_enabled, fail_load_enabled),
         "typed_rows as (",
@@ -986,14 +1003,7 @@ def _scd2_target_merge_body_lines(
         "source_change_rows as (",
         "    select *",
         "    from typed_rows",
-        "    where not exists (",
-        "        select 1",
-        "        from current_target_rows as current_target",
-        f"        where {_business_key_join_condition(spec, 'typed_rows', 'current_target')}",
-        "          and current_target.BUSINESS_DATA_HASH = typed_rows.BUSINESS_DATA_HASH",
-        "          and coalesce(current_target.IS_DELETED_FLAG, 'N') = typed_rows.TMS_IS_DELETED_FLAG_CANDIDATE",
-        "          and typed_rows.TMS_VALID_FROM_DATETIME_CANDIDATE >= current_target.VALID_FROM_DATETIME",
-        "    )",
+        *source_change_not_exists_lines,
         "),",
         *_scd2_empty_delete_rows_lines(spec, audit_select_lines),
         "change_rows as (",
@@ -1055,7 +1065,7 @@ def _scd2_target_merge_body_lines(
         "            *,",
         "            row_number() over (",
         f"                partition by {_scd2_version_row_key_columns(spec)}",
-        "                order by case when TMS_IS_EXISTING_TARGET_ROW = 'N' then 0 else 1 end",
+        f"                order by {_scd2_version_row_order_by(spec)}",
         "            ) as TMS_VERSION_ROW_NUMBER",
         "        from version_row_candidates",
         "    )",
@@ -1072,6 +1082,30 @@ def _scd2_target_merge_body_lines(
         "cross join scd2_validation_guard",
         "where scd2_validation_guard.SCD2_VALIDATION_GUARD = 0",
         "",
+    ]
+
+
+def _scd2_source_change_not_exists_lines(spec: dict[str, Any]) -> list[str]:
+    if _change_type(spec) == "scd2_derived":
+        return [
+            "    where not exists (",
+            "        select 1",
+            "        from existing_target_rows as existing_target",
+            f"        where {_business_key_join_condition(spec, 'typed_rows', 'existing_target')}",
+            "          and existing_target.VALID_FROM_DATETIME = typed_rows.TMS_VALID_FROM_DATETIME_CANDIDATE",
+            "          and existing_target.BUSINESS_DATA_HASH = typed_rows.BUSINESS_DATA_HASH",
+            "          and coalesce(existing_target.IS_DELETED_FLAG, 'N') = typed_rows.TMS_IS_DELETED_FLAG_CANDIDATE",
+            "    )",
+        ]
+    return [
+        "    where not exists (",
+        "        select 1",
+        "        from current_target_rows as current_target",
+        f"        where {_business_key_join_condition(spec, 'typed_rows', 'current_target')}",
+        "          and current_target.BUSINESS_DATA_HASH = typed_rows.BUSINESS_DATA_HASH",
+        "          and coalesce(current_target.IS_DELETED_FLAG, 'N') = typed_rows.TMS_IS_DELETED_FLAG_CANDIDATE",
+        "          and typed_rows.TMS_VALID_FROM_DATETIME_CANDIDATE >= current_target.VALID_FROM_DATETIME",
+        "    )",
     ]
 
 
@@ -1116,7 +1150,11 @@ def _scd2_valid_rows_lines(
 
 
 def _scd2_uses_target_merge(spec: dict[str, Any]) -> bool:
-    return _change_type(spec) == "scd2_auto" and not _truncate_before_load_enabled(spec)
+    return _generated_scd2_enabled(spec) and not _truncate_before_load_enabled(spec)
+
+
+def _generated_scd2_enabled(spec: dict[str, Any]) -> bool:
+    return _change_type(spec) in {"scd2_auto", "scd2_derived"}
 
 
 def _scd2_manual_uses_business_key_upsert(spec: dict[str, Any]) -> bool:
@@ -1327,6 +1365,34 @@ def _scd2_version_row_key_columns(spec: dict[str, Any]) -> str:
     return ", ".join([*_business_key_partition_columns(spec), "TMS_VALID_FROM_DATETIME_CANDIDATE"])
 
 
+def _scd2_version_row_order_by(spec: dict[str, Any]) -> str:
+    order_expressions = ["case when TMS_IS_EXISTING_TARGET_ROW = 'N' then 0 else 1 end"]
+    if _change_type(spec) == "scd2_derived":
+        order_expressions.extend(_scd2_deduplicate_order_by_expressions(spec))
+    return ", ".join(order_expressions)
+
+
+def _scd2_deduplicate_order_by_expressions(spec: dict[str, Any]) -> list[str]:
+    deduplicate = _scd_config(spec).get("deduplicate", {})
+    if not isinstance(deduplicate, dict):
+        return []
+    expressions: list[str] = []
+    for order_by in deduplicate.get("order_by", []):
+        if not isinstance(order_by, dict):
+            continue
+        column = order_by.get("column")
+        if not isinstance(column, str):
+            continue
+        direction = str(order_by.get("direction", "desc")).lower()
+        nulls = str(order_by.get("nulls", "last")).lower()
+        if direction not in {"asc", "desc"}:
+            direction = "desc"
+        if nulls not in {"first", "last"}:
+            nulls = "last"
+        expressions.append(f"{_quote_identifier(column)} {direction} nulls {nulls}")
+    return expressions
+
+
 def _scd2_window_and_flag_lines(
     spec: dict[str, Any],
     input_cte: str,
@@ -1362,7 +1428,7 @@ def _scd2_window_and_flag_lines(
         "    select",
         "        *,",
         "        case",
-        f"            when VALID_TO_DATETIME = cast({_sql_string(SCD2_END_OF_TIME)} as timestamp_tz)",
+        f"            when VALID_TO_DATETIME = {_scd2_end_of_time_expression(spec)}",
         "            then 'Y'",
         "            else 'N'",
         "        end as IS_CURRENT_FLAG,",
@@ -1377,6 +1443,15 @@ def _scd2_window_and_flag_lines(
 
 def _scd2_post_load_validation_rows_lines(spec: dict[str, Any]) -> list[str]:
     columns = [*_business_key_partition_columns(spec), "VALID_FROM_DATETIME", "VALID_TO_DATETIME"]
+    if _change_type(spec) == "scd2_derived" and _scd_validation_scope(spec) == "affected_window":
+        return [
+            "post_load_validation_rows as (",
+            "    select",
+            ",\n".join(f"        {_quote_identifier(column)}" for column in columns),
+            "    from flagged_rows",
+            "),",
+        ]
+
     # Incremental SCD2 emits affected keys only. Validation still covers the
     # post-load target as a whole: rewritten keys plus untouched existing keys.
     return [
@@ -1783,7 +1858,7 @@ def _unit_test_rows(
             source_rows.append(source_row)
             expected_rows.append(expected_row)
             transformed_rows.append(transformed_values)
-    if _change_type(spec) == "scd2_auto":
+    if _generated_scd2_enabled(spec):
         _apply_unit_test_scd2_validity(spec, expected_rows, transformed_rows, warnings)
     return source_rows, expected_rows, warnings
 
@@ -1945,6 +2020,14 @@ def _unit_test_valid_from_datetime(
     warnings: list[Diagnostic],
 ) -> datetime | object:
     del transformed_values
+    if _change_type(spec) == "scd2_derived":
+        warnings.append(
+            Diagnostic(
+                "VALID_FROM_DATETIME omitted from unit-test expectation because scd2_derived expressions are SQL-evaluated",
+                "$.control_data.scd.valid_from_datetime.expression",
+            )
+        )
+        return _SKIP_EXPECTED
     value = _insert_time_value(spec)
     if value is None:
         warnings.append(Diagnostic("VALID_FROM_DATETIME omitted from unit-test expectation because insert_time is missing", "$.control_data.scd.insert_time"))
@@ -2083,10 +2166,11 @@ def _parse_transform_failure_expression(
     parsed_expression: str,
 ) -> str:
     transform_type = transform["type"]
+    transform_format = transform["format"]
     return (
         "case "
         f"when {input_expression} is not null and {parsed_expression} is null "
-        f"then {_sql_string(f'field `{field_id}` does not match {transform_type} format `{transform['format']}`')} "
+        f"then {_sql_string(f'field `{field_id}` does not match {transform_type} format `{transform_format}`')} "
         "end"
     )
 
@@ -2243,17 +2327,19 @@ def _field_failure_expressions(field: dict[str, Any]) -> list[str]:
             continue
         rule_type = rule.get("type")
         if rule_type == "min_length":
+            rule_value = rule["value"]
             failures.append(
                 "case "
-                f"when {expression} is not null and length({expression}) < {int(rule['value'])} "
-                f"then {_sql_string(f'field `{field_id}` length is less than {rule['value']}')} "
+                f"when {expression} is not null and length({expression}) < {int(rule_value)} "
+                f"then {_sql_string(f'field `{field_id}` length is less than {rule_value}')} "
                 "end"
             )
         elif rule_type == "max_length":
+            rule_value = rule["value"]
             failures.append(
                 "case "
-                f"when {expression} is not null and length({expression}) > {int(rule['value'])} "
-                f"then {_sql_string(f'field `{field_id}` length is greater than {rule['value']}')} "
+                f"when {expression} is not null and length({expression}) > {int(rule_value)} "
+                f"then {_sql_string(f'field `{field_id}` length is greater than {rule_value}')} "
                 "end"
             )
         elif rule_type == "regex":
@@ -2273,18 +2359,20 @@ def _field_failure_expressions(field: dict[str, Any]) -> list[str]:
             )
         elif rule_type == "min_value":
             numeric_expression = _try_cast_expression(expression, "number")
+            rule_value = rule["value"]
             failures.append(
                 "case "
-                f"when {expression} is not null and {numeric_expression} < {rule['value']} "
-                f"then {_sql_string(f'field `{field_id}` is less than {rule['value']}')} "
+                f"when {expression} is not null and {numeric_expression} < {rule_value} "
+                f"then {_sql_string(f'field `{field_id}` is less than {rule_value}')} "
                 "end"
             )
         elif rule_type == "max_value":
             numeric_expression = _try_cast_expression(expression, "number")
+            rule_value = rule["value"]
             failures.append(
                 "case "
-                f"when {expression} is not null and {numeric_expression} > {rule['value']} "
-                f"then {_sql_string(f'field `{field_id}` is greater than {rule['value']}')} "
+                f"when {expression} is not null and {numeric_expression} > {rule_value} "
+                f"then {_sql_string(f'field `{field_id}` is greater than {rule_value}')} "
                 "end"
             )
         elif rule_type == "precision":
@@ -2545,6 +2633,9 @@ def _scd_config(spec: dict[str, Any]) -> dict[str, Any]:
 
 
 def _valid_from_datetime_config(spec: dict[str, Any]) -> dict[str, Any]:
+    if _change_type(spec) == "scd2_derived":
+        config = _scd_config(spec).get("valid_from_datetime", {})
+        return config if isinstance(config, dict) else {}
     value = _insert_time_value(spec)
     return {"value": value} if value is not None else {}
 
@@ -2554,6 +2645,8 @@ def _insert_time_value(spec: dict[str, Any]) -> Any:
 
 
 def _scd2_auto_from_sot(spec: dict[str, Any]) -> bool:
+    if _change_type(spec) == "scd2_derived":
+        return False
     return _scd_config(spec).get("scd2_auto_from_sot", True) is not False
 
 
@@ -2583,6 +2676,11 @@ def _scd1_delete_filter_lines(spec: dict[str, Any]) -> list[str]:
 
 
 def _is_deleted_flag_expression(spec: dict[str, Any]) -> str:
+    if _change_type(spec) == "scd2_derived":
+        config = _scd_config(spec).get("deleted_flag", {})
+        if isinstance(config, dict) and config.get("mode", "fixed") == "fixed":
+            return _sql_scalar(config.get("value", "N"))
+        return "'N'"
     mode = _delete_detection_mode(spec)
     if mode == "field":
         return f"case when {_delete_detection_field_condition(spec)} then 'Y' else 'N' end"
@@ -2597,20 +2695,47 @@ def _delete_detection_field_condition(spec: dict[str, Any]) -> str:
 
 def _valid_from_datetime_expression(spec: dict[str, Any]) -> str:
     config = _valid_from_datetime_config(spec)
+    if _change_type(spec) == "scd2_derived" and "expression" in config:
+        return f"cast({config['expression']} as timestamp_tz)"
     return f"cast({_sql_scalar(config['value'])} as timestamp_tz)"
 
 
 def _valid_to_datetime_expression(spec: dict[str, Any]) -> str:
     # Validity windows are inclusive, so an auto-SCD2 row ends one timestamp tick
     # before the next version starts.
+    offset = _valid_to_datetime_offset(spec)
     return (
         "coalesce("
-        "dateadd(nanosecond, -1, "
+        f"dateadd({offset['unit']}, {offset['value']}, "
         f"lead(VALID_FROM_DATETIME) over ({_scd2_window_clause(spec, 'VALID_FROM_DATETIME')}))"
         ", "
-        f"cast({_sql_string(SCD2_END_OF_TIME)} as timestamp_tz)"
+        f"{_scd2_end_of_time_expression(spec)}"
         ")"
     )
+
+
+def _valid_to_datetime_offset(spec: dict[str, Any]) -> dict[str, Any]:
+    config = _scd_config(spec).get("valid_to_datetime", {})
+    if isinstance(config, dict):
+        offset = config.get("offset", {})
+        if isinstance(offset, dict):
+            unit = str(offset.get("unit", "nanosecond"))
+            value = offset.get("value", -1)
+            if unit in {"nanosecond", "second"} and isinstance(value, int):
+                return {"unit": unit, "value": value}
+    return {"unit": "nanosecond", "value": -1}
+
+
+def _scd2_end_of_time_expression(spec: dict[str, Any]) -> str:
+    config = _scd_config(spec).get("valid_to_datetime", {})
+    if isinstance(config, dict) and config.get("end_of_time") is not None:
+        return f"cast({_sql_string(str(config['end_of_time']))} as timestamp_tz)"
+    return f"cast({_sql_string(SCD2_END_OF_TIME)} as timestamp_tz)"
+
+
+def _scd_validation_scope(spec: dict[str, Any]) -> str:
+    value = _scd_config(spec).get("validation_scope", "affected_window")
+    return str(value) if value in {"affected_window", "full_target"} else "affected_window"
 
 
 def _scd2_window_clause(spec: dict[str, Any], order_column: str) -> str:
@@ -2655,7 +2780,7 @@ def _business_key_enabled(spec: dict[str, Any]) -> bool:
 
 
 def _business_key_required_for_generation(spec: dict[str, Any]) -> bool:
-    return _business_key_enabled(spec) or _change_type(spec) == "scd2_auto"
+    return _business_key_enabled(spec) or _generated_scd2_enabled(spec)
 
 
 def _business_key_select_lines(spec: dict[str, Any]) -> list[str]:

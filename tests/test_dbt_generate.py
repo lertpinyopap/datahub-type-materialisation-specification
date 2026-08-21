@@ -1091,7 +1091,7 @@ customer_status_key = CustomerStatusKey()
     assert result.errors == []
     source_sql = (output_dir / "models" / "generated" / "customer__source.sql").read_text(encoding="utf-8")
     assert "materialized='view'" in source_sql
-    assert 'LOOKUP_CUSTOMER_STATUS_KEY."CUSTOMER_STATUS_KEY" as CUSTOMER_STATUS_KEY' in source_sql
+    assert "LOOKUP_CUSTOMER_STATUS_KEY.CUSTOMER_STATUS_KEY as CUSTOMER_STATUS_KEY" in source_sql
     assert '{{ customer_status_key(output_column="customer_status_key", ref_alias="LOOKUP_CUSTOMER_STATUS_KEY", reference_type="CUSTOMER_STATUS", source_code_expression="source_query.STATUS_CODE", source_system="V10") }}' in source_sql
     macro_sql = (output_dir / "macros" / "generated" / "customer_status_key.sql").read_text(encoding="utf-8")
     assert "{% macro customer_status_key(" in macro_sql

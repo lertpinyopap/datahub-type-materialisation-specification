@@ -1,0 +1,36 @@
+name: scd2_derived_customer_bronze_silver_gold
+description: Derived SCD2 windows are built from silver customer effective dates.
+spec: spec/customer_profile.yaml
+target:
+  expected_columns:
+    - CUSTOMER_ID
+    - ACCOUNT_ID
+    - CUSTOMER_STATUS_CODE
+    - CUSTOMER_NAME
+    - EMAIL_ADDRESS
+    - VALID_FROM_DATETIME
+    - VALID_TO_DATETIME
+    - IS_CURRENT_FLAG
+    - IS_DELETED_FLAG
+  order_by:
+    - CUSTOMER_ID
+    - ACCOUNT_ID
+    - VALID_FROM_DATETIME
+checks:
+  - Load 001 creates initial gold rows from silver customer source rows.
+  - Load 002 reruns unchanged silver rows and should not create duplicate SCD2 versions.
+  - Load 003 adds a historical backfill for C001 and recalculates only that affected key window.
+  - Load 004 adds a forward change for C001 and leaves C002 current and untouched.
+loads:
+  - name: load_001_initial_gold
+    source_csv: samples/load_001_customer_silver.csv
+    expected_target: data/expected_after_load_001.csv
+  - name: load_002_unchanged_rerun
+    source_csv: samples/load_002_customer_silver_unchanged.csv
+    expected_target: data/expected_after_load_002.csv
+  - name: load_003_historical_backfill
+    source_csv: samples/load_003_customer_silver_history.csv
+    expected_target: data/expected_after_load_003.csv
+  - name: load_004_forward_change
+    source_csv: samples/load_004_customer_silver_forward.csv
+    expected_target: data/expected_after_load_004.csv

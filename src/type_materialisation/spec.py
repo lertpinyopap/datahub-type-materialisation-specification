@@ -486,6 +486,35 @@ def _validate_scd(spec: dict[str, Any], *, abstract: bool) -> list[Diagnostic]:
         if not isinstance(scd, dict) or "insert_time" not in scd:
             diagnostics.append(Diagnostic("`scd.insert_time` is required when `change_type` is scd2_auto", "$.control_data.scd.insert_time"))
 
+    if change_type == "scd2_derived":
+        if not isinstance(scd, dict):
+            diagnostics.append(Diagnostic("`scd` is required when `change_type` is scd2_derived", "$.control_data.scd"))
+        else:
+            valid_from_datetime = scd.get("valid_from_datetime")
+            if not isinstance(valid_from_datetime, dict) or not valid_from_datetime.get("expression"):
+                diagnostics.append(
+                    Diagnostic(
+                        "`scd.valid_from_datetime.expression` is required when `change_type` is scd2_derived",
+                        "$.control_data.scd.valid_from_datetime.expression",
+                    )
+                )
+            valid_to_datetime = scd.get("valid_to_datetime")
+            if isinstance(valid_to_datetime, dict) and valid_to_datetime.get("mode", "next_valid_from") != "next_valid_from":
+                diagnostics.append(
+                    Diagnostic(
+                        "`scd.valid_to_datetime.mode` must be next_valid_from for scd2_derived",
+                        "$.control_data.scd.valid_to_datetime.mode",
+                    )
+                )
+            deleted_flag = scd.get("deleted_flag")
+            if isinstance(deleted_flag, dict) and deleted_flag.get("mode", "fixed") != "fixed":
+                diagnostics.append(
+                    Diagnostic(
+                        "`scd.deleted_flag.mode` must be fixed for scd2_derived",
+                        "$.control_data.scd.deleted_flag.mode",
+                    )
+                )
+
     if change_type == "scd2_manual":
         if isinstance(scd, dict):
             invalid_keys = set(scd) - {"update_mode", "update_key"}
@@ -536,14 +565,14 @@ def _validate_scd(spec: dict[str, Any], *, abstract: bool) -> list[Diagnostic]:
                 "$.control_data.scd.scd2_validation",
             )
         )
-    if change_type in {"scd1", "scd2_auto"} and "update_mode" in scd:
+    if change_type in {"scd1", "scd2_auto", "scd2_derived"} and "update_mode" in scd:
         diagnostics.append(
             Diagnostic(
                 "`update_mode` is only valid when `change_type` is scd2_manual",
                 "$.control_data.scd.update_mode",
             )
         )
-    if change_type in {"scd1", "scd2_auto"} and "update_key" in scd:
+    if change_type in {"scd1", "scd2_auto", "scd2_derived"} and "update_key" in scd:
         diagnostics.append(
             Diagnostic(
                 "`update_key` is only valid when `change_type` is scd2_manual",
@@ -552,7 +581,7 @@ def _validate_scd(spec: dict[str, Any], *, abstract: bool) -> list[Diagnostic]:
         )
     delete_detection = scd.get("delete_detection")
     if isinstance(delete_detection, dict):
-        if change_type == "scd2_auto":
+        if change_type in {"scd2_auto", "scd2_derived"}:
             diagnostics.append(
                 Diagnostic(
                     "`delete_detection.mode = field` is only valid when `change_type` is scd1",
@@ -708,7 +737,7 @@ def _business_key_enabled(spec: dict[str, Any]) -> bool:
 
 
 def _business_key_required(spec: dict[str, Any]) -> bool:
-    return _business_key_enabled(spec) or _change_type(spec) == "scd2_auto"
+    return _business_key_enabled(spec) or _change_type(spec) in {"scd2_auto", "scd2_derived"}
 
 
 def _surrogate_key_enabled(spec: dict[str, Any]) -> bool:

@@ -1,0 +1,32 @@
+name: scd2_derived_source_current_flag_preserved
+description: Derived SCD2 keeps older V2 rows historical when V10 already owns the latest effective window.
+spec: spec/customer_profile.yaml
+target:
+  expected_columns:
+    - CUSTOMER_ID
+    - ACCOUNT_ID
+    - SOURCE_SYSTEM
+    - SOURCE_CURRENT_FLAG
+    - CUSTOMER_STATUS_CODE
+    - CUSTOMER_NAME
+    - EMAIL_ADDRESS
+    - VALID_FROM_DATETIME
+    - VALID_TO_DATETIME
+    - IS_CURRENT_FLAG
+    - IS_DELETED_FLAG
+  order_by:
+    - CUSTOMER_ID
+    - ACCOUNT_ID
+    - VALID_FROM_DATETIME
+checks:
+  - V10 loads first and is current.
+  - V2 loads later with an older effective datetime and source current flag N.
+  - V2 stays historical because V10 has the latest effective date for the shared business key.
+loads:
+  - name: load_001_v10_current
+    source_csv: samples/load_001_customer_v10.csv
+    expected_target: data/expected_after_load_001.csv
+  - name: load_002_v2_historical
+    source_csv: samples/load_002_customer_v2_historical.csv
+    expected_target: data/expected_after_load_002.csv
+

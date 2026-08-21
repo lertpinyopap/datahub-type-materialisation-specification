@@ -249,8 +249,9 @@ allow this default to be overridden at runtime with the `tms_staging_schema`
 variable.
 
 `scd` configures delete handling for SCD1, update behavior for `scd2_manual`,
-and generated validity-window behavior and protected full-history rebuilds for
-`scd2_auto`.
+generated validity-window behavior and protected full-history rebuilds for
+`scd2_auto`, and source-effective-date validity-window derivation for
+`scd2_derived`.
 
 `quarantine` optionally describes the quarantine table used when
 `failure_mode` is `quarantine_row`.
@@ -274,6 +275,8 @@ and generated validity-window behavior and protected full-history rebuilds for
 - `scd2_manual`: copy SCD2 validity and state fields directly from the source.
 - `scd2_auto`: preserve historical versions using implementation-managed
   validity windows.
+- `scd2_derived`: preserve historical versions using source-derived effective
+  datetimes and implementation-managed SCD2 metadata.
 
 Sample: control data.
 
@@ -699,9 +702,10 @@ value ::= scalar
 ```
 
 SCD configuration is used for delete handling when `change_type` is `scd1`, for
-manual update behavior when `change_type` is `scd2_manual`, and for generated
+manual update behavior when `change_type` is `scd2_manual`, for generated
 validity-window behavior and protected full-history rebuilds when `change_type`
-is `scd2_auto`.
+is `scd2_auto`, and for source-effective-date validity-window derivation when
+`change_type` is `scd2_derived`.
 
 For `scd1`, implementations materialise the current typed state without SCD2
 history metadata. SCD1 may use `delete_detection.mode: field` to physically
@@ -838,6 +842,51 @@ versions and its `business_data_hash` matches the adjacent previous or next
 version, implementations must update the affected surrounding validity windows
 rather than leaving adjacent duplicate business-data versions.
 
+For `scd2_derived`, implementations preserve historical versions and generate
+the same SCD2 target metadata columns as `scd2_auto`, but the proposed
+`valid_from_datetime` comes from `scd.valid_from_datetime.expression` rather than
+from load `insert_time`.
+
+Generated SCD metadata columns for `scd2_derived` are not declared in
+`target.fields`. Target field ids must not use generated SCD metadata column
+names.
+
+`scd2_derived` requires:
+
+- `scd.valid_from_datetime.expression`: SQL expression evaluated against the
+  generated source rows, such as `coalesce(updated_datetime, created_datetime)`.
+- `business_key.fields`: target fields used to partition customer/entity
+  history.
+- `business_data_hash.fields`: source-derived target fields used to detect
+  business-value changes for a version.
+
+`scd2_derived` supports:
+
+- `derivation_scope: affected_keys`: recalculate only business keys affected by
+  incoming changed rows.
+- `validation_scope: affected_window`: validate only the post-load window being
+  rewritten for the affected keys.
+- `window_strategy: previous_and_next`: include the previous and next existing
+  versions when recalculating an affected window.
+- `valid_to_datetime.mode: next_valid_from`: derive each row end from the next
+  later version for the same business key.
+- `valid_to_datetime.offset`: subtract the configured timestamp tick, typically
+  `{unit: nanosecond, value: -1}`.
+- `current_flag.mode: latest_per_business_key`: mark the latest effective
+  version as current.
+- `deleted_flag.mode: fixed`: use a fixed deleted flag value, normally `N`.
+- `deduplicate.order_by`: choose a deterministic winner when multiple incoming
+  rows have the same business key and effective datetime.
+
+When older source-system history such as V2 is loaded after newer V10 data for
+the same business key, `scd2_derived` keeps V2 historical only when its derived
+`valid_from_datetime` is older than the V10 version. If V2 and V10 need
+independent current rows, `SOURCE_SYSTEM` must be part of `business_key.fields`.
+
+The current specification does not define a source-current-flag override mode
+for `scd2_derived`; generated `is_current_flag` is derived from the latest
+effective version per business key.
+
 Sample: SCD1 field delete detection.
 
 ```yaml
@@ -882,6 +931,40 @@ control_data:
     insert_time: "{{ var('insert_time') }}"
     scd2_auto_from_sot: true
     scd2_validation: continuous
+```
+
+Sample: SCD2 derived change handling.
+
+```yaml
+control_data:
+  change_type: scd2_derived
+  business_key:
+    fields:
+      - customer_id
+      - account_id
+  business_data_hash:
+    business_data_hash_mode: include
+    fields:
+      - customer_status_code
+      - customer_name
+      - email_address
+  scd:
+    derivation_scope: affected_keys
+    validation_scope: affected_window
+    window_strategy: previous_and_next
+    valid_from_datetime:
+      expression: coalesce(updated_datetime, created_datetime)
+    valid_to_datetime:
+      mode: next_valid_from
+      offset:
+        unit: nanosecond
+        value: -1
+      end_of_time: "9999-12-31 23:59:59 +00:00"
+    current_flag:
+      mode: latest_per_business_key
+    deleted_flag:
+      mode: fixed
+      value: "N"
 ```
 
 ## 6. Source

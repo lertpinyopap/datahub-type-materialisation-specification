@@ -52,6 +52,18 @@ Materialisation Specification.
 - Guarded full rebuilds for `truncate_before_load: true`, requiring
   `allow_truncate: true`.
 - SCD2 manual pass-through fields for source-managed validity and state values.
+- SCD2 derived target-aware incremental merge generation for table sources where
+  source effective timestamps drive generated SCD2 windows.
+- SCD2 derived affected-key derivation with affected-window validation using the
+  previous-and-next window strategy.
+- SCD2 derived generated metadata columns:
+  `is_current_flag`, `is_deleted_flag`, `valid_from_datetime`,
+  `valid_to_datetime`, `business_data_hash`, and audit fields.
+- SCD2 derived same-effective-datetime deduplication through
+  `scd.deduplicate.order_by`.
+- SCD2 derived integration scenarios for unchanged reruns, historical backfills,
+  out-of-order Bronze/Silver/Gold loads, middle-row insertion, and V2/V10
+  historical loads.
 - SCD1 hard-delete filtering for `delete_detection.mode = field`.
 
 ## Not Yet Implemented
@@ -59,3 +71,5 @@ Materialisation Specification.
 - Generated Snowflake file-format objects for CSV stages.
 - Python upload of local CSV files to Snowflake stages.
 - Multi-error quarantine output.
+- SCD2 derived source-current-flag override mode. Current generated
+  `is_current_flag` is derived from the latest effective window per business key.

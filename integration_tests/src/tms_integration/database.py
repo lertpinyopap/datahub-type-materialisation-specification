@@ -277,7 +277,7 @@ def _target_column_types(spec_path: Path) -> dict[str, str]:
 
 
 def _generated_metadata_field_types_for_target(spec: dict[str, Any]) -> dict[str, str]:
-    if _change_type(spec) == "scd2_auto":
+    if _change_type(spec) in {"scd2_auto", "scd2_derived"}:
         return dict(GENERATED_METADATA_FIELD_TYPES)
     return {
         name: data_type

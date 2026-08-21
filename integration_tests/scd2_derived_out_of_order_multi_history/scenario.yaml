@@ -1,0 +1,33 @@
+name: scd2_derived_out_of_order_multi_history
+description: Derived SCD2 recalculates windows when Bronze, Silver, and Gold arrive out of order.
+spec: spec/customer_profile.yaml
+target:
+  expected_columns:
+    - CUSTOMER_ID
+    - ACCOUNT_ID
+    - CUSTOMER_STATUS_CODE
+    - CUSTOMER_NAME
+    - EMAIL_ADDRESS
+    - VALID_FROM_DATETIME
+    - VALID_TO_DATETIME
+    - IS_CURRENT_FLAG
+    - IS_DELETED_FLAG
+  order_by:
+    - CUSTOMER_ID
+    - ACCOUNT_ID
+    - VALID_FROM_DATETIME
+checks:
+  - Gold can arrive before older Bronze and Silver source states.
+  - Each later backfill rewrites the affected key windows only.
+  - The final current row remains the latest effective Gold state.
+loads:
+  - name: load_001_gold_first
+    source_csv: samples/load_001_customer_gold.csv
+    expected_target: data/expected_after_load_001.csv
+  - name: load_002_bronze_backfill
+    source_csv: samples/load_002_customer_bronze.csv
+    expected_target: data/expected_after_load_002.csv
+  - name: load_003_silver_middle_backfill
+    source_csv: samples/load_003_customer_silver.csv
+    expected_target: data/expected_after_load_003.csv
+

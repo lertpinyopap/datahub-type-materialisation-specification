@@ -1,0 +1,2 @@
+customer_id,account_id,customer_status_code,customer_name,email_address,created_datetime,updated_datetime
+C001,A100,PENDING,Ada Example,ada.pending@example.com,2023-01-01,2024-01-01

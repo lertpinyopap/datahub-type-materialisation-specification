@@ -212,7 +212,7 @@
         },
         "change_type": {
           "type": "string",
-          "enum": ["scd1", "scd2_manual", "scd2_auto"]
+          "enum": ["scd1", "scd2_manual", "scd2_auto", "scd2_derived"]
         },
         "truncate_before_load": {
           "type": "boolean",
@@ -329,6 +329,36 @@
           "enum": ["continuous", "sparse"],
           "default": "continuous"
         },
+        "derivation_scope": {
+          "type": "string",
+          "enum": ["affected_keys"],
+          "default": "affected_keys"
+        },
+        "validation_scope": {
+          "type": "string",
+          "enum": ["affected_window", "full_target"],
+          "default": "affected_window"
+        },
+        "window_strategy": {
+          "type": "string",
+          "enum": ["previous_and_next"],
+          "default": "previous_and_next"
+        },
+        "valid_from_datetime": {
+          "$ref": "#/$defs/scdValidFromDatetime"
+        },
+        "valid_to_datetime": {
+          "$ref": "#/$defs/scdValidToDatetime"
+        },
+        "current_flag": {
+          "$ref": "#/$defs/scdCurrentFlag"
+        },
+        "deleted_flag": {
+          "$ref": "#/$defs/scdDeletedFlag"
+        },
+        "deduplicate": {
+          "$ref": "#/$defs/scdDeduplicate"
+        },
         "update_mode": {
           "type": "string",
           "enum": ["append_only", "upsert"],
@@ -336,6 +366,110 @@
         },
         "update_key": {
           "$ref": "#/$defs/scdUpdateKey"
+        }
+      }
+    },
+    "scdValidFromDatetime": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["expression"],
+      "properties": {
+        "expression": {
+          "$ref": "#/$defs/templatedString"
+        }
+      }
+    },
+    "scdValidToDatetime": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "mode": {
+          "type": "string",
+          "enum": ["next_valid_from"],
+          "default": "next_valid_from"
+        },
+        "offset": {
+          "$ref": "#/$defs/scdDatetimeOffset"
+        },
+        "end_of_time": {
+          "$ref": "#/$defs/templatedString"
+        }
+      }
+    },
+    "scdDatetimeOffset": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["unit", "value"],
+      "properties": {
+        "unit": {
+          "type": "string",
+          "enum": ["nanosecond", "second"]
+        },
+        "value": {
+          "type": "integer"
+        }
+      }
+    },
+    "scdCurrentFlag": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "mode": {
+          "type": "string",
+          "enum": ["latest_per_business_key"],
+          "default": "latest_per_business_key"
+        }
+      }
+    },
+    "scdDeletedFlag": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "mode": {
+          "type": "string",
+          "enum": ["fixed"],
+          "default": "fixed"
+        },
+        "value": {
+          "$ref": "#/$defs/scalarValue"
+        }
+      }
+    },
+    "scdDeduplicate": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "partition_by": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/specificationId"
+          }
+        },
+        "order_by": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/scdDeduplicateOrderBy"
+          }
+        }
+      }
+    },
+    "scdDeduplicateOrderBy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["column"],
+      "properties": {
+        "column": {
+          "$ref": "#/$defs/specificationId"
+        },
+        "direction": {
+          "type": "string",
+          "enum": ["asc", "desc"],
+          "default": "desc"
+        },
+        "nulls": {
+          "type": "string",
+          "enum": ["first", "last"],
+          "default": "last"
         }
       }
     },
