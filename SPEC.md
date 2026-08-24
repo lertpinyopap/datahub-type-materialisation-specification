@@ -195,7 +195,7 @@ control_data ::=
 
 materialisation_type ::= table
 failure_mode ::= fail_load | quarantine_row
-change_type ::= scd1 | scd2_manual | scd2_auto
+change_type ::= scd1 | scd2_manual | scd2_auto | scd2_derived
 truncate_before_load ::= true | false
 business_key ::= business_key_config
 skip_business_key ::= true | false
@@ -671,7 +671,7 @@ control_data:
 ### 5.6 Slowly Changing Dimensions
 
 ```text
-scd_config ::= scd1_scd_config | scd2_manual_scd_config | scd2_auto_scd_config
+scd_config ::= scd1_scd_config | scd2_manual_scd_config | scd2_auto_scd_config | scd2_derived_scd_config
 
 scd1_scd_config ::=
   delete_detection?
@@ -685,6 +685,16 @@ scd2_auto_scd_config ::=
   scd2_auto_from_sot?
   scd2_validation?
 
+scd2_derived_scd_config ::=
+  valid_from_datetime
+  valid_to_datetime?
+  current_flag?
+  deleted_flag?
+  derivation_scope?
+  validation_scope?
+  window_strategy?
+  deduplicate?
+
 delete_detection ::=
   mode: field
     field
@@ -693,6 +703,10 @@ delete_detection ::=
 insert_time ::= scalar
 scd2_auto_from_sot ::= true | false
 scd2_validation ::= continuous | sparse
+valid_from_datetime ::=
+  source_column | expression
+source_column ::= target field id or generated source alias
+expression ::= SQL expression evaluated against generated source rows
 update_mode ::= append_only | upsert
 update_key ::=
   fields[]
@@ -844,8 +858,8 @@ rather than leaving adjacent duplicate business-data versions.
 
 For `scd2_derived`, implementations preserve historical versions and generate
 the same SCD2 target metadata columns as `scd2_auto`, but the proposed
-`valid_from_datetime` comes from `scd.valid_from_datetime.expression` rather than
-from load `insert_time`.
+`valid_from_datetime` comes from `scd.valid_from_datetime.source_column` or
+`scd.valid_from_datetime.expression` rather than from load `insert_time`.
 
 Generated SCD metadata columns for `scd2_derived` are not declared in
 `target.fields`. Target field ids must not use generated SCD metadata column
@@ -853,12 +867,18 @@ names.
 
 `scd2_derived` requires:
 
-- `scd.valid_from_datetime.expression`: SQL expression evaluated against the
-  generated source rows, such as `coalesce(updated_datetime, created_datetime)`.
+- `scd.valid_from_datetime.source_column` or
+  `scd.valid_from_datetime.expression`: effective start value evaluated against
+  the generated source rows.
 - `business_key.fields`: target fields used to partition customer/entity
   history.
 - `business_data_hash.fields`: source-derived target fields used to detect
   business-value changes for a version.
+
+Prefer `source_column` when the source query already projects the business
+effective start as a named column. Use `expression` when the effective start
+needs inline SQL over generated source fields. `expression` remains supported
+for backward compatibility.
 
 `scd2_derived` supports:
 
@@ -953,7 +973,7 @@ control_data:
     validation_scope: affected_window
     window_strategy: previous_and_next
     valid_from_datetime:
-      expression: coalesce(updated_datetime, created_datetime)
+      source_column: source_effective_from_datetime
     valid_to_datetime:
       mode: next_valid_from
       offset:
@@ -965,6 +985,23 @@ control_data:
     deleted_flag:
       mode: fixed
       value: "N"
+```
+
+Sample: SCD2 derived effective date with an inline expression.
+
+```yaml
+control_data:
+  change_type: scd2_derived
+  business_key:
+    fields:
+      - customer_id
+  business_data_hash:
+    business_data_hash_mode: include
+    fields:
+      - customer_status_code
+  scd:
+    valid_from_datetime:
+      expression: coalesce(updated_datetime, created_datetime)
 ```
 
 ## 6. Source
@@ -1224,12 +1261,14 @@ target ::=
   database?
   schema
   table_name?
+  tags?
   fields[]
 
 id ::= identifier
 database ::= string
 schema ::= string
 table_name ::= string
+tags ::= map<string, scalar>
 ```
 
 `target` describes the typed data produced by the materialisation.
@@ -1243,6 +1282,12 @@ context resolves the target database.
 
 `target.table_name` is the target table name. If omitted, implementations
 should use `target.id` as the table name.
+
+`target.tags` is optional metadata for target-level classification, governance,
+or platform policy integration. dbt implementations that support Snowflake tags
+should apply these as table tags after the target relation exists. Tags do not
+control generated surrogate keys, generated business keys, or
+`business_data_hash`; those columns are controlled by `control_data`.
 
 `target.fields` must contain at least one field.
 
@@ -1295,6 +1340,8 @@ target:
   id: account
   database: analytics
   schema: business
+  tags:
+    DATA_CLASSIFICATION: CONFIDENTIAL
   fields:
     - id: account_id
       source:
@@ -1312,11 +1359,13 @@ field ::=
   data_type
   transforms?
   nullable?
+  tags?
   unique?
   validations?
 
 id ::= identifier
 nullable ::= true | false
+tags ::= map<string, scalar>
 unique ::= true | false
 ```
 
@@ -1330,6 +1379,10 @@ within the materialised source set. Null values are not considered duplicates.
 Uniqueness is an automatically applied load-time validation for that field and
 is handled according to `failure_mode`.
 
+`field.tags` is optional metadata for column-level classification, governance,
+or platform policy integration. dbt implementations that support Snowflake tags
+should apply these as column tags after the target relation exists.
+
 Sample: target field.
 
 ```yaml
@@ -1342,6 +1395,9 @@ fields:
     transforms:
       - type: trim
     nullable: false
+    tags:
+      DATA_CLASSIFICATION: PII
+      DATA_CATEGORY: IDENTIFIER
     unique: true
 ```
 

@@ -1684,6 +1684,57 @@ def test_scd2_derived_exposes_effective_date_in_staging_only(tmp_path: Path) -> 
     assert "cast(SOURCE_EFFECTIVE_FROM_DATETIME as timestamp_tz) as TMS_VALID_FROM_DATETIME_CANDIDATE" in model_sql
 
 
+def test_scd2_derived_valid_from_source_column_is_supported(tmp_path: Path) -> None:
+    result, output_dir = generate(
+        tmp_path,
+        """
+        id: account_table
+        control_data:
+          change_type: scd2_derived
+          business_key:
+            fields:
+              - account_id
+          business_data_hash:
+            business_data_hash_mode: include
+            fields:
+              - account_name
+          scd:
+            valid_from_datetime:
+              source_column: SOURCE_EFFECTIVE_FROM_DATETIME
+            deduplicate:
+              order_by:
+                - column: SOURCE_EFFECTIVE_FROM_DATETIME
+        source:
+          format: table
+          query: |
+            select
+              ACCOUNT_ID as account_id,
+              ACCOUNT_NAME as account_name,
+              CREATED_AT as SOURCE_EFFECTIVE_FROM_DATETIME
+            from RAW.ACCOUNT
+        target:
+          id: account
+          schema: business
+          fields:
+            - id: account_id
+              source:
+                column: account_id
+              data_type: varchar(20)
+            - id: account_name
+              source:
+                column: account_name
+              data_type: varchar(255)
+        """,
+    )
+
+    assert result.errors == []
+    source_sql = (output_dir / "models" / "generated" / "account__source.sql").read_text(encoding="utf-8")
+    model_sql = (output_dir / "models" / "generated" / "account.sql").read_text(encoding="utf-8")
+    assert "source_query.SOURCE_EFFECTIVE_FROM_DATETIME as SOURCE_EFFECTIVE_FROM_DATETIME" in source_sql
+    assert "cast(SOURCE_EFFECTIVE_FROM_DATETIME as timestamp_tz) as TMS_VALID_FROM_DATETIME_CANDIDATE" in model_sql
+    assert "TMS_VALID_FROM_DATETIME_CANDIDATE desc nulls last" in model_sql
+
+
 def test_scd2_auto_sparse_validation_allows_gaps(tmp_path: Path) -> None:
     result, output_dir = generate(
         tmp_path,

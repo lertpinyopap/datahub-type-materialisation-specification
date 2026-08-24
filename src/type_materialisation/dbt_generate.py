@@ -195,11 +195,13 @@ def _unsupported_for_initial_dbt_generation(spec: dict[str, Any]) -> list[Diagno
             )
     if _change_type(spec) == "scd2_derived":
         valid_from_datetime = scd.get("valid_from_datetime")
-        if not isinstance(valid_from_datetime, dict) or not valid_from_datetime.get("expression"):
+        if not isinstance(valid_from_datetime, dict) or not (
+            valid_from_datetime.get("source_column") or valid_from_datetime.get("expression")
+        ):
             diagnostics.append(
                 Diagnostic(
-                    "`scd.valid_from_datetime.expression` is required when `change_type` is scd2_derived",
-                    "$.control_data.scd.valid_from_datetime.expression",
+                    "`scd.valid_from_datetime.source_column` or `expression` is required when `change_type` is scd2_derived",
+                    "$.control_data.scd.valid_from_datetime",
                 )
             )
         if "delete_detection" in scd:
@@ -491,14 +493,18 @@ def _write_table_source_model(spec: dict[str, Any], options: GenerateDbtOptions,
 
 
 def _scd2_derived_source_helper_lines(spec: dict[str, Any]) -> list[str]:
-    """Expose simple SCD2 derived expressions in staging, not in the final target."""
+    """Expose simple SCD2 derived source aliases in staging, not in the final target."""
     if _change_type(spec) != "scd2_derived":
         return []
     config = _scd_config(spec).get("valid_from_datetime", {})
-    expression = config.get("expression") if isinstance(config, dict) else None
-    if not isinstance(expression, str) or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_$]*", expression.strip()):
+    helper = (
+        config.get("source_column") or config.get("expression")
+        if isinstance(config, dict)
+        else None
+    )
+    if not isinstance(helper, str) or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_$]*", helper.strip()):
         return []
-    helper_name = expression.strip()
+    helper_name = helper.strip()
     source_columns = {case_key(column) for column in _source_output_columns(spec)}
     if case_key(helper_name) in source_columns:
         return []
@@ -1398,8 +1404,8 @@ def _scd2_deduplicate_order_by_expressions(spec: dict[str, Any]) -> list[str]:
         return []
     expressions: list[str] = []
     valid_from_config = _scd_config(spec).get("valid_from_datetime", {})
-    valid_from_expression = (
-        valid_from_config.get("expression")
+    valid_from_reference = (
+        valid_from_config.get("source_column") or valid_from_config.get("expression")
         if isinstance(valid_from_config, dict)
         else None
     )
@@ -1416,8 +1422,8 @@ def _scd2_deduplicate_order_by_expressions(spec: dict[str, Any]) -> list[str]:
         if nulls not in {"first", "last"}:
             nulls = "last"
         if (
-            isinstance(valid_from_expression, str)
-            and case_key(column) == case_key(valid_from_expression)
+            isinstance(valid_from_reference, str)
+            and case_key(column) == case_key(valid_from_reference)
         ):
             column = "TMS_VALID_FROM_DATETIME_CANDIDATE"
         expressions.append(f"{_quote_identifier(column)} {direction} nulls {nulls}")
@@ -2768,6 +2774,8 @@ def _delete_detection_field_condition(spec: dict[str, Any]) -> str:
 
 def _valid_from_datetime_expression(spec: dict[str, Any]) -> str:
     config = _valid_from_datetime_config(spec)
+    if _change_type(spec) == "scd2_derived" and "source_column" in config:
+        return f"cast({_quote_identifier(str(config['source_column']))} as timestamp_tz)"
     if _change_type(spec) == "scd2_derived" and "expression" in config:
         return f"cast({config['expression']} as timestamp_tz)"
     return f"cast({_sql_scalar(config['value'])} as timestamp_tz)"

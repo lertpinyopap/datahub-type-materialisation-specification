@@ -372,10 +372,20 @@
     "scdValidFromDatetime": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["expression"],
+      "anyOf": [
+        {
+          "required": ["expression"]
+        },
+        {
+          "required": ["source_column"]
+        }
+      ],
       "properties": {
         "expression": {
           "$ref": "#/$defs/templatedString"
+        },
+        "source_column": {
+          "$ref": "#/$defs/specificationId"
         }
       }
     },

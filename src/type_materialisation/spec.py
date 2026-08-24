@@ -491,11 +491,13 @@ def _validate_scd(spec: dict[str, Any], *, abstract: bool) -> list[Diagnostic]:
             diagnostics.append(Diagnostic("`scd` is required when `change_type` is scd2_derived", "$.control_data.scd"))
         else:
             valid_from_datetime = scd.get("valid_from_datetime")
-            if not isinstance(valid_from_datetime, dict) or not valid_from_datetime.get("expression"):
+            if not isinstance(valid_from_datetime, dict) or not (
+                valid_from_datetime.get("source_column") or valid_from_datetime.get("expression")
+            ):
                 diagnostics.append(
                     Diagnostic(
-                        "`scd.valid_from_datetime.expression` is required when `change_type` is scd2_derived",
-                        "$.control_data.scd.valid_from_datetime.expression",
+                        "`scd.valid_from_datetime.source_column` or `expression` is required when `change_type` is scd2_derived",
+                        "$.control_data.scd.valid_from_datetime",
                     )
                 )
             valid_to_datetime = scd.get("valid_to_datetime")
