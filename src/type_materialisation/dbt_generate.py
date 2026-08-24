@@ -1,6 +1,7 @@
 import csv
 import hashlib
 import json
+import re
 import shutil
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -461,6 +462,7 @@ def _write_table_source_model(spec: dict[str, Any], options: GenerateDbtOptions,
             or _table_field_source_expression(field, flatten_aliases)
         )
         select_lines.append(f"    {expression} as {_quote_identifier(column)}")
+    select_lines.extend(_scd2_derived_source_helper_lines(spec))
     source_sql = _table_source_sql(source)
     type_guard_lines = _semistructured_source_type_guard_lines(spec)
     sql = "\n".join(
@@ -486,6 +488,23 @@ def _write_table_source_model(spec: dict[str, Any], options: GenerateDbtOptions,
         ]
     )
     _write(result.output_dir / "models" / "generated" / f"{model_name}.sql", sql, result)
+
+
+def _scd2_derived_source_helper_lines(spec: dict[str, Any]) -> list[str]:
+    """Expose simple SCD2 derived expressions in staging, not in the final target."""
+    if _change_type(spec) != "scd2_derived":
+        return []
+    config = _scd_config(spec).get("valid_from_datetime", {})
+    expression = config.get("expression") if isinstance(config, dict) else None
+    if not isinstance(expression, str) or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_$]*", expression.strip()):
+        return []
+    helper_name = expression.strip()
+    source_columns = {case_key(column) for column in _source_output_columns(spec)}
+    if case_key(helper_name) in source_columns:
+        return []
+    return [
+        f"    source_query.{_quote_identifier(helper_name)} as {_quote_identifier(helper_name)}",
+    ]
 
 
 def _write_final_model(spec: dict[str, Any], result: DbtGenerationResult) -> None:
@@ -528,6 +547,7 @@ def _write_final_model(spec: dict[str, Any], result: DbtGenerationResult) -> Non
                 "    incremental_strategy='append',",
                 "    on_schema_change='fail',",
             ]
+    extra_config_lines.extend(_tag_post_hook_lines(spec))
     config_lines = _model_config_lines(
         materialized=materialized,
         schema=_target_schema_config_expression(spec),
@@ -1377,6 +1397,12 @@ def _scd2_deduplicate_order_by_expressions(spec: dict[str, Any]) -> list[str]:
     if not isinstance(deduplicate, dict):
         return []
     expressions: list[str] = []
+    valid_from_config = _scd_config(spec).get("valid_from_datetime", {})
+    valid_from_expression = (
+        valid_from_config.get("expression")
+        if isinstance(valid_from_config, dict)
+        else None
+    )
     for order_by in deduplicate.get("order_by", []):
         if not isinstance(order_by, dict):
             continue
@@ -1389,6 +1415,11 @@ def _scd2_deduplicate_order_by_expressions(spec: dict[str, Any]) -> list[str]:
             direction = "desc"
         if nulls not in {"first", "last"}:
             nulls = "last"
+        if (
+            isinstance(valid_from_expression, str)
+            and case_key(column) == case_key(valid_from_expression)
+        ):
+            column = "TMS_VALID_FROM_DATETIME_CANDIDATE"
         expressions.append(f"{_quote_identifier(column)} {direction} nulls {nulls}")
     return expressions
 
@@ -1634,6 +1665,48 @@ def _model_config_lines(
     if extra_config_lines:
         config_lines.extend(extra_config_lines)
     return config_lines
+
+
+def _tag_post_hook_lines(spec: dict[str, Any]) -> list[str]:
+    """Apply declarative target and column tags after the target relation exists."""
+    target = spec.get("target", {})
+    if not isinstance(target, dict):
+        return []
+
+    statements: list[str] = []
+    target_tags = target.get("tags", {})
+    if isinstance(target_tags, dict):
+        for tag_name, tag_value in target_tags.items():
+            statements.append(
+                "alter table {{ this }} set tag "
+                f"{_tag_identifier(tag_name)} = {_sql_string(str(tag_value))}"
+            )
+
+    for field in fields(spec):
+        field_tags = field.get("tags", {}) if isinstance(field, dict) else {}
+        if not isinstance(field_tags, dict):
+            continue
+        for tag_name, tag_value in field_tags.items():
+            statements.append(
+                "alter table {{ this }} modify column "
+                f"{_quote_identifier(str(field['id']))} set tag "
+                f"{_tag_identifier(tag_name)} = {_sql_string(str(tag_value))}"
+            )
+
+    if not statements:
+        return []
+    lines = ["    post_hook=["]
+    lines.extend(f"        {json.dumps(statement)}," for statement in statements)
+    lines.append("    ],")
+    return lines
+
+
+def _tag_identifier(value: Any) -> str:
+    """Keep qualified Snowflake tag names usable while normalizing simple names."""
+    text = str(value).strip()
+    if not text:
+        raise ValueError("tag name must not be empty")
+    return ".".join(_quote_identifier(part) for part in text.split("."))
 
 
 def _write_quarantine_model(spec: dict[str, Any], result: DbtGenerationResult) -> None:

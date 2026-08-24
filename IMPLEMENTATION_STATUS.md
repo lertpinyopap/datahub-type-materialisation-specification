@@ -65,6 +65,10 @@ Materialisation Specification.
   out-of-order Bronze/Silver/Gold loads, middle-row insertion, and V2/V10
   historical loads.
 - SCD1 hard-delete filtering for `delete_detection.mode = field`.
+- Declarative target and column tags rendered as Snowflake `post_hook` statements
+  after the generated target relation is materialized.
+- Declarative target and column tags rendered as Snowflake `post_hook`
+  statements after the generated target relation is materialized.
 
 ## Not Yet Implemented
 

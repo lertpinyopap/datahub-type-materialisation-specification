@@ -103,7 +103,7 @@ bash scripts/build_tms_package.sh \
 
 Use `--install-venv` only when the machine running the script is also the
 machine where that virtualenv path should exist. For normal local or CI
-packaging, omit it and use the default `dist/tms-env` plus
+packaging, omit it and use the default `../libs/tms-env` plus
 `dist/tms-env.tar.gz` artifacts.
 
 Clean packaging output:
