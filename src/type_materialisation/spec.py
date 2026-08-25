@@ -16,7 +16,7 @@ GENERATED_METADATA_FIELD_TYPES = {
     "business_data_hash": "varchar(64)",
     "audit_created_datetime": "timestamp_tz",
     "audit_last_changed_datetime": "timestamp_tz",
-    "audit_data_process_key": "varchar(64)",
+    "audit_data_process_key": "varchar(256)",
 }
 RESERVED_GENERATED_FIELDS = set(GENERATED_METADATA_FIELD_TYPES)
 SCD2_MANUAL_FIELD_TYPES = {
