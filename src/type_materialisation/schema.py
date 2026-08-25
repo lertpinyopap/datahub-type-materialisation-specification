@@ -1,13 +1,18 @@
 import json
+from importlib.resources import files
 from pathlib import Path
 from typing import Any
 
 from .errors import DependencyError, Diagnostic
 
+# Keep REPO_ROOT for modules that still need the repository layout when running
+# from a source checkout (for example custom Python macros under ./macros).
 REPO_ROOT = Path(__file__).resolve().parents[2]
-SCHEMA_DIR = REPO_ROOT / "schema"
-CONCRETE_SCHEMA_PATH = SCHEMA_DIR / "type-materialisation.schema.json"
-ABSTRACT_SCHEMA_PATH = SCHEMA_DIR / "type-materialisation-abstract.schema.json"
+
+SCHEMA_PACKAGE = "type_materialisation"
+SCHEMA_SOURCE_DIR = REPO_ROOT / "schema"
+CONCRETE_SCHEMA_NAME = "type-materialisation.schema.json"
+ABSTRACT_SCHEMA_NAME = "type-materialisation-abstract.schema.json"
 
 
 def require_yaml():
@@ -44,7 +49,17 @@ def load_json(path: Path) -> dict[str, Any]:
         return json.load(handle)
 
 
-def _validator(schema_path: Path):
+def load_packaged_json(name: str) -> dict[str, Any]:
+    packaged_path = files(SCHEMA_PACKAGE).joinpath(name)
+    if packaged_path.is_file():
+        return json.loads(packaged_path.read_text(encoding="utf-8"))
+
+    # Source checkouts keep schema JSON files under the repo-root `schema/` folder
+    # and stage them into the package only during wheel builds.
+    return load_json(SCHEMA_SOURCE_DIR / name)
+
+
+def _validator(*, abstract: bool):
     jsonschema = require_jsonschema()
     try:
         from referencing import Registry, Resource
@@ -55,15 +70,16 @@ def _validator(schema_path: Path):
             "or install the package with `pip install -e .`."
         ) from exc
 
-    schema = load_json(schema_path)
-    concrete_schema = load_json(CONCRETE_SCHEMA_PATH)
+    schema_name = ABSTRACT_SCHEMA_NAME if abstract else CONCRETE_SCHEMA_NAME
+    schema = load_packaged_json(schema_name)
+    concrete_schema = load_packaged_json(CONCRETE_SCHEMA_NAME)
     schema_resource = Resource.from_contents(schema, default_specification=DRAFT202012)
     concrete_resource = Resource.from_contents(concrete_schema, default_specification=DRAFT202012)
     registry = Registry().with_resources(
         [
-            (schema_path.as_uri(), schema_resource),
+            (schema_name, schema_resource),
             (schema["$id"], schema_resource),
-            (CONCRETE_SCHEMA_PATH.as_uri(), concrete_resource),
+            (CONCRETE_SCHEMA_NAME, concrete_resource),
             (concrete_schema["$id"], concrete_resource),
             ("type-materialisation.schema.json", concrete_resource),
         ]
@@ -74,8 +90,7 @@ def _validator(schema_path: Path):
 
 
 def validate_schema(data: Any, *, abstract: bool) -> list[Diagnostic]:
-    schema_path = ABSTRACT_SCHEMA_PATH if abstract else CONCRETE_SCHEMA_PATH
-    validator = _validator(schema_path)
+    validator = _validator(abstract=abstract)
     diagnostics: list[Diagnostic] = []
     for error in sorted(validator.iter_errors(data), key=lambda item: list(item.path)):
         location = "$"

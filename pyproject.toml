@@ -18,6 +18,9 @@ where = ["src"]
 [tool.setuptools.dynamic]
 dependencies = {file = ["requirements-runtime.txt"]}
 
+[tool.setuptools.package-data]
+"type_materialisation" = ["*.json"]
+
 [tool.pytest.ini_options]
 filterwarnings = ["error"]
 pythonpath = ["src", "integration_tests/src"]

@@ -103,7 +103,7 @@ def test_generated_metadata_field_type_contract_is_supported() -> None:
         "business_data_hash": "varchar(64)",
         "audit_created_datetime": "timestamp_tz",
         "audit_last_changed_datetime": "timestamp_tz",
-        "audit_data_process_key": "varchar(64)",
+        "audit_data_process_key": "varchar(256)",
     }
     for data_type in [SURROGATE_KEY_DATA_TYPE, *GENERATED_METADATA_FIELD_TYPES.values()]:
         parse_sql_type(data_type)

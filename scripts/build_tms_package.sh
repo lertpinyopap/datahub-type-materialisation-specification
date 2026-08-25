@@ -97,6 +97,19 @@ fi
 
 mkdir -p "$DIST_DIR"
 
+stage_packaged_schemas() {
+  cp "$REPO_ROOT/schema/type-materialisation.schema.json" "$REPO_ROOT/src/type_materialisation/type-materialisation.schema.json"
+  cp "$REPO_ROOT/schema/type-materialisation-abstract.schema.json" "$REPO_ROOT/src/type_materialisation/type-materialisation-abstract.schema.json"
+}
+
+cleanup_staged_schemas() {
+  rm -f "$REPO_ROOT/src/type_materialisation/type-materialisation.schema.json"
+  rm -f "$REPO_ROOT/src/type_materialisation/type-materialisation-abstract.schema.json"
+}
+
+trap cleanup_staged_schemas EXIT
+stage_packaged_schemas
+
 prune_runtime_venv() {
   local venv_dir="$1"
   local minicore_dir
@@ -155,14 +168,8 @@ if [[ -n "$INSTALL_VENV" ]]; then
   TARGET_PYTHON="$INSTALL_VENV/bin/python"
   "$TARGET_PYTHON" -m pip install --no-deps --force-reinstall "$WHEEL_PATH"
 
-  STDLIB_DIR="$("$TARGET_PYTHON" -c 'import sys; from pathlib import Path; print(Path(sys.executable).parent.parent / "lib" / f"python{sys.version_info.major}.{sys.version_info.minor}")')"
-  SCHEMA_TARGET_DIR="$STDLIB_DIR/schema"
-  mkdir -p "$SCHEMA_TARGET_DIR"
-  cp "$REPO_ROOT/schema/type-materialisation.schema.json" "$SCHEMA_TARGET_DIR/"
-  cp "$REPO_ROOT/schema/type-materialisation-abstract.schema.json" "$SCHEMA_TARGET_DIR/"
-
-  echo "Installed schema files into:"
-  echo "  $SCHEMA_TARGET_DIR"
+  echo "Installed self-contained TMS wheel into:"
+  echo "  $INSTALL_VENV"
 
   if [[ "$PRUNE_RUNTIME" == "true" ]]; then
     prune_runtime_venv "$INSTALL_VENV"
