@@ -1,3 +1,4 @@
+import json
 import subprocess
 from pathlib import Path
 
@@ -315,3 +316,152 @@ def test_dbt_build_runs_dbt_build(monkeypatch, tmp_path: Path) -> None:
             "{target_schema: TMP, tms_job_schema: TMP}",
         ],
     ]
+
+
+def test_dbt_build_uses_env_dbt_path(monkeypatch, tmp_path: Path) -> None:
+    spec_path = tmp_path / "account.yaml"
+    project_dir = tmp_path / "dbt-account"
+    spec_path.write_text("id: account\n", encoding="utf-8")
+    commands: list[list[str]] = []
+
+    monkeypatch.setenv("DBT_EXECUTABLE_PATH", "/opt/dbt/bin/dbt")
+
+    def fake_run(command, *, check):
+        commands.append(command)
+        assert check is False
+        return subprocess.CompletedProcess(command, 0)
+
+    monkeypatch.setattr(cli.subprocess, "run", fake_run)
+
+    result = cli.main(
+        [
+            "dbt-build",
+            "--spec",
+            str(spec_path),
+            "--project-dir",
+            str(project_dir),
+            "--target",
+            "dev",
+        ]
+    )
+
+    assert result == 0
+    assert commands == [
+        [
+            "/opt/dbt/bin/dbt",
+            "build",
+            "--project-dir",
+            str(project_dir),
+            "--target",
+            "dev",
+        ],
+    ]
+
+
+def test_row_summary_command_reports_only_target_models(tmp_path: Path, capsys) -> None:
+    project_dir = tmp_path / "generated"
+    target_dir = project_dir / "target"
+    target_dir.mkdir(parents=True)
+    (target_dir / "manifest.json").write_text(
+        json.dumps(
+            {
+                "nodes": {
+                    "model.generated.customer__source": {
+                        "resource_type": "model",
+                        "name": "customer__source",
+                        "alias": "CUSTOMER__SOURCE",
+                    },
+                    "model.generated.customer__validation_guard": {
+                        "resource_type": "model",
+                        "name": "customer__validation_guard",
+                        "alias": "CUSTOMER__VALIDATION_GUARD",
+                    },
+                    "model.generated.customer": {
+                        "resource_type": "model",
+                        "name": "customer",
+                        "alias": "CUSTOMER",
+                    },
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    (target_dir / "run_results.json").write_text(
+        json.dumps(
+            {
+                "results": [
+                    {
+                        "unique_id": "model.generated.customer__source",
+                        "relation_name": "DB.INTERMEDIATE.CUSTOMER__SOURCE",
+                        "status": "success",
+                        "adapter_response": {"rows_affected": 1},
+                    },
+                    {
+                        "unique_id": "model.generated.customer",
+                        "relation_name": "DB.CORE.CUSTOMER",
+                        "status": "success",
+                        "execution_time": 7.248287916183472,
+                        "adapter_response": {
+                            "rows_affected": 234450,
+                            "query_id": "01c698a9-3206-c515-0002-4dfa03af4416",
+                        },
+                    },
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = cli.main(["row-summary", "--project-dir", str(project_dir)])
+
+    output = capsys.readouterr().out
+    assert result == 0
+    assert "TMS dbt write summary:" in output
+    assert "DB.CORE.CUSTOMER: status=success, rows_affected=234450" in output
+    assert "duration_seconds=7.25" in output
+    assert "query_id=01c698a9-3206-c515-0002-4dfa03af4416" in output
+    assert "business-change counts" in output
+    assert "DB.INTERMEDIATE.CUSTOMER__SOURCE: status=success, rows_affected=1" in output
+
+def test_row_summary_reports_rows_affected_for_noop(tmp_path: Path, capsys) -> None:
+    project_dir = tmp_path / "generated"
+    target_dir = project_dir / "target"
+    target_dir.mkdir(parents=True)
+    (target_dir / "manifest.json").write_text(
+        json.dumps(
+            {
+                "nodes": {
+                    "model.generated.customer": {
+                        "resource_type": "model",
+                        "name": "customer",
+                        "alias": "CUSTOMER",
+                    },
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    (target_dir / "run_results.json").write_text(
+        json.dumps(
+            {
+                "results": [
+                    {
+                        "unique_id": "model.generated.customer",
+                        "relation_name": "DB.CORE.CUSTOMER",
+                        "status": "success",
+                        "adapter_response": {
+                            "rows_affected": 0,
+                            "query_id": "noop-qid",
+                        },
+                    },
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = cli.main(["row-summary", "--project-dir", str(project_dir)])
+
+    output = capsys.readouterr().out
+    assert result == 0
+    assert "rows_affected=0" in output

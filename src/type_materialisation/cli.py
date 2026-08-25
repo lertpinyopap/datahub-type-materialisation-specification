@@ -1,4 +1,6 @@
 import argparse
+import json
+import os
 import shutil
 import subprocess
 import sys
@@ -26,6 +28,8 @@ def main(argv: list[str] | None = None) -> int:
             return _generate_dbt(args)
         if args.command == "dbt-build":
             return _dbt_build(args)
+        if args.command == "row-summary":
+            return _row_summary(args)
     except DependencyError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
@@ -129,6 +133,19 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     build_parser.add_argument("--target", required=True, help="dbt target name passed through to dbt build")
     build_parser.add_argument("--vars", help="dbt vars YAML/JSON string passed through to dbt build")
+    build_parser.add_argument(
+        "--full-refresh",
+        action="store_true",
+        help="pass --full-refresh through to dbt build before printing the TMS row summary",
+    )
+
+    row_summary_parser = subparsers.add_parser("row-summary", help="print target row summary for a dbt project")
+    row_summary_parser.add_argument(
+        "--project-dir",
+        required=True,
+        type=Path,
+        help="generated dbt project directory containing target/run_results.json",
+    )
     return parser
 
 
@@ -259,17 +276,129 @@ def _dbt_build(args: argparse.Namespace) -> int:
     if not args.spec.exists():
         _print_diagnostics("dbt build failed", [Diagnostic("spec file does not exist", str(args.spec))])
         return 1
-    executable = shutil.which("dbt")
-    if executable is None:
-        raise DependencyError("dbt executable was not found on PATH.")
+    executable = resolve_dbt_executable()
     project_dir = args.project_dir or _default_dbt_project_dir(args.spec)
     command_args = ["--project-dir", str(project_dir)]
     if args.target:
         command_args.extend(["--target", args.target])
     if args.vars:
         command_args.extend(["--vars", args.vars])
+    if args.full_refresh:
+        command_args.append("--full-refresh")
     completed = subprocess.run([executable, "build", *command_args], check=False)
+    if completed.returncode == 0:
+        print_dbt_row_summary(project_dir)
     return completed.returncode
+
+
+def _row_summary(args: argparse.Namespace) -> int:
+    print_dbt_row_summary(args.project_dir)
+    return 0
+
+
+def resolve_dbt_executable() -> str:
+    env_value = os.environ.get("DBT_EXECUTABLE_PATH")
+    if env_value:
+        return env_value
+
+    executable = shutil.which("dbt")
+    if executable is None:
+        raise DependencyError("dbt executable was not found on PATH.")
+    return executable
+
+
+def print_dbt_row_summary(project_dir: Path) -> None:
+    """Print dbt/Snowflake adapter DML metrics for generated target models."""
+    results_path = project_dir / "target" / "run_results.json"
+    manifest_path = project_dir / "target" / "manifest.json"
+    if not results_path.exists():
+        print(f"TMS row summary unavailable: {results_path} was not created.")
+        return
+
+    try:
+        payload = json.loads(results_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        print(f"TMS row summary unavailable: could not read {results_path}: {exc}")
+        return
+
+    target_model_ids = load_dbt_target_model_ids(manifest_path)
+    reported_count = 0
+    print("TMS dbt write summary:")
+    for result in payload.get("results", []):
+        if not isinstance(result, dict):
+            continue
+
+        unique_id = result.get("unique_id", "")
+        if target_model_ids and unique_id not in target_model_ids:
+            continue
+
+        adapter_response = result.get("adapter_response") or {}
+        rows_affected = adapter_response.get("rows_affected")
+        relation_name = result.get("relation_name") or result.get("unique_id", "unknown")
+        status = result.get("status", "unknown")
+        duration = format_optional_float(result.get("execution_time"))
+
+        reported_count += 1
+        print(
+            "  "
+            f"{relation_name}: "
+            f"status={status}, "
+            f"rows_affected={format_optional_int(rows_affected)}, "
+            f"duration_seconds={duration}, "
+            f"query_id={adapter_response.get('query_id', 'unavailable')}"
+        )
+
+    if reported_count == 0:
+        print("TMS dbt write summary unavailable: dbt returned no target model result.")
+    else:
+        print(
+            "Note: rows_affected is the dbt/Snowflake adapter response and may represent "
+            "physical rows processed by the materialization, not business-change counts. "
+            "For SCD2, use business hashes and validity columns to validate actual history changes."
+        )
+
+
+def format_optional_int(value: object) -> str:
+    if value is None:
+        return "unavailable"
+
+    try:
+        return str(int(value))
+    except (TypeError, ValueError):
+        return str(value)
+
+
+def format_optional_float(value: object) -> str:
+    if value is None:
+        return "unavailable"
+
+    try:
+        return f"{float(value):.2f}"
+    except (TypeError, ValueError):
+        return str(value)
+
+
+def load_dbt_target_model_ids(manifest_path: Path) -> set[str]:
+    """Return every dbt model id represented in the generated project."""
+    if not manifest_path.exists():
+        return set()
+
+    try:
+        payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return set()
+
+    target_model_ids: set[str] = set()
+    for unique_id, node in payload.get("nodes", {}).items():
+        if not isinstance(node, dict):
+            continue
+
+        if node.get("resource_type") != "model":
+            continue
+
+        target_model_ids.add(unique_id)
+
+    return target_model_ids
 
 
 def _default_dbt_project_dir(spec_path: Path) -> Path:
@@ -319,7 +448,7 @@ def _print_diagnostics(title: str, diagnostics: list[Diagnostic]) -> None:
 
 
 def _print_warnings(warnings: list[Diagnostic]) -> None:
-    console = _console(stderr=True)
+    console = _console()
     table = _diagnostic_table(warnings, style="yellow")
     console.print("[bold yellow]warnings[/bold yellow]")
     console.print(table)
