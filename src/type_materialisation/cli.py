@@ -323,6 +323,7 @@ def print_dbt_row_summary(project_dir: Path) -> None:
 
     target_model_ids = load_dbt_target_model_ids(manifest_path)
     reported_count = 0
+    query_id_rows: list[tuple[str, str]] = []
     print("TMS dbt write summary:")
     for result in payload.get("results", []):
         if not isinstance(result, dict):
@@ -337,20 +338,25 @@ def print_dbt_row_summary(project_dir: Path) -> None:
         relation_name = result.get("relation_name") or result.get("unique_id", "unknown")
         status = result.get("status", "unknown")
         duration = format_optional_float(result.get("execution_time"))
+        query_id = str(adapter_response.get("query_id", "unavailable"))
 
         reported_count += 1
+        query_id_rows.append((str(relation_name), query_id))
         print(
             "  "
             f"{relation_name}: "
             f"status={status}, "
             f"rows_affected={format_optional_int(rows_affected)}, "
             f"duration_seconds={duration}, "
-            f"query_id={adapter_response.get('query_id', 'unavailable')}"
+            f"query_id={query_id}"
         )
 
     if reported_count == 0:
         print("TMS dbt write summary unavailable: dbt returned no target model result.")
     else:
+        print("TMS Snowflake query ids:")
+        for relation_name, query_id in query_id_rows:
+            print(f"  {relation_name}: {query_id}")
         print(
             "Note: rows_affected is the dbt/Snowflake adapter response and may represent "
             "physical rows processed by the materialization, not business-change counts. "
