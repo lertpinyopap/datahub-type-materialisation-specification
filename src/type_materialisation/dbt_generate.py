@@ -330,17 +330,51 @@ def _write_csv_source_model(spec: dict[str, Any], options: GenerateDbtOptions, r
     target = spec["target"]
     model_name = _source_model_name(target["id"])
     stage = _stage_reference(options.csv_stage) if options.csv_stage else _csv_stage_location(spec["source"])
+    source_query_select_lines = []
+    seen_source_query_columns: set[str] = set()
+    for field in fields(spec):
+        source = field.get("source", {})
+        if "fixed_value" in source:
+            continue
+        if isinstance(source.get("macro"), str):
+            helper_column = _macro_helper_source_column_name(field)
+            if helper_column is None:
+                continue
+            helper_key = case_key(helper_column)
+            if helper_key in seen_source_query_columns:
+                continue
+            seen_source_query_columns.add(helper_key)
+            pos = source.get("pos")
+            if isinstance(pos, int):
+                ordinal = pos + 1
+                expression = _apply_default_value_expression(f"${ordinal}::string", source)
+                source_query_select_lines.append(
+                    f"        {expression} as {_quote_identifier(helper_column)}"
+                )
+            continue
+        column = _source_column_name(field)
+        column_key = case_key(column)
+        if column_key in seen_source_query_columns:
+            continue
+        seen_source_query_columns.add(column_key)
+        pos = source.get("pos")
+        ordinal = int(pos) + 1
+        expression = _apply_default_value_expression(f"${ordinal}::string", source)
+        source_query_select_lines.append(f"        {expression} as {_quote_identifier(column)}")
     select_lines = []
     for field in fields(spec):
         source = field.get("source", {})
-        column = _source_column_name(field)
-        if "fixed_value" in source:
-            select_lines.append(f"    {_fixed_value_expression(source['fixed_value'])} as {_quote_identifier(column)}")
+        if isinstance(source.get("macro"), str):
+            expression = _source_macro_field_expression(field)
+            output_column = str(field["id"])
+        elif "fixed_value" in source:
+            expression = _fixed_value_expression(source["fixed_value"])
+            output_column = _source_column_name(field)
         else:
-            pos = source.get("pos")
-            ordinal = int(pos) + 1
-            expression = _apply_default_value_expression(f"${ordinal}::string", source)
-            select_lines.append(f"    {expression} as {_quote_identifier(column)}")
+            column = _source_column_name(field)
+            expression = f"source_query.{_quote_identifier(column)}"
+            output_column = column
+        select_lines.append(f"    {expression} as {_quote_identifier(output_column)}")
     sql = "\n".join(
         [
             "{{",
@@ -355,9 +389,16 @@ def _write_csv_source_model(spec: dict[str, Any], options: GenerateDbtOptions, r
             "  )",
             "}}",
             "",
+            "with source_query as (",
+            "    select",
+            ",\n".join(source_query_select_lines) if source_query_select_lines else "        1 as _DUMMY_SOURCE_COLUMN",
+            f"    from {stage}",
+            ")",
+            "",
             "select",
             ",\n".join(select_lines),
-            f"from {stage}",
+            "from source_query as source_query",
+            *_source_macro_join_lines(spec),
             "",
         ]
     )
@@ -374,15 +415,49 @@ def _write_csv_seed_source_model(spec: dict[str, Any], options: GenerateDbtOptio
         result.errors.append(Diagnostic(str(exc), "$.source.seed.file"))
         return
 
+    source_query_select_lines = []
+    seen_source_query_columns: set[str] = set()
+    for field in fields(spec):
+        source = field.get("source", {})
+        if "fixed_value" in source:
+            continue
+        if isinstance(source.get("macro"), str):
+            helper_column = _macro_helper_source_column_name(field)
+            if helper_column is None:
+                continue
+            helper_key = case_key(helper_column)
+            if helper_key in seen_source_query_columns:
+                continue
+            seen_source_query_columns.add(helper_key)
+            expression = _apply_default_value_expression(
+                f"cast({_quote_identifier(helper_column)} as string)",
+                source,
+            )
+            source_query_select_lines.append(
+                f"        {expression} as {_quote_identifier(helper_column)}"
+            )
+            continue
+        column = _source_column_name(field)
+        column_key = case_key(column)
+        if column_key in seen_source_query_columns:
+            continue
+        seen_source_query_columns.add(column_key)
+        expression = _apply_default_value_expression(f"cast({_quote_identifier(column)} as string)", source)
+        source_query_select_lines.append(f"        {expression} as {_quote_identifier(column)}")
     select_lines = []
     for field in fields(spec):
         source = field.get("source", {})
-        column = _source_column_name(field)
-        if "fixed_value" in source:
-            select_lines.append(f"    {_fixed_value_expression(source['fixed_value'])} as {_quote_identifier(column)}")
+        if isinstance(source.get("macro"), str):
+            expression = _source_macro_field_expression(field)
+            output_column = str(field["id"])
+        elif "fixed_value" in source:
+            expression = _fixed_value_expression(source["fixed_value"])
+            output_column = _source_column_name(field)
         else:
-            expression = _apply_default_value_expression(f"cast({_quote_identifier(column)} as string)", source)
-            select_lines.append(f"    {expression} as {_quote_identifier(column)}")
+            column = _source_column_name(field)
+            expression = f"source_query.{_quote_identifier(column)}"
+            output_column = column
+        select_lines.append(f"    {expression} as {_quote_identifier(output_column)}")
     sql = "\n".join(
         [
             "{{",
@@ -397,9 +472,16 @@ def _write_csv_seed_source_model(spec: dict[str, Any], options: GenerateDbtOptio
             "  )",
             "}}",
             "",
+            "with source_query as (",
+            "    select",
+            ",\n".join(source_query_select_lines) if source_query_select_lines else "        1 as _DUMMY_SOURCE_COLUMN",
+            f"    from {{{{ ref('{seed_name}') }}}}",
+            ")",
+            "",
             "select",
             ",\n".join(select_lines),
-            f"from {{{{ ref('{seed_name}') }}}}",
+            "from source_query as source_query",
+            *_source_macro_join_lines(spec),
             "",
         ]
     )
@@ -572,6 +654,58 @@ def _write_final_model(spec: dict[str, Any], result: DbtGenerationResult) -> Non
             quarantine_enabled=quarantine_enabled,
             fail_load_enabled=fail_load_enabled,
         )
+    elif _change_type(spec) == "scd2_manual":
+        select_lines = _scd2_manual_select_lines(
+            spec,
+            surrogate_key_select_lines,
+            business_key_select_lines,
+            business_data_hash_select_lines,
+            audit_select_lines,
+        )
+        delete_filter_lines = _scd1_delete_filter_lines(spec)
+        if quarantine_enabled:
+            body_lines = [
+                "with source_rows as (",
+                f"    select * from {{{{ ref('{source_model}') }}}}",
+                "),",
+                *_validation_rows_cte(spec, trailing_comma=True),
+                *_valid_rows_cte(),
+                "",
+                "select",
+                ",\n".join(select_lines),
+                "from valid_rows",
+                *delete_filter_lines,
+                "",
+            ]
+        elif fail_load_enabled:
+            validation_guard_model = _validation_guard_model_name(target["id"])
+            body_lines = [
+                "with source_rows as (",
+                f"    select * from {{{{ ref('{source_model}') }}}}",
+                "),",
+                *_validation_rows_cte(spec, trailing_comma=True),
+                "valid_rows as (",
+                "    select validation_rows.*",
+                "    from validation_rows",
+                f"    cross join {{{{ ref('{validation_guard_model}') }}}} as validation_guard",
+                "    where validation_rows.FAILURE_DETAILS is null",
+                "      and validation_guard.VALIDATION_FAILURE_GUARD = 0",
+                ")",
+                "",
+                "select",
+                ",\n".join(select_lines),
+                "from valid_rows",
+                *delete_filter_lines,
+                "",
+            ]
+        else:
+            body_lines = [
+                "select",
+                ",\n".join(select_lines),
+                f"from {{{{ ref('{source_model}') }}}}",
+                *delete_filter_lines,
+                "",
+            ]
     elif quarantine_enabled:
         select_lines = [
             *field_select_lines,
@@ -671,12 +805,40 @@ def _write_final_model(spec: dict[str, Any], result: DbtGenerationResult) -> Non
 
 def _audit_select_lines() -> list[str]:
     return [
-        "    cast('{{ var(\"audit_data_process_key\", \"manual\") }}' "
-        f"as {GENERATED_METADATA_FIELD_TYPES['audit_data_process_key']}) as AUDIT_DATA_PROCESS_KEY",
         f"    cast(current_timestamp() as {GENERATED_METADATA_FIELD_TYPES['audit_created_datetime']}) "
         "as AUDIT_CREATED_DATETIME",
         f"    cast(current_timestamp() as {GENERATED_METADATA_FIELD_TYPES['audit_last_changed_datetime']}) "
         "as AUDIT_LAST_CHANGED_DATETIME",
+        "    cast('{{ var(\"audit_data_process_key\", \"manual\") }}' "
+        f"as {GENERATED_METADATA_FIELD_TYPES['audit_data_process_key']}) as AUDIT_DATA_PROCESS_KEY",
+    ]
+
+def _field_select_line(field: dict[str, Any]) -> str:
+    return f"    cast({_field_expression(field)} as {field['data_type']}) as {_quote_identifier(field['id'])}"
+
+
+def _scd2_manual_select_lines(
+    spec: dict[str, Any],
+    surrogate_key_select_lines: list[str],
+    business_key_select_lines: list[str],
+    business_data_hash_select_lines: list[str],
+    audit_select_lines: list[str],
+) -> list[str]:
+    business_fields, source_audit_fields, scd2_state_fields = _scd2_declared_field_groups(spec)
+    declared_scd2_by_key = {case_key(str(field["id"])): field for field in scd2_state_fields}
+    scd2_state_select_lines = [
+        _field_select_line(declared_scd2_by_key[case_key(column_id)])
+        for column_id in SCD2_STATE_COLUMN_IDS
+        if case_key(column_id) in declared_scd2_by_key
+    ]
+    return [
+        *surrogate_key_select_lines,
+        *business_key_select_lines,
+        *[_field_select_line(field) for field in business_fields],
+        *scd2_state_select_lines,
+        *business_data_hash_select_lines,
+        *[_field_select_line(field) for field in source_audit_fields],
+        *audit_select_lines,
     ]
 
 
@@ -701,19 +863,7 @@ def _scd2_final_body_lines(
             fail_load_enabled=fail_load_enabled,
         )
 
-    output_lines = [f"    {_quote_identifier(field['id'])}" for field in fields(spec)]
-    output_lines.extend(_surrogate_key_output_lines(spec))
-    output_lines.extend(_business_key_output_lines(spec))
-    output_lines.extend(
-        [
-            "    IS_CURRENT_FLAG",
-            "    IS_DELETED_FLAG",
-            "    VALID_FROM_DATETIME",
-            "    VALID_TO_DATETIME",
-            "    BUSINESS_DATA_HASH",
-            *audit_select_lines,
-        ]
-    )
+    output_lines = _scd2_output_lines(spec, audit_select_lines)
     return [
         *_scd2_valid_rows_lines(spec, source_model, quarantine_enabled, fail_load_enabled),
         "typed_rows as (",
@@ -978,21 +1128,7 @@ def _scd2_target_merge_body_lines(
     quarantine_enabled: bool,
     fail_load_enabled: bool,
 ) -> list[str]:
-    output_lines = [f"    {_quote_identifier(field['id'])}" for field in fields(spec)]
-    output_lines.extend(_surrogate_key_output_lines(spec))
-    output_lines.extend(_business_key_output_lines(spec))
-    output_lines.extend(
-        [
-            "    IS_CURRENT_FLAG",
-            "    IS_DELETED_FLAG",
-            "    VALID_FROM_DATETIME",
-            "    VALID_TO_DATETIME",
-            "    BUSINESS_DATA_HASH",
-            "    AUDIT_DATA_PROCESS_KEY",
-            "    AUDIT_CREATED_DATETIME",
-            "    AUDIT_LAST_CHANGED_DATETIME",
-        ]
-    )
+    output_lines = _scd2_output_lines(spec, audit_select_lines)
     change_row_columns = _scd2_change_row_columns(spec)
     source_change_not_exists_lines = _scd2_source_change_not_exists_lines(spec)
     return [
@@ -1230,27 +1366,98 @@ def _scd2_incremental_unique_key(spec: dict[str, Any]) -> str:
     return "[" + ", ".join(_sql_string(column) for column in _business_key_unique_key_columns(spec)) + "]"
 
 
-def _scd2_target_column_types(spec: dict[str, Any]) -> list[tuple[str, str]]:
-    columns = [
-        (str(field["id"]), str(field["data_type"]))
-        for field in fields(spec)
+SCD2_STATE_COLUMN_IDS = [
+    "IS_CURRENT_FLAG",
+    "IS_DELETED_FLAG",
+    "VALID_FROM_DATETIME",
+    "VALID_TO_DATETIME",
+]
+SOURCE_AUDIT_COLUMN_IDS = [
+    "AUDIT_CREATED_SOURCE",
+    "AUDIT_LAST_CHANGED_SOURCE",
+]
+SYSTEM_AUDIT_COLUMN_IDS = [
+    "AUDIT_CREATED_DATETIME",
+    "AUDIT_LAST_CHANGED_DATETIME",
+    "AUDIT_DATA_PROCESS_KEY",
+]
+
+
+def _scd2_declared_field_groups(spec: dict[str, Any]) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
+    scd2_state_keys = {case_key(column_id) for column_id in SCD2_STATE_COLUMN_IDS}
+    source_audit_keys = {case_key(column_id) for column_id in SOURCE_AUDIT_COLUMN_IDS}
+    business_fields: list[dict[str, Any]] = []
+    source_audit_fields: list[dict[str, Any]] = []
+    scd2_state_fields: list[dict[str, Any]] = []
+
+    for field in fields(spec):
+        field_key = case_key(str(field["id"]))
+        if field_key in scd2_state_keys:
+            scd2_state_fields.append(field)
+        elif field_key in source_audit_keys:
+            source_audit_fields.append(field)
+        else:
+            business_fields.append(field)
+
+    return business_fields, source_audit_fields, scd2_state_fields
+
+
+def _scd2_declared_column_types(fields_to_emit: list[dict[str, Any]]) -> list[tuple[str, str]]:
+    return [(str(field["id"]), str(field["data_type"])) for field in fields_to_emit]
+
+
+def _scd2_state_column_types(declared_scd2_fields: list[dict[str, Any]]) -> list[tuple[str, str]]:
+    declared_by_key = {case_key(str(field["id"])): field for field in declared_scd2_fields}
+    columns: list[tuple[str, str]] = []
+    for column_id in SCD2_STATE_COLUMN_IDS:
+        declared_field = declared_by_key.get(case_key(column_id))
+        if declared_field is not None:
+            columns.append((str(declared_field["id"]), str(declared_field["data_type"])))
+            continue
+        generated_key = case_key(column_id.lower())
+        metadata_name = {
+            case_key("IS_CURRENT_FLAG"): "is_current_flag",
+            case_key("IS_DELETED_FLAG"): "is_deleted_flag",
+            case_key("VALID_FROM_DATETIME"): "valid_from_datetime",
+            case_key("VALID_TO_DATETIME"): "valid_to_datetime",
+        }[generated_key]
+        columns.append((column_id, GENERATED_METADATA_FIELD_TYPES[metadata_name]))
+    return columns
+
+
+def _scd2_system_audit_column_types() -> list[tuple[str, str]]:
+    return [
+        ("AUDIT_CREATED_DATETIME", GENERATED_METADATA_FIELD_TYPES["audit_created_datetime"]),
+        ("AUDIT_LAST_CHANGED_DATETIME", GENERATED_METADATA_FIELD_TYPES["audit_last_changed_datetime"]),
+        ("AUDIT_DATA_PROCESS_KEY", GENERATED_METADATA_FIELD_TYPES["audit_data_process_key"]),
     ]
+
+
+def _scd2_output_lines(spec: dict[str, Any], audit_select_lines: list[str]) -> list[str]:
+    business_fields, source_audit_fields, _ = _scd2_declared_field_groups(spec)
+    lines: list[str] = []
+    lines.extend(_surrogate_key_output_lines(spec))
+    lines.extend(_business_key_output_lines(spec))
+    lines.extend(f"    {_quote_identifier(field['id'])}" for field in business_fields)
+    lines.extend(f"    {column_id}" for column_id in SCD2_STATE_COLUMN_IDS)
+    lines.append("    BUSINESS_DATA_HASH")
+    lines.extend(f"    {_quote_identifier(field['id'])}" for field in source_audit_fields)
+    lines.extend(audit_select_lines)
+    return lines
+
+
+def _scd2_target_column_types(spec: dict[str, Any]) -> list[tuple[str, str]]:
+    business_fields, source_audit_fields, scd2_state_fields = _scd2_declared_field_groups(spec)
+    columns: list[tuple[str, str]] = []
     if _surrogate_key_enabled(spec):
         columns.append((_surrogate_key_column(spec), SURROGATE_KEY_DATA_TYPE))
     if _business_key_enabled(spec):
         columns.append((_business_key_column(spec), BUSINESS_KEY_DATA_TYPE))
-    columns.extend(
-        [
-            ("IS_CURRENT_FLAG", GENERATED_METADATA_FIELD_TYPES["is_current_flag"]),
-            ("IS_DELETED_FLAG", GENERATED_METADATA_FIELD_TYPES["is_deleted_flag"]),
-            ("VALID_FROM_DATETIME", GENERATED_METADATA_FIELD_TYPES["valid_from_datetime"]),
-            ("VALID_TO_DATETIME", GENERATED_METADATA_FIELD_TYPES["valid_to_datetime"]),
-            ("BUSINESS_DATA_HASH", GENERATED_METADATA_FIELD_TYPES["business_data_hash"]),
-            ("AUDIT_DATA_PROCESS_KEY", GENERATED_METADATA_FIELD_TYPES["audit_data_process_key"]),
-            ("AUDIT_CREATED_DATETIME", GENERATED_METADATA_FIELD_TYPES["audit_created_datetime"]),
-            ("AUDIT_LAST_CHANGED_DATETIME", GENERATED_METADATA_FIELD_TYPES["audit_last_changed_datetime"]),
-        ]
-    )
+    columns.extend(_scd2_declared_column_types(business_fields))
+    columns.extend(_scd2_state_column_types(scd2_state_fields))
+    columns.append(("BUSINESS_DATA_HASH", GENERATED_METADATA_FIELD_TYPES["business_data_hash"]))
+    columns.extend(_scd2_declared_column_types(source_audit_fields))
+    columns.extend(_scd2_system_audit_column_types())
     return columns
 
 
@@ -2516,7 +2723,11 @@ def _scd2_manual_validation_rows_cte(spec: dict[str, Any], *, trailing_comma: bo
     valid_to_column = _physical_name("valid_to_datetime")
     is_current_column = _physical_name("is_current_flag")
     return [
+        "{% if flags.FULL_REFRESH %}",
+        "{% set tms_manual_scd2_target_relation = none %}",
+        "{% else %}",
         _dbt_relation_lookup(target_relation, "tms_manual_scd2_target_relation", schema_var="target_schema"),
+        "{% endif %}",
         "base_validation_rows as (",
         "    select",
         "        *,",
@@ -3046,6 +3257,7 @@ def _business_data_hash_field_ids(spec: dict[str, Any]) -> list[str]:
 
 def _business_data_hash_ineligible_field_ids(spec: dict[str, Any]) -> set[str]:
     excluded_fields = set(RESERVED_GENERATED_FIELDS)
+    excluded_fields.update(case_key(field_id) for field_id in SOURCE_AUDIT_COLUMN_IDS)
     if _surrogate_key_enabled(spec):
         excluded_fields.add(case_key(_surrogate_key_column(spec)))
     if _business_key_enabled(spec):
@@ -3536,19 +3748,34 @@ def _source_output_columns(spec: dict[str, Any]) -> list[str]:
 
 
 def _csv_physical_source_columns(spec: dict[str, Any]) -> list[str]:
-    target_fields = sorted(
-        [
-            field
-            for field in fields(spec)
-            if not (isinstance(field.get("source"), dict) and "fixed_value" in field["source"])
-        ],
-        key=lambda field: field.get("source", {}).get("pos", 999999),
-    )
-    return [_source_column_name(field) for field in target_fields]
+    columns: list[str] = []
+    seen: set[str] = set()
+    target_fields = sorted(fields(spec), key=lambda field: field.get("source", {}).get("pos", 999999))
+    for field in target_fields:
+        source = field.get("source", {})
+        if not isinstance(source, dict) or "fixed_value" in source:
+            continue
+        if isinstance(source.get("macro"), str):
+            helper_column = _macro_helper_source_column_name(field)
+            if helper_column is None:
+                continue
+            helper_key = case_key(helper_column)
+            if helper_key not in seen:
+                seen.add(helper_key)
+                columns.append(helper_column)
+            continue
+        column = _source_column_name(field)
+        column_key = case_key(column)
+        if column_key not in seen:
+            seen.add(column_key)
+            columns.append(column)
+    return columns
 
 
 def _source_column_name(field: dict[str, Any]) -> str:
     source = field.get("source", {})
+    if isinstance(source, dict) and isinstance(source.get("macro"), str):
+        return _physical_name(field["id"])
     if isinstance(source, dict) and "fixed_value" in source:
         return _physical_name(field["id"])
     if isinstance(source, dict) and isinstance(source.get("snowflake_path"), str):
@@ -3564,6 +3791,19 @@ def _source_column_name(field: dict[str, Any]) -> str:
 
 def _position_column_name(pos: int) -> str:
     return f"COL_{pos}"
+
+
+def _macro_helper_source_column_name(field: dict[str, Any]) -> str | None:
+    source = field.get("source", {})
+    if not isinstance(source, dict) or not isinstance(source.get("macro"), str):
+        return None
+    column = source.get("column")
+    if isinstance(column, str):
+        return _physical_name(column)
+    pos = source.get("pos")
+    if isinstance(pos, int):
+        return _position_column_name(pos)
+    return None
 
 
 def _job_hooks(spec: dict[str, Any], spec_file_name: str) -> tuple[list[str], list[str]]:

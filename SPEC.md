@@ -1110,12 +1110,15 @@ second `@`.
   schema.
 
 For `load_method: dbt_seed`, `seed.file` is required. When `header` is `true`,
-each non-fixed target field must specify `field.source.column`. When `header` is
-`false`, each non-fixed target field must specify `field.source.pos`; the
-implementation must synthesize a dbt seed header using `COL_<N>` names, where
-`N` is the zero-based field position. dbt seed loading is intended for small
-local CSV files and development or reference-data workflows; stage-based
-loading remains the preferred path for large operational source files.
+each non-fixed, non-macro target field must specify `field.source.column`. When
+`header` is `false`, each non-fixed, non-macro target field must specify
+`field.source.pos`; the implementation must synthesize a dbt seed header using
+`COL_<N>` names, where `N` is the zero-based field position. CSV seed fields
+may also use `source_macro`; when they do, `field.source.column` or
+`field.source.pos` remains optional and may be supplied only as a helper source
+column for the macro arguments. dbt seed loading is intended for small local
+CSV files and development or reference-data workflows; stage-based loading
+remains the preferred path for large operational source files.
 
 `upload` describes whether the implementation should upload the local CSV file
 before dbt generation:
@@ -1333,6 +1336,29 @@ except that `scd2_manual` specifications must declare `valid_from_datetime`,
 `valid_to_datetime`, `is_current_flag`, and `is_deleted_flag` as ordinary target
 fields.
 
+For SCD2 targets, implementations must order the final physical output columns
+by logical group rather than by the raw declaration order in an abstract parent
+specification. The abstract spec order is primarily for shared configuration
+and readability, not for controlling the final Snowflake table layout.
+
+Implementations should emit SCD2 target columns in this order:
+
+1. generated surrogate key, when enabled
+2. generated business key, when enabled
+3. declared business fields in their declared order
+4. SCD2 state fields in this order: `IS_CURRENT_FLAG`, `IS_DELETED_FLAG`,
+   `VALID_FROM_DATETIME`, `VALID_TO_DATETIME`
+5. generated `BUSINESS_DATA_HASH`, when enabled
+6. declared source audit fields, for example `AUDIT_CREATED_SOURCE` and
+   `AUDIT_LAST_CHANGED_SOURCE`, in their declared order
+7. generated system audit fields in this order: `AUDIT_CREATED_DATETIME`,
+   `AUDIT_LAST_CHANGED_DATETIME`, `AUDIT_DATA_PROCESS_KEY`
+
+This lets a concrete reference-data spec inherit shared SCD2 behavior from an
+abstract parent while still producing a stable physical column layout such as
+key columns first, source business columns next, SCD2 metadata after that, and
+audit metadata at the end.
+
 Sample: target table definition.
 
 ```yaml
@@ -1411,6 +1437,7 @@ csv_field_source ::=
   pos?
   column?
   default_value?
+  | source_macro
   | fixed_value
 
 table_field_source ::=
@@ -2058,18 +2085,18 @@ Parse-time rules:
 - Complete concrete specifications must declare `control_data.change_type`.
 - `source.format ::= csv | table`.
 - For `source.format = csv`, each field source must specify at least one of
-  `pos`, `column`, or `fixed_value`.
+  `pos`, `column`, `macro`, or `fixed_value`.
 - For `source.format = csv` and `source.header = false`, `field.source.column`
   is invalid.
 - For `source.format = csv`, `source.load_method = dbt_seed`, and
-  `source.header = true`, each field source must specify `column` or
-  `fixed_value`.
+  `source.header = true`, each non-fixed, non-macro field source must specify
+  `column`.
 - For `source.format = csv`, `source.load_method = dbt_seed`, and
-  `source.header = false`, each field source must specify `pos` or
-  `fixed_value`.
+  `source.header = false`, each non-fixed, non-macro field source must specify
+  `pos`.
 - For `source.format = table`, each field must specify `source` or `lookup`.
 - For `source.format = table`, each `field.source` must specify `column`,
-  `default_value`, `default_from_field`, or `fixed_value`.
+  `default_value`, `default_from_field`, `macro`, or `fixed_value`.
 - For `source.format = table`, `field.lookup` is mutually exclusive with
   `field.source`.
 - For `source.format = table`, `field.source.pos` is invalid.

@@ -158,6 +158,8 @@ def _validate_target_fields(spec: dict[str, Any]) -> list[Diagnostic]:
             continue
         if "snowflake_path" in source:
             continue
+        if isinstance(source.get("macro"), str):
+            continue
         column_key = case_key(column)
         column_location = f"$.target.fields[{index}].source.column"
         if column_key in seen_source_columns:
@@ -412,19 +414,19 @@ def _validate_csv_seed_source(spec: dict[str, Any]) -> list[Diagnostic]:
                 )
             )
             continue
-        if "fixed_value" in field_source:
+        if "fixed_value" in field_source or isinstance(field_source.get("macro"), str):
             continue
         if source.get("header") is True and not isinstance(field_source.get("column"), str):
             diagnostics.append(
                 Diagnostic(
-                    "dbt_seed CSV sources with a header require field.source.column or field.source.fixed_value",
+                    "dbt_seed CSV sources with a header require field.source.column, field.source.macro, or field.source.fixed_value",
                     f"$.target.fields[{index}].source.column",
                 )
             )
         if source.get("header") is False and not isinstance(field_source.get("pos"), int):
             diagnostics.append(
                 Diagnostic(
-                    "dbt_seed CSV sources without a header require field.source.pos or field.source.fixed_value",
+                    "dbt_seed CSV sources without a header require field.source.pos, field.source.macro, or field.source.fixed_value",
                     f"$.target.fields[{index}].source.pos",
                 )
             )

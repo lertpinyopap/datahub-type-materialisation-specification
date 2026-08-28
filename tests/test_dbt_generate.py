@@ -455,6 +455,65 @@ def test_csv_dbt_seed_generation_outputs_fixed_values_without_seed_columns(tmp_p
     assert "cast('Y' as string) as IS_CURRENT_FLAG" in source_sql
 
 
+def test_csv_dbt_seed_generation_uses_source_macro(tmp_path: Path) -> None:
+    macro_dir = tmp_path / "macros"
+    macro_dir.mkdir()
+    (macro_dir / "lookup_macros.py").write_text(
+        """
+class CustomerStatusKey:
+    def generate_dbt_macro(self):
+        return "{% macro customer_status_key(source_code_expression, ref_alias, output_column) %}left join lateral (select 'STATUS:' || ({{ source_code_expression }}) as {{ output_column }}) as {{ ref_alias }} on true{% endmacro %}"
+
+customer_status_key = CustomerStatusKey()
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+    seed_file = tmp_path / "account_seed_input.csv"
+    seed_file.write_text("account_id,status_code\nACCT000000000001,ACTIVE\n", encoding="utf-8")
+    result, output_dir = generate(
+        tmp_path,
+        f"""
+        id: account_csv
+        control_data:
+          change_type: scd1
+        source:
+          format: csv
+          header: true
+          load_method: dbt_seed
+          seed:
+            file: {seed_file}
+            name: account_seed
+            schema: TMP
+        target:
+          id: account
+          schema: business
+          fields:
+            - id: account_id
+              source:
+                column: account_id
+              data_type: varchar(20)
+            - id: customer_status_key
+              source:
+                column: status_code
+                macro: lookup_macros.customer_status_key
+                args:
+                  source_code_expression: source_query.STATUS_CODE
+              data_type: varchar(64)
+        """,
+        macro_paths=[macro_dir],
+    )
+
+    assert result.errors == []
+    project = load_yaml(output_dir / "dbt_project.yml")
+    seed_config = project["seeds"]["type_materialisation_generated"]["account_seed"]
+    assert seed_config["+column_types"] == {"ACCOUNT_ID": "varchar", "STATUS_CODE": "varchar"}
+    source_sql = (output_dir / "models" / "generated" / "account__source.sql").read_text(encoding="utf-8")
+    assert "cast(ACCOUNT_ID as string) as ACCOUNT_ID" in source_sql
+    assert "LOOKUP_CUSTOMER_STATUS_KEY.CUSTOMER_STATUS_KEY as CUSTOMER_STATUS_KEY" in source_sql
+    assert '{{ customer_status_key(output_column="customer_status_key", ref_alias="LOOKUP_CUSTOMER_STATUS_KEY", source_code_expression="source_query.STATUS_CODE") }}' in source_sql
+
+
 def test_csv_dbt_seed_generation_reports_missing_seed_file(tmp_path: Path) -> None:
     result, _ = generate(
         tmp_path,
@@ -609,6 +668,90 @@ def test_generated_final_model_uses_audit_metadata_types(tmp_path: Path) -> None
     assert "cast('{{ var(\"audit_data_process_key\", \"manual\") }}' as varchar(256))" in model_sql
     assert "cast(current_timestamp() as timestamp_tz) as AUDIT_CREATED_DATETIME" in model_sql
     assert "cast(current_timestamp() as timestamp_tz) as AUDIT_LAST_CHANGED_DATETIME" in model_sql
+
+
+def test_scd2_manual_output_orders_keys_business_fields_scd2_hash_and_audit_groups(tmp_path: Path) -> None:
+    result, output_dir = generate(
+        tmp_path,
+        csv_generation_spec(
+            extra_control="""
+            control_data:
+              change_type: scd2_manual
+              business_key:
+                fields:
+                  - account_code
+              scd:
+                update_mode: upsert
+                update_key:
+                  fields:
+                    - valid_from_datetime
+            """,
+            fields="""
+        - id: account_code
+          source:
+            pos: 0
+            column: ACCOUNT_CODE
+          data_type: varchar(20)
+        - id: account_description
+          source:
+            pos: 1
+            column: ACCOUNT_DESCRIPTION
+          data_type: varchar(255)
+        - id: audit_created_source
+          source:
+            fixed_value: source-a
+          data_type: varchar(255)
+        - id: audit_last_changed_source
+          source:
+            fixed_value: source-b
+          data_type: varchar(255)
+        - id: valid_from_datetime
+          source:
+            pos: 2
+            column: VALID_FROM_DATETIME
+          data_type: timestamp_tz
+        - id: valid_to_datetime
+          source:
+            pos: 3
+            column: VALID_TO_DATETIME
+          data_type: timestamp_tz
+        - id: is_current_flag
+          source:
+            pos: 4
+            column: IS_CURRENT_FLAG
+          data_type: varchar(1)
+        - id: is_deleted_flag
+          source:
+            pos: 5
+            column: IS_DELETED_FLAG
+          data_type: varchar(1)
+            """,
+        ),
+    )
+
+    assert result.errors == []
+    model_sql = (output_dir / "models" / "generated" / "account.sql").read_text(encoding="utf-8")
+    final_select = model_sql.rsplit("select\n", 1)[1].rsplit("\nfrom valid_rows", 1)[0]
+
+    expected_order = [
+        " as ACCOUNT_KEY",
+        " as ACCOUNT_BUSINESS_KEY",
+        " as ACCOUNT_CODE",
+        " as ACCOUNT_DESCRIPTION",
+        " as IS_CURRENT_FLAG",
+        " as IS_DELETED_FLAG",
+        " as VALID_FROM_DATETIME",
+        " as VALID_TO_DATETIME",
+        " as BUSINESS_DATA_HASH",
+        " as AUDIT_CREATED_SOURCE",
+        " as AUDIT_LAST_CHANGED_SOURCE",
+        " as AUDIT_CREATED_DATETIME",
+        " as AUDIT_LAST_CHANGED_DATETIME",
+        " as AUDIT_DATA_PROCESS_KEY",
+    ]
+
+    positions = [final_select.index(token) for token in expected_order]
+    assert positions == sorted(positions)
 
 
 def test_generated_project_uses_named_local_user_profile(tmp_path: Path) -> None:

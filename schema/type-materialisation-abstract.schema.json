@@ -132,6 +132,9 @@
                   "required": ["column"]
                 },
                 {
+                  "required": ["macro"]
+                },
+                {
                   "required": ["fixed_value"]
                 }
               ]
@@ -151,6 +154,9 @@
               "anyOf": [
                 {
                   "required": ["pos"]
+                },
+                {
+                  "required": ["macro"]
                 },
                 {
                   "required": ["fixed_value"]

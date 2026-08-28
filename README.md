@@ -263,7 +263,10 @@ generated dbt project's `seeds/` directory and generates a source model that
 reads from the seed relation. When `source.seed.file` contains `tms_var`
 expressions, `tms validate` and `tms generate-dbt` resolve them from `--vars`
 before validating or copying the seed file. Relative `source.seed.file` paths
-are resolved from the directory where the `tms` command is run. Generated
+are resolved from the directory where the `tms` command is run. Seed-backed
+CSV fields may also use `field.source.macro`; in that case,
+`field.source.column` or `field.source.pos` is optional and can be supplied
+only as a helper source column for macro arguments. Generated
 source-record views, intermediate guard models, default seed relations, and
 default quarantine tables use `control_data.staging_schema`, defaulting to
 `INTERMEDIATE`, and can be redirected at runtime with the `tms_staging_schema`

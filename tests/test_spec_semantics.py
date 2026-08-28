@@ -757,8 +757,37 @@ def test_csv_dbt_seed_with_header_requires_source_columns(tmp_path: Path) -> Non
     )
 
     assert diagnostic_messages(diagnostics) == [
-        "dbt_seed CSV sources with a header require field.source.column or field.source.fixed_value",
+        "dbt_seed CSV sources with a header require field.source.column, field.source.macro, or field.source.fixed_value",
     ]
+
+
+def test_csv_dbt_seed_with_header_accepts_source_macro(tmp_path: Path) -> None:
+    _, diagnostics = parse_yaml(
+        tmp_path,
+        """
+        id: account_spec
+        control_data:
+          change_type: scd1
+        source:
+          format: csv
+          header: true
+          load_method: dbt_seed
+          seed:
+            file: account.csv
+        target:
+          id: account
+          schema: business
+          fields:
+            - id: customer_status_key
+              source:
+                macro: lookup_macros.customer_status_key
+                args:
+                  source_code_expression: source_query.STATUS_CODE
+              data_type: varchar(64)
+        """,
+    )
+
+    assert diagnostics == []
 
 
 def test_csv_seed_block_requires_dbt_seed_load_method(tmp_path: Path) -> None:
