@@ -1366,8 +1366,6 @@ target:
   id: account
   database: analytics
   schema: business
-  tags:
-    DATA_CLASSIFICATION: CONFIDENTIAL
   fields:
     - id: account_id
       source:
@@ -1409,6 +1407,12 @@ is handled according to `failure_mode`.
 or platform policy integration. dbt implementations that support Snowflake tags
 should apply these as column tags after the target relation exists.
 
+Snowflake tag names may be simple names such as `PII_CATEGORY`, schema-qualified
+names such as `TAGS.PII_CATEGORY`, or fully qualified names such as
+`GOVERNANCE_DB.TAGS.PII_CATEGORY`. Values are scalar and are not restricted by
+the TMS schema, so platform-controlled allowed values can evolve without
+requiring a TMS schema change.
+
 Sample: target field.
 
 ```yaml
@@ -1422,8 +1426,8 @@ fields:
       - type: trim
     nullable: false
     tags:
-      DATA_CLASSIFICATION: PII
-      DATA_CATEGORY: IDENTIFIER
+      PII_CATEGORY: IDENTIFIER
+      PCI_CATEGORY: PCI
     unique: true
 ```
 

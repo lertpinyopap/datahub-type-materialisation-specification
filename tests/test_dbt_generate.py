@@ -98,6 +98,10 @@ def generate(tmp_path: Path, spec_content: str, *, auto_business_key: bool = Tru
     return result, output_dir
 
 
+def repo_macro_dir() -> Path:
+    return Path(__file__).resolve().parents[2] / "macros"
+
+
 def test_generation_fails_for_non_empty_output_directory(tmp_path: Path) -> None:
     spec_path = write_spec(tmp_path, "spec", csv_generation_spec())
     output_dir = tmp_path / "generated"
@@ -512,6 +516,60 @@ customer_status_key = CustomerStatusKey()
     assert "cast(ACCOUNT_ID as string) as ACCOUNT_ID" in source_sql
     assert "LOOKUP_CUSTOMER_STATUS_KEY.CUSTOMER_STATUS_KEY as CUSTOMER_STATUS_KEY" in source_sql
     assert '{{ customer_status_key(output_column="customer_status_key", ref_alias="LOOKUP_CUSTOMER_STATUS_KEY", source_code_expression="source_query.STATUS_CODE") }}' in source_sql
+
+
+def test_csv_dbt_seed_generation_uses_reference_lookup_core_bridge(tmp_path: Path) -> None:
+    seed_file = tmp_path / "financial_institution_seed_input.csv"
+    seed_file.write_text(
+        "financial_institution_code,country_code\nLFSAU,AU\n",
+        encoding="utf-8",
+    )
+    result, output_dir = generate(
+        tmp_path,
+        f"""
+        id: financial_institution_csv
+        control_data:
+          change_type: scd1
+          business_key:
+            fields:
+              - financial_institution_code
+        source:
+          format: csv
+          header: true
+          load_method: dbt_seed
+          seed:
+            file: {seed_file}
+            name: financial_institution_seed
+            schema: TMP
+        target:
+          id: financial_institution
+          schema: core
+          fields:
+            - id: financial_institution_code
+              source:
+                column: financial_institution_code
+              data_type: varchar(20)
+            - id: registered_country_key
+              source:
+                column: country_code
+                macro: reference_lookup_core_macros.reference_lookup_core_bridge
+                args:
+                  reference_type: COUNTRY
+                  source_code_column: COUNTRY_CODE
+                  value_column: COUNTRY_KEY
+                  required: true
+              data_type: varchar(64)
+        """,
+        macro_paths=[repo_macro_dir()],
+    )
+
+    assert result.errors == []
+    source_sql = (output_dir / "models" / "generated" / "financial_institution__source.sql").read_text(encoding="utf-8")
+    assert "LOOKUP_REGISTERED_COUNTRY_KEY.REGISTERED_COUNTRY_KEY as REGISTERED_COUNTRY_KEY" in source_sql
+    assert '{{ reference_lookup_core_bridge(output_column="registered_country_key", ref_alias="LOOKUP_REGISTERED_COUNTRY_KEY", reference_type="COUNTRY", required=True, source_code_column="COUNTRY_CODE", value_column="COUNTRY_KEY") }}' in source_sql
+    macro_sql = (output_dir / "macros" / "generated" / "reference_lookup_core_bridge.sql").read_text(encoding="utf-8")
+    assert "{% macro reference_lookup_core_bridge(" in macro_sql
+    assert "{{ reference_lookup_core(" in macro_sql
 
 
 def test_csv_dbt_seed_generation_reports_missing_seed_file(tmp_path: Path) -> None:
@@ -1238,6 +1296,55 @@ customer_status_key = CustomerStatusKey()
     assert '{{ customer_status_key(output_column="customer_status_key", ref_alias="LOOKUP_CUSTOMER_STATUS_KEY", reference_type="CUSTOMER_STATUS", source_code_expression="source_query.STATUS_CODE", source_system="V10") }}' in source_sql
     macro_sql = (output_dir / "macros" / "generated" / "customer_status_key.sql").read_text(encoding="utf-8")
     assert "{% macro customer_status_key(" in macro_sql
+
+
+def test_table_source_generation_uses_reference_lookup_mapping_bridge(tmp_path: Path) -> None:
+    result, output_dir = generate(
+        tmp_path,
+        """
+        id: card_account
+        control_data:
+          change_type: scd1
+          business_key:
+            fields:
+              - account_id
+        source:
+          format: table
+          query: |
+            select
+              account_id,
+              account_status_code,
+              source_system
+            from raw.card_account
+        target:
+          id: card_account
+          schema: business
+          fields:
+            - id: account_id
+              source:
+                column: account_id
+              data_type: varchar(20)
+            - id: customer_status_key
+              source:
+                macro: reference_lookup_mapping_macros.reference_lookup_mapping_bridge
+                args:
+                  reference_type: CUSTOMER_STATUS
+                  source_system_column: SOURCE_SYSTEM
+                  source_code_column: ACCOUNT_STATUS_CODE
+                  value_column: CUSTOMER_STATUS_KEY
+                  required: true
+              data_type: varchar(64)
+        """,
+        macro_paths=[repo_macro_dir()],
+    )
+
+    assert result.errors == []
+    source_sql = (output_dir / "models" / "generated" / "card_account__source.sql").read_text(encoding="utf-8")
+    assert "LOOKUP_CUSTOMER_STATUS_KEY.CUSTOMER_STATUS_KEY as CUSTOMER_STATUS_KEY" in source_sql
+    assert '{{ reference_lookup_mapping_bridge(output_column="customer_status_key", ref_alias="LOOKUP_CUSTOMER_STATUS_KEY", reference_type="CUSTOMER_STATUS", required=True, source_code_column="ACCOUNT_STATUS_CODE", source_system_column="SOURCE_SYSTEM", value_column="CUSTOMER_STATUS_KEY") }}' in source_sql
+    macro_sql = (output_dir / "macros" / "generated" / "reference_lookup_mapping_bridge.sql").read_text(encoding="utf-8")
+    assert "{% macro reference_lookup_mapping_bridge(" in macro_sql
+    assert "{{ reference_lookup_mapping(" in macro_sql
 
 
 def test_table_source_generation_flattens_snowflake_paths(tmp_path: Path) -> None:

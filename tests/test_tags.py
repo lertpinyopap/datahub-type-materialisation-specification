@@ -18,7 +18,6 @@ def test_target_and_field_tags_generate_snowflake_post_hooks(tmp_path: Path) -> 
         "target": {
             "id": "customer",
             "schema": "business",
-            "tags": {"DATA_CLASSIFICATION": "PII"},
             "fields": [
                 {
                     "id": "FIRST_NAME",
@@ -26,8 +25,8 @@ def test_target_and_field_tags_generate_snowflake_post_hooks(tmp_path: Path) -> 
                     "data_type": "varchar(100)",
                     "nullable": True,
                     "tags": {
-                        "DATA_CLASSIFICATION": "PII",
-                        "DATA_CATEGORY": "IDENTIFIER",
+                        "PII_CATEGORY": "IDENTIFIER",
+                        "PCI_CATEGORY": "PCI",
                     },
                 }
             ],
@@ -45,5 +44,5 @@ def test_target_and_field_tags_generate_snowflake_post_hooks(tmp_path: Path) -> 
 
     assert result.errors == []
     final_sql = (tmp_path / "generated" / "models" / "generated" / "customer.sql").read_text()
-    assert 'alter table {{ this }} set tag DATA_CLASSIFICATION = \'PII\'' in final_sql
-    assert 'alter table {{ this }} modify column FIRST_NAME set tag DATA_CATEGORY = \'IDENTIFIER\'' in final_sql
+    assert 'alter table {{ this }} modify column FIRST_NAME set tag PII_CATEGORY = \'IDENTIFIER\'' in final_sql
+    assert 'alter table {{ this }} modify column FIRST_NAME set tag PCI_CATEGORY = \'PCI\'' in final_sql
