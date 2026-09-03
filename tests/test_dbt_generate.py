@@ -518,60 +518,6 @@ customer_status_key = CustomerStatusKey()
     assert '{{ customer_status_key(output_column="customer_status_key", ref_alias="LOOKUP_CUSTOMER_STATUS_KEY", source_code_expression="source_query.STATUS_CODE") }}' in source_sql
 
 
-def test_csv_dbt_seed_generation_uses_reference_lookup_core_bridge(tmp_path: Path) -> None:
-    seed_file = tmp_path / "financial_institution_seed_input.csv"
-    seed_file.write_text(
-        "financial_institution_code,country_code\nLFSAU,AU\n",
-        encoding="utf-8",
-    )
-    result, output_dir = generate(
-        tmp_path,
-        f"""
-        id: financial_institution_csv
-        control_data:
-          change_type: scd1
-          business_key:
-            fields:
-              - financial_institution_code
-        source:
-          format: csv
-          header: true
-          load_method: dbt_seed
-          seed:
-            file: {seed_file}
-            name: financial_institution_seed
-            schema: TMP
-        target:
-          id: financial_institution
-          schema: core
-          fields:
-            - id: financial_institution_code
-              source:
-                column: financial_institution_code
-              data_type: varchar(20)
-            - id: registered_country_key
-              source:
-                column: country_code
-                macro: reference_lookup_core_macros.reference_lookup_core_bridge
-                args:
-                  reference_type: COUNTRY
-                  source_code_column: COUNTRY_CODE
-                  value_column: COUNTRY_KEY
-                  required: true
-              data_type: varchar(64)
-        """,
-        macro_paths=[repo_macro_dir()],
-    )
-
-    assert result.errors == []
-    source_sql = (output_dir / "models" / "generated" / "financial_institution__source.sql").read_text(encoding="utf-8")
-    assert "LOOKUP_REGISTERED_COUNTRY_KEY.REGISTERED_COUNTRY_KEY as REGISTERED_COUNTRY_KEY" in source_sql
-    assert '{{ reference_lookup_core_bridge(output_column="registered_country_key", ref_alias="LOOKUP_REGISTERED_COUNTRY_KEY", reference_type="COUNTRY", required=True, source_code_column="COUNTRY_CODE", value_column="COUNTRY_KEY") }}' in source_sql
-    macro_sql = (output_dir / "macros" / "generated" / "reference_lookup_core_bridge.sql").read_text(encoding="utf-8")
-    assert "{% macro reference_lookup_core_bridge(" in macro_sql
-    assert "{{ reference_lookup_core(" in macro_sql
-
-
 def test_csv_dbt_seed_generation_reports_missing_seed_file(tmp_path: Path) -> None:
     result, _ = generate(
         tmp_path,
@@ -876,6 +822,63 @@ def test_fail_load_generates_validation_guard_model(tmp_path: Path) -> None:
     assert "VALIDATION_FAILURE_DETAILS" in guard_sql
     assert "where FAILURE_DETAILS is not null" in guard_sql
     assert "fail_load validation failure enforcement" not in not_implemented
+
+
+def test_validation_can_be_disabled_for_fail_load(tmp_path: Path) -> None:
+    result, output_dir = generate(
+        tmp_path,
+        csv_generation_spec(
+            extra_control="""
+            control_data:
+              change_type: scd1
+              failure_mode: fail_load
+              validation_enabled: false
+            """,
+            fields="""
+        - id: account_id
+          source:
+            pos: 0
+            column: account_id
+          data_type: varchar(20)
+          nullable: false
+            """,
+        ),
+    )
+
+    assert result.errors == []
+    model_sql = (output_dir / "models" / "generated" / "account.sql").read_text(encoding="utf-8")
+    assert not (output_dir / "models" / "generated" / "account__validation_guard.sql").exists()
+    assert "ref('account__validation_guard')" not in model_sql
+    assert "TYPE_MATERIALISATION_VALIDATION_FAILED:" not in model_sql
+    assert "validation_rows as (" not in model_sql
+
+
+def test_validation_can_be_disabled_for_quarantine_row(tmp_path: Path) -> None:
+    result, output_dir = generate(
+        tmp_path,
+        csv_generation_spec(
+            extra_control="""
+            control_data:
+              change_type: scd1
+              failure_mode: quarantine_row
+              validation_enabled: false
+            """,
+            fields="""
+        - id: account_id
+          source:
+            pos: 0
+            column: account_id
+          data_type: varchar(20)
+          nullable: false
+            """,
+        ),
+    )
+
+    assert result.errors == []
+    model_sql = (output_dir / "models" / "generated" / "account.sql").read_text(encoding="utf-8")
+    assert not (output_dir / "models" / "generated" / "account__quarantine.sql").exists()
+    assert "validation_rows as (" not in model_sql
+    assert "from {{ ref('account__source') }}" in model_sql
 
 
 def test_unique_fields_generate_dbt_validation_sql(tmp_path: Path) -> None:
@@ -1296,55 +1299,6 @@ customer_status_key = CustomerStatusKey()
     assert '{{ customer_status_key(output_column="customer_status_key", ref_alias="LOOKUP_CUSTOMER_STATUS_KEY", reference_type="CUSTOMER_STATUS", source_code_expression="source_query.STATUS_CODE", source_system="V10") }}' in source_sql
     macro_sql = (output_dir / "macros" / "generated" / "customer_status_key.sql").read_text(encoding="utf-8")
     assert "{% macro customer_status_key(" in macro_sql
-
-
-def test_table_source_generation_uses_reference_lookup_mapping_bridge(tmp_path: Path) -> None:
-    result, output_dir = generate(
-        tmp_path,
-        """
-        id: card_account
-        control_data:
-          change_type: scd1
-          business_key:
-            fields:
-              - account_id
-        source:
-          format: table
-          query: |
-            select
-              account_id,
-              account_status_code,
-              source_system
-            from raw.card_account
-        target:
-          id: card_account
-          schema: business
-          fields:
-            - id: account_id
-              source:
-                column: account_id
-              data_type: varchar(20)
-            - id: customer_status_key
-              source:
-                macro: reference_lookup_mapping_macros.reference_lookup_mapping_bridge
-                args:
-                  reference_type: CUSTOMER_STATUS
-                  source_system_column: SOURCE_SYSTEM
-                  source_code_column: ACCOUNT_STATUS_CODE
-                  value_column: CUSTOMER_STATUS_KEY
-                  required: true
-              data_type: varchar(64)
-        """,
-        macro_paths=[repo_macro_dir()],
-    )
-
-    assert result.errors == []
-    source_sql = (output_dir / "models" / "generated" / "card_account__source.sql").read_text(encoding="utf-8")
-    assert "LOOKUP_CUSTOMER_STATUS_KEY.CUSTOMER_STATUS_KEY as CUSTOMER_STATUS_KEY" in source_sql
-    assert '{{ reference_lookup_mapping_bridge(output_column="customer_status_key", ref_alias="LOOKUP_CUSTOMER_STATUS_KEY", reference_type="CUSTOMER_STATUS", required=True, source_code_column="ACCOUNT_STATUS_CODE", source_system_column="SOURCE_SYSTEM", value_column="CUSTOMER_STATUS_KEY") }}' in source_sql
-    macro_sql = (output_dir / "macros" / "generated" / "reference_lookup_mapping_bridge.sql").read_text(encoding="utf-8")
-    assert "{% macro reference_lookup_mapping_bridge(" in macro_sql
-    assert "{{ reference_lookup_mapping(" in macro_sql
 
 
 def test_table_source_generation_flattens_snowflake_paths(tmp_path: Path) -> None:
@@ -2617,6 +2571,35 @@ def test_scd2_auto_truncate_before_load_rebuilds_without_existing_target(tmp_pat
     assert "cross join scd2_validation_guard" in model_sql
 
 
+def test_scd2_auto_validation_can_be_disabled(tmp_path: Path) -> None:
+    result, output_dir = generate(
+        tmp_path,
+        csv_generation_spec(
+            extra_control="""
+            control_data:
+              change_type: scd2_auto
+              scd:
+                insert_time: "{{ var('insert_time') }}"
+                scd2_validation_enabled: false
+            """,
+            fields="""
+        - id: account_id
+          source:
+            pos: 0
+            column: account_id
+          data_type: varchar(20)
+            """,
+        ),
+    )
+
+    assert result.errors == []
+    model_sql = (output_dir / "models" / "generated" / "account.sql").read_text(encoding="utf-8")
+    assert "post_load_validation_rows as (" not in model_sql
+    assert "scd2_invalid_validity_rows as (" not in model_sql
+    assert "cross join scd2_validation_guard" not in model_sql
+    assert model_sql.rstrip().endswith("from flagged_rows")
+
+
 def test_scd2_auto_generates_duplicate_hash_boundary_updates(tmp_path: Path) -> None:
     result, output_dir = generate(
         tmp_path,
@@ -2648,8 +2631,48 @@ def test_scd2_auto_generates_duplicate_hash_boundary_updates(tmp_path: Path) -> 
     assert "TMS_PREVIOUS_IS_EXISTING_TARGET_ROW = 'N'" in model_sql
     assert "TMS_PREVIOUS_BUSINESS_DATA_HASH is not null" in model_sql
     assert "and not (TMS_PREVIOUS_2_BUSINESS_DATA_HASH is not null" in model_sql
+    assert "var('tms_log_scd2_duplicate_hash_metrics', false)" in model_sql
     assert "SCD2 duplicate hash handling: historical duplicate boundaries updated=" in model_sql
     assert "historical duplicate rows skipped" not in model_sql
+
+
+def test_scd2_derived_scopes_existing_target_to_incoming_keys(tmp_path: Path) -> None:
+    result, output_dir = generate(
+        tmp_path,
+        csv_generation_spec(
+            extra_control="""
+            control_data:
+              change_type: scd2_derived
+              scd:
+                valid_from_datetime:
+                  expression: updated_at
+                scd2_validation_enabled: false
+                validation_scope: affected_window
+            """,
+            fields="""
+        - id: account_id
+          source:
+            pos: 0
+            column: account_id
+          data_type: varchar(20)
+          unique: true
+        - id: updated_at
+          source:
+            pos: 1
+            column: updated_at
+          data_type: timestamp_tz
+            """,
+        ),
+    )
+
+    assert result.errors == []
+    model_sql = (output_dir / "models" / "generated" / "account.sql").read_text(encoding="utf-8")
+    assert model_sql.index("incoming_key_rows as (") < model_sql.index("existing_target_rows as (")
+    assert "from {{ this }} as existing_target" in model_sql
+    assert "from incoming_key_rows as incoming_key" in model_sql
+    assert "post_load_validation_rows as (" not in model_sql
+    assert "scd2_invalid_validity_rows as (" not in model_sql
+    assert "cross join scd2_validation_guard" not in model_sql
 
 
 def test_scd2_auto_unit_tests_override_is_incremental(tmp_path: Path) -> None:

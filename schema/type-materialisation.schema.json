@@ -210,6 +210,10 @@
           "type": "string",
           "enum": ["fail_load", "quarantine_row"]
         },
+        "validation_enabled": {
+          "type": "boolean",
+          "default": true
+        },
         "change_type": {
           "type": "string",
           "enum": ["scd1", "scd2_manual", "scd2_auto", "scd2_derived"]
@@ -328,6 +332,10 @@
           "type": "string",
           "enum": ["continuous", "sparse"],
           "default": "continuous"
+        },
+        "scd2_validation_enabled": {
+          "type": "boolean",
+          "default": true
         },
         "derivation_scope": {
           "type": "string",

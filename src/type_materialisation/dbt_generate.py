@@ -130,7 +130,7 @@ def generate_dbt_project(options: GenerateDbtOptions) -> DbtGenerationResult:
     except ValueError as exc:
         result.errors.append(Diagnostic(str(exc), "$.target.fields"))
         return result
-    if _failure_mode(spec) == "fail_load":
+    if _fail_load_enabled(spec):
         _write_validation_guard_model(spec, result)
     _write_generated_macros(options.output_dir, generated_macros, result)
     if options.unit_test_csv is not None:
@@ -218,11 +218,18 @@ def _unsupported_for_initial_dbt_generation(spec: dict[str, Any]) -> list[Diagno
                 "$.control_data.scd.scd2_auto_from_sot",
             )
         )
-    if _change_type(spec) == "scd1" and "scd2_validation" in scd:
+    if _change_type(spec) not in {"scd2_auto", "scd2_derived"} and "scd2_validation" in scd:
         diagnostics.append(
             Diagnostic(
-                "`scd2_validation` is only valid when `change_type` is scd2_auto",
+                "`scd2_validation` is only valid when `change_type` is scd2_auto or scd2_derived",
                 "$.control_data.scd.scd2_validation",
+            )
+        )
+    if _change_type(spec) not in {"scd2_auto", "scd2_derived"} and "scd2_validation_enabled" in scd:
+        diagnostics.append(
+            Diagnostic(
+                "`scd2_validation_enabled` is only valid when `change_type` is scd2_auto or scd2_derived",
+                "$.control_data.scd.scd2_validation_enabled",
             )
         )
     if _change_type(spec) in {"scd1", "scd2_auto", "scd2_derived"} and "update_mode" in scd:
@@ -601,7 +608,7 @@ def _write_final_model(spec: dict[str, Any], result: DbtGenerationResult) -> Non
     materialized = spec.get("control_data", {}).get("materialisation_type", "table")
     source_model = _source_model_name(target["id"])
     quarantine_enabled = _quarantine_enabled(spec)
-    fail_load_enabled = _failure_mode(spec) == "fail_load"
+    fail_load_enabled = _fail_load_enabled(spec)
     field_select_lines = []
     for field in fields(spec):
         expression = _field_expression(field)
@@ -863,7 +870,7 @@ def _scd2_final_body_lines(
             fail_load_enabled=fail_load_enabled,
         )
 
-    output_lines = _scd2_output_lines(spec, audit_select_lines)
+    output_lines = _scd2_output_lines(spec)
     return [
         *_scd2_valid_rows_lines(spec, source_model, quarantine_enabled, fail_load_enabled),
         "typed_rows as (",
@@ -905,14 +912,13 @@ def _scd2_final_body_lines(
         "        end as IS_CURRENT_FLAG,",
         f"        {_is_deleted_flag_expression(spec)} as IS_DELETED_FLAG",
         "    from windowed_rows",
-        "),",
+        ")," if _scd2_validation_enabled(spec) else ")",
         *_scd2_validation_cte_lines(spec),
         "",
         "select",
         ",\n".join(output_lines),
         "from flagged_rows",
-        "cross join scd2_validation_guard",
-        "where scd2_validation_guard.SCD2_VALIDATION_GUARD = 0",
+        *_scd2_validation_guard_join_lines(spec),
         "",
     ]
 
@@ -931,7 +937,7 @@ def _scd2_duplicate_hash_runtime_log_lines(
         return []
     change_row_columns = _scd2_change_row_columns(spec)
     return [
-        "{% if execute and is_incremental() and not var('tms_unit_test', false) %}",
+        "{% if execute and is_incremental() and var('tms_log_scd2_duplicate_hash_metrics', false) and not var('tms_unit_test', false) %}",
         "{% set tms_scd2_duplicate_hash_log_sql %}",
         *_scd2_valid_rows_lines(spec, source_model, quarantine_enabled, fail_load_enabled),
         "typed_rows as (",
@@ -952,6 +958,11 @@ def _scd2_duplicate_hash_runtime_log_lines(
         ),
         "    from valid_rows",
         "),",
+        "incoming_key_rows as (",
+        "    select distinct",
+        ",\n".join(_business_key_cte_select_lines(spec, "        ")),
+        "    from typed_rows",
+        "),",
         *_scd2_runtime_existing_target_rows_lines(spec),
         "current_target_rows as (",
         "    select *",
@@ -969,11 +980,6 @@ def _scd2_duplicate_hash_runtime_log_lines(
         "          and coalesce(current_target.IS_DELETED_FLAG, 'N') = typed_rows.TMS_IS_DELETED_FLAG_CANDIDATE",
         "          and typed_rows.TMS_VALID_FROM_DATETIME_CANDIDATE >= current_target.VALID_FROM_DATETIME",
         "    )",
-        "),",
-        "incoming_key_rows as (",
-        "    select distinct",
-        ",\n".join(_business_key_cte_select_lines(spec, "        ")),
-        "    from typed_rows",
         "),",
         "source_change_rows as (",
         "    select *",
@@ -1113,7 +1119,12 @@ def _scd2_runtime_existing_target_rows_lines(spec: dict[str, Any]) -> list[str]:
         "existing_target_rows as (",
         "    select",
         ",\n".join(f"        {_quote_identifier(column)}" for column, _ in columns),
-        "    from {{ this }}",
+        "    from {{ this }} as existing_target",
+        "    where exists (",
+        "        select 1",
+        "        from incoming_key_rows as incoming_key",
+        f"        where {_business_key_join_condition(spec, 'existing_target', 'incoming_key')}",
+        "    )",
         "),",
     ]
 
@@ -1128,9 +1139,12 @@ def _scd2_target_merge_body_lines(
     quarantine_enabled: bool,
     fail_load_enabled: bool,
 ) -> list[str]:
-    output_lines = _scd2_output_lines(spec, audit_select_lines)
+    output_lines = _scd2_output_lines(spec)
     change_row_columns = _scd2_change_row_columns(spec)
     source_change_not_exists_lines = _scd2_source_change_not_exists_lines(spec)
+    window_and_flag_lines = _scd2_window_and_flag_lines(spec, "deduplicated_version_rows", include_validation=False)
+    if not _scd2_validation_enabled(spec):
+        window_and_flag_lines[-1] = ")"
     return [
         *_scd2_valid_rows_lines(spec, source_model, quarantine_enabled, fail_load_enabled),
         "typed_rows as (",
@@ -1151,16 +1165,16 @@ def _scd2_target_merge_body_lines(
         ),
         "    from valid_rows",
         "),",
+        "incoming_key_rows as (",
+        "    select distinct",
+        ",\n".join(_business_key_cte_select_lines(spec, "        ")),
+        "    from typed_rows",
+        "),",
         *_scd2_existing_target_rows_lines(spec),
         "current_target_rows as (",
         "    select *",
         "    from existing_target_rows",
         "    where IS_CURRENT_FLAG = 'Y'",
-        "),",
-        "incoming_key_rows as (",
-        "    select distinct",
-        ",\n".join(_business_key_cte_select_lines(spec, "        ")),
-        "    from typed_rows",
         "),",
         "source_change_rows as (",
         "    select *",
@@ -1234,15 +1248,14 @@ def _scd2_target_merge_body_lines(
         "    where TMS_VERSION_ROW_NUMBER = 1",
         "),",
         *_scd2_duplicate_boundary_lines(spec),
-        *_scd2_window_and_flag_lines(spec, "deduplicated_version_rows", include_validation=False),
+        *window_and_flag_lines,
         *_scd2_post_load_validation_rows_lines(spec),
         *_scd2_validation_cte_lines(spec, input_cte="post_load_validation_rows"),
         "",
         "select",
         ",\n".join(output_lines),
         "from flagged_rows",
-        "cross join scd2_validation_guard",
-        "where scd2_validation_guard.SCD2_VALIDATION_GUARD = 0",
+        *_scd2_validation_guard_join_lines(spec),
         "",
     ]
 
@@ -1257,6 +1270,15 @@ def _scd2_source_change_not_exists_lines(spec: dict[str, Any]) -> list[str]:
             "          and existing_target.VALID_FROM_DATETIME = typed_rows.TMS_VALID_FROM_DATETIME_CANDIDATE",
             "          and existing_target.BUSINESS_DATA_HASH = typed_rows.BUSINESS_DATA_HASH",
             "          and coalesce(existing_target.IS_DELETED_FLAG, 'N') = typed_rows.TMS_IS_DELETED_FLAG_CANDIDATE",
+            "    )",
+            "      and not exists (",
+            "        select 1",
+            "        from existing_target_rows as current_target",
+            f"        where {_business_key_join_condition(spec, 'typed_rows', 'current_target')}",
+            "          and current_target.IS_CURRENT_FLAG = 'Y'",
+            "          and current_target.BUSINESS_DATA_HASH = typed_rows.BUSINESS_DATA_HASH",
+            "          and coalesce(current_target.IS_DELETED_FLAG, 'N') = typed_rows.TMS_IS_DELETED_FLAG_CANDIDATE",
+            "          and typed_rows.TMS_VALID_FROM_DATETIME_CANDIDATE >= current_target.VALID_FROM_DATETIME",
             "    )",
         ]
     return [
@@ -1433,7 +1455,7 @@ def _scd2_system_audit_column_types() -> list[tuple[str, str]]:
     ]
 
 
-def _scd2_output_lines(spec: dict[str, Any], audit_select_lines: list[str]) -> list[str]:
+def _scd2_output_lines(spec: dict[str, Any]) -> list[str]:
     business_fields, source_audit_fields, _ = _scd2_declared_field_groups(spec)
     lines: list[str] = []
     lines.extend(_surrogate_key_output_lines(spec))
@@ -1442,7 +1464,33 @@ def _scd2_output_lines(spec: dict[str, Any], audit_select_lines: list[str]) -> l
     lines.extend(f"    {column_id}" for column_id in SCD2_STATE_COLUMN_IDS)
     lines.append("    BUSINESS_DATA_HASH")
     lines.extend(f"    {_quote_identifier(field['id'])}" for field in source_audit_fields)
-    lines.extend(audit_select_lines)
+    lines.extend(
+        [
+            "    AUDIT_CREATED_DATETIME",
+            "\n".join(
+                [
+                    "    case",
+                    "        when TMS_IS_EXISTING_TARGET_ROW = 'Y' then AUDIT_LAST_CHANGED_DATETIME",
+                    (
+                        "        else cast(current_timestamp() as "
+                        f"{GENERATED_METADATA_FIELD_TYPES['audit_last_changed_datetime']})"
+                    ),
+                    "    end as AUDIT_LAST_CHANGED_DATETIME",
+                ]
+            ),
+            "\n".join(
+                [
+                    "    case",
+                    "        when TMS_IS_EXISTING_TARGET_ROW = 'Y' then AUDIT_DATA_PROCESS_KEY",
+                    (
+                        "        else cast('{{ var(\"audit_data_process_key\", \"manual\") }}' as "
+                        f"{GENERATED_METADATA_FIELD_TYPES['audit_data_process_key']})"
+                    ),
+                    "    end as AUDIT_DATA_PROCESS_KEY",
+                ]
+            ),
+        ]
+    )
     return lines
 
 
@@ -1463,12 +1511,23 @@ def _scd2_target_column_types(spec: dict[str, Any]) -> list[tuple[str, str]]:
 
 def _scd2_existing_target_rows_lines(spec: dict[str, Any]) -> list[str]:
     columns = _scd2_target_column_types(spec)
+    scope_to_incoming_keys = _change_type(spec) == "scd2_derived" and _scd_validation_scope(spec) == "affected_window"
+    incremental_from_lines = ["    from {{ this }}"]
+    if scope_to_incoming_keys:
+        incremental_from_lines = [
+            "    from {{ this }} as existing_target",
+            "    where exists (",
+            "        select 1",
+            "        from incoming_key_rows as incoming_key",
+            f"        where {_business_key_join_condition(spec, 'existing_target', 'incoming_key')}",
+            "    )",
+        ]
     return [
         "{% if is_incremental() %}",
         "existing_target_rows as (",
         "    select",
         ",\n".join(f"        {_quote_identifier(column)}" for column, _ in columns),
-        "    from {{ this }}",
+        *incremental_from_lines,
         "),",
         "{% else %}",
         "existing_target_rows as (",
@@ -1681,11 +1740,17 @@ def _scd2_window_and_flag_lines(
         "),",
     ]
     if include_validation:
-        lines.extend(_scd2_validation_cte_lines(spec))
+        validation_lines = _scd2_validation_cte_lines(spec)
+        if validation_lines:
+            lines.extend(validation_lines)
+        else:
+            lines[-1] = ")"
     return lines
 
 
 def _scd2_post_load_validation_rows_lines(spec: dict[str, Any]) -> list[str]:
+    if not _scd2_validation_enabled(spec):
+        return []
     columns = [*_business_key_partition_columns(spec), "VALID_FROM_DATETIME", "VALID_TO_DATETIME"]
     if _change_type(spec) == "scd2_derived" and _scd_validation_scope(spec) == "affected_window":
         return [
@@ -1717,6 +1782,8 @@ def _scd2_post_load_validation_rows_lines(spec: dict[str, Any]) -> list[str]:
 
 
 def _scd2_validation_cte_lines(spec: dict[str, Any], *, input_cte: str = "flagged_rows") -> list[str]:
+    if not _scd2_validation_enabled(spec):
+        return []
     # SCD2 validity windows are inclusive: VALID_TO_DATETIME is still live.
     # Adjacent continuous rows must therefore start one timestamp tick after the previous row ends.
     conditions = [
@@ -1774,6 +1841,15 @@ def _scd2_validation_cte_lines(spec: dict[str, Any], *, input_cte: str = "flagge
         "    from scd2_validation_failure_count",
         "    where SCD2_VALIDATION_FAILURE_COUNT > 0",
         ")",
+    ]
+
+
+def _scd2_validation_guard_join_lines(spec: dict[str, Any]) -> list[str]:
+    if not _scd2_validation_enabled(spec):
+        return []
+    return [
+        "cross join scd2_validation_guard",
+        "where scd2_validation_guard.SCD2_VALIDATION_GUARD = 0",
     ]
 
 
@@ -2023,7 +2099,7 @@ def _write_unit_tests(
             "rows": source_fixture_sql,
         }
     ]
-    if _failure_mode(spec) == "fail_load":
+    if _fail_load_enabled(spec):
         given.append(
             {
                 "input": f"ref('{_validation_guard_model_name(target['id'])}')",
@@ -2945,6 +3021,10 @@ def _scd2_validation_mode(spec: dict[str, Any]) -> str:
     return str(value) if value in {"continuous", "sparse"} else "continuous"
 
 
+def _scd2_validation_enabled(spec: dict[str, Any]) -> bool:
+    return _scd_config(spec).get("scd2_validation_enabled", True) is not False
+
+
 def _delete_detection_config(spec: dict[str, Any]) -> dict[str, Any]:
     config = _scd_config(spec).get("delete_detection", {})
     return config if isinstance(config, dict) else {"mode": "never"}
@@ -3609,9 +3689,18 @@ def _physical_name(value: Any) -> str:
     return text.upper()
 
 
+def _validation_enabled(spec: dict[str, Any]) -> bool:
+    control_data = spec.get("control_data", {})
+    return not (isinstance(control_data, dict) and control_data.get("validation_enabled") is False)
+
+
+def _fail_load_enabled(spec: dict[str, Any]) -> bool:
+    return _validation_enabled(spec) and _failure_mode(spec) == "fail_load"
+
+
 def _quarantine_enabled(spec: dict[str, Any]) -> bool:
     control_data = spec.get("control_data", {})
-    return isinstance(control_data, dict) and control_data.get("failure_mode") == "quarantine_row"
+    return _validation_enabled(spec) and isinstance(control_data, dict) and control_data.get("failure_mode") == "quarantine_row"
 
 
 def _failure_mode(spec: dict[str, Any]) -> str:

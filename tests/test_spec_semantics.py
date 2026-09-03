@@ -145,6 +145,36 @@ def test_failure_mode_rejects_old_fail_file_enum(tmp_path: Path) -> None:
     assert diagnostic_messages(diagnostics) == ["'fail_file' is not one of ['fail_load', 'quarantine_row']"]
 
 
+def test_validation_enabled_accepts_boolean(tmp_path: Path) -> None:
+    _, diagnostics = parse_yaml(
+        tmp_path,
+        complete_spec(
+            """
+            control_data:
+              change_type: scd1
+              validation_enabled: false
+            """
+        ),
+    )
+
+    assert diagnostic_messages(diagnostics) == []
+
+
+def test_validation_enabled_rejects_non_boolean(tmp_path: Path) -> None:
+    _, diagnostics = parse_yaml(
+        tmp_path,
+        complete_spec(
+            """
+            control_data:
+              change_type: scd1
+              validation_enabled: "false"
+            """
+        ),
+    )
+
+    assert diagnostic_messages(diagnostics) == ["'false' is not of type 'boolean'"]
+
+
 def test_source_column_names_are_rejected_case_insensitively(tmp_path: Path) -> None:
     _, diagnostics = parse_yaml(
         tmp_path,
@@ -1253,7 +1283,41 @@ def test_scd2_validation_rejects_unknown_mode(tmp_path: Path) -> None:
     assert "'strict' is not one of ['continuous', 'sparse']" in diagnostic_messages(diagnostics)
 
 
-def test_scd2_validation_is_only_valid_for_scd2_auto(tmp_path: Path) -> None:
+def test_scd2_validation_enabled_accepts_boolean_for_scd2_auto(tmp_path: Path) -> None:
+    _, diagnostics = parse_yaml(
+        tmp_path,
+        complete_spec(
+            """
+            control_data:
+              change_type: scd2_auto
+              scd:
+                insert_time: "{{ var('insert_time') }}"
+                scd2_validation_enabled: false
+            """
+        ),
+    )
+
+    assert diagnostics == []
+
+
+def test_scd2_validation_enabled_rejects_non_boolean(tmp_path: Path) -> None:
+    _, diagnostics = parse_yaml(
+        tmp_path,
+        complete_spec(
+            """
+            control_data:
+              change_type: scd2_auto
+              scd:
+                insert_time: "{{ var('insert_time') }}"
+                scd2_validation_enabled: "false"
+            """
+        ),
+    )
+
+    assert "'false' is not of type 'boolean'" in diagnostic_messages(diagnostics)
+
+
+def test_scd2_validation_is_only_valid_for_generated_scd2(tmp_path: Path) -> None:
     _, diagnostics = parse_yaml(
         tmp_path,
         complete_spec(
@@ -1266,7 +1330,7 @@ def test_scd2_validation_is_only_valid_for_scd2_auto(tmp_path: Path) -> None:
         ),
     )
 
-    assert "`scd2_validation` is only valid when `change_type` is scd2_auto" in diagnostic_messages(diagnostics)
+    assert "`scd2_validation` is only valid when `change_type` is scd2_auto or scd2_derived" in diagnostic_messages(diagnostics)
 
 
 def test_scd2_auto_from_sot_is_only_valid_for_scd2_auto(tmp_path: Path) -> None:

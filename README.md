@@ -412,5 +412,5 @@ TMS_RUN_INTEGRATION=1 .venv/bin/python -m pytest integration_tests -k scd2_hash_
 ```
 
 See [integration_tests/README.md](./integration_tests/README.md) for the full
-scenario-folder structure, live-run workflow, progress output, connection
+scenario-folder structure, live-run workflow, progress output, connection 
 settings, and custom assertion hooks.

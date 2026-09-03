@@ -187,6 +187,7 @@ control_data ::=
   business_data_hash?
   materialisation_type?
   failure_mode?
+  validation_enabled?
   truncate_before_load?
   staging_schema?
   scd?
@@ -195,6 +196,7 @@ control_data ::=
 
 materialisation_type ::= table
 failure_mode ::= fail_load | quarantine_row
+validation_enabled ::= true | false
 change_type ::= scd1 | scd2_manual | scd2_auto | scd2_derived
 truncate_before_load ::= true | false
 business_key ::= business_key_config
@@ -215,6 +217,12 @@ supports table materialisations.
 
 `failure_mode` defines how validation or conversion failures are handled. If
 omitted, implementations should default to `fail_load`.
+
+`validation_enabled` controls whether dbt runtime row validation is generated
+and enforced. If omitted, implementations should default to `true`. When
+`false`, implementations should skip runtime validation guard and quarantine
+validation outputs and materialise source rows directly. Schema-time and
+parse-time validation of the specification itself still applies.
 
 `change_type` explicitly declares the change-handling behavior. It is required
 for complete specifications and has no default.
@@ -284,6 +292,7 @@ Sample: control data.
 control_data:
   materialisation_type: table
   failure_mode: quarantine_row
+  validation_enabled: true
   change_type: scd2_auto
   truncate_before_load: false
   staging_schema: INTERMEDIATE
@@ -683,9 +692,12 @@ scd2_manual_scd_config ::=
 scd2_auto_scd_config ::=
   insert_time
   scd2_auto_from_sot?
+  scd2_validation_enabled?
   scd2_validation?
 
 scd2_derived_scd_config ::=
+  scd2_validation_enabled?
+  scd2_validation?
   valid_from_datetime
   valid_to_datetime?
   current_flag?
@@ -702,6 +714,7 @@ delete_detection ::=
 
 insert_time ::= scalar
 scd2_auto_from_sot ::= true | false
+scd2_validation_enabled ::= true | false
 scd2_validation ::= continuous | sparse
 valid_from_datetime ::=
   source_column | expression
@@ -794,7 +807,7 @@ names.
 - `field`: remove rows where a target field equals the configured value. This
   mode is only valid for `scd1`.
 
-`scd2_auto` has three SCD parameters:
+`scd2_auto` has four SCD parameters:
 
 - `insert_time`: scalar or templated timestamp value used as the proposed
   `valid_from_datetime` for incoming changes. It is typically a dbt variable.
@@ -802,6 +815,10 @@ names.
   starts at the platform start-of-time timestamp. When `false`, the earliest
   version starts at `insert_time`. If omitted, implementations should default
   to `true`.
+- `scd2_validation_enabled`: controls generated SCD2 validity-window validation.
+  It defaults to `true`. When `false`, TMS skips the SCD2 validation CTEs and
+  guard but still performs SCD2 change detection, duplicate handling, window
+  calculation, and incremental merge.
 - `scd2_validation`: selects the dbt runtime validity-window validation mode.
   If omitted, implementations should default to `continuous`.
 
@@ -834,8 +851,8 @@ derived as the timestamp tick immediately before the next later version starts
 for the same generated business key; the latest version ends at the platform
 end-of-time timestamp.
 
-dbt implementations must validate generated `scd2_auto` windows before loading
-them into the target. Under `sparse` validation, rows are invalid when
+When `scd2_validation_enabled` is `true`, dbt implementations must validate
+generated `scd2_auto` windows before loading them into the target. Under `sparse` validation, rows are invalid when
 `valid_to_datetime` is not greater than `valid_from_datetime`, or when the next
 row for the same generated business key starts at or before the current row's
 `valid_to_datetime`. Under `continuous` validation, rows are also invalid when
@@ -880,23 +897,48 @@ effective start as a named column. Use `expression` when the effective start
 needs inline SQL over generated source fields. `expression` remains supported
 for backward compatibility.
 
-`scd2_derived` supports:
+`scd2_derived` supports the following scope and window options:
 
-- `derivation_scope: affected_keys`: recalculate only business keys affected by
-  incoming changed rows.
-- `validation_scope: affected_window`: validate only the post-load window being
-  rewritten for the affected keys.
-- `window_strategy: previous_and_next`: include the previous and next existing
-  versions when recalculating an affected window.
-- `valid_to_datetime.mode: next_valid_from`: derive each row end from the next
-  later version for the same business key.
-- `valid_to_datetime.offset`: subtract the configured timestamp tick, typically
-  `{unit: nanosecond, value: -1}`.
-- `current_flag.mode: latest_per_business_key`: mark the latest effective
-  version as current.
-- `deleted_flag.mode: fixed`: use a fixed deleted flag value, normally `N`.
-- `deduplicate.order_by`: choose a deterministic winner when multiple incoming
-  rows have the same business key and effective datetime.
+- `derivation_scope`: `affected_keys` (default and currently the only supported
+  value). Recalculate only business keys affected by incoming changed rows.
+- `validation_scope`: `affected_window` (default) or `full_target`.
+  `affected_window` validates only the post-load window rewritten for affected
+  keys and lets the generated incremental SQL read target history only for
+  incoming business keys. `full_target` also validates untouched target history
+  and therefore retains a full target read.
+- `window_strategy`: `previous_and_next` (default and currently the only
+  supported value). Include the previous and next existing versions when
+  recalculating an affected window.
+- `scd2_validation_enabled`: `true` (default) or `false`. When `false`, skip
+  generated SCD2 validity-window validation while retaining derived SCD2
+  reconstruction and merge behavior.
+- `scd2_validation`: `continuous` (default) or `sparse`. `continuous` requires
+  adjacent windows for a business key to meet exactly, from the earliest row
+  through the end-of-time row. `sparse` permits gaps but still rejects overlaps,
+  null boundaries, and windows where the end is not after the start.
+- `valid_from_datetime` is required. Specify either `source_column`, naming a
+  source-query column, or `expression`, containing a SQL expression evaluated
+  against generated source rows. Both are cast to `timestamp_tz`; when both are
+  supplied, `source_column` takes precedence.
+- `valid_to_datetime` is optional. Its `mode` defaults to, and currently only
+  supports, `next_valid_from`: each row ends immediately before the next later
+  version for the same business key. `offset` defaults to
+  `{unit: nanosecond, value: -1}`; its `unit` may be `nanosecond` or `second`
+  and its `value` is an integer. `end_of_time` defaults to
+  `9999-12-31T23:59:59Z` and may be overridden with a timestamp expression.
+- `current_flag` is optional. Its `mode` defaults to, and currently only
+  supports, `latest_per_business_key`; the latest effective version is marked
+  `Y` and older versions `N`.
+- `deleted_flag` is optional. Its `mode` defaults to, and currently only
+  supports, `fixed`; `value` defaults to `N` and may be any scalar value.
+- `deduplicate` is optional and resolves multiple incoming source rows with the
+  same generated business key and valid-from timestamp. `order_by` is a list of
+  `{column, direction?, nulls?}` items. `column` is required; `direction`
+  defaults to `desc` (`asc` is also supported) and `nulls` defaults to `last`
+  (`first` is also supported). `partition_by` is accepted for specification
+  clarity, but derived SCD2 currently fixes the deduplication partition to the
+  generated business key plus valid-from timestamp; it does not change the
+  generated SQL.
 
 When older source-system history such as V2 is loaded after newer V10 data for
 the same business key, `scd2_derived` keeps V2 historical only when its derived

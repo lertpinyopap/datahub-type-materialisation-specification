@@ -31,6 +31,8 @@ Materialisation Specification.
 - Generated dbt projects reference the user-managed local
   `datahub_type_materialisation` dbt profile.
 - `fail_load` validation failure enforcement through generated dbt SQL.
+- Runtime validation can be disabled with `control_data.validation_enabled:
+  false`.
 - Field-level uniqueness validation through generated dbt SQL.
 - Job event table writes through generated dbt project-level run hooks.
 - Quarantine table writes through generated append-only incremental dbt models.

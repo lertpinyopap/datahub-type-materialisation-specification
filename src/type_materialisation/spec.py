@@ -562,11 +562,18 @@ def _validate_scd(spec: dict[str, Any], *, abstract: bool) -> list[Diagnostic]:
                 "$.control_data.scd.scd2_auto_from_sot",
             )
         )
-    if change_type == "scd1" and "scd2_validation" in scd:
+    if change_type not in {"scd2_auto", "scd2_derived"} and "scd2_validation" in scd:
         diagnostics.append(
             Diagnostic(
-                "`scd2_validation` is only valid when `change_type` is scd2_auto",
+                "`scd2_validation` is only valid when `change_type` is scd2_auto or scd2_derived",
                 "$.control_data.scd.scd2_validation",
+            )
+        )
+    if change_type not in {"scd2_auto", "scd2_derived"} and "scd2_validation_enabled" in scd:
+        diagnostics.append(
+            Diagnostic(
+                "`scd2_validation_enabled` is only valid when `change_type` is scd2_auto or scd2_derived",
+                "$.control_data.scd.scd2_validation_enabled",
             )
         )
     if change_type in {"scd1", "scd2_auto", "scd2_derived"} and "update_mode" in scd:
