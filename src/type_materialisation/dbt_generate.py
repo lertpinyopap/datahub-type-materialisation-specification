@@ -918,7 +918,7 @@ def _scd2_final_body_lines(
         "select",
         ",\n".join(output_lines),
         "from flagged_rows",
-        *_scd2_validation_guard_join_lines(spec),
+        *_scd2_validation_guard_join_lines(spec, quarantine_enabled=quarantine_enabled),
         "",
     ]
 
@@ -1255,7 +1255,7 @@ def _scd2_target_merge_body_lines(
         "select",
         ",\n".join(output_lines),
         "from flagged_rows",
-        *_scd2_validation_guard_join_lines(spec),
+        *_scd2_validation_guard_join_lines(spec, quarantine_enabled=quarantine_enabled),
         "",
     ]
 
@@ -1830,23 +1830,33 @@ def _scd2_validation_cte_lines(spec: dict[str, Any], *, input_cte: str = "flagge
         "    from scd2_invalid_validity_rows",
         "),",
         "scd2_validation_guard as (",
-        "    select 0 as SCD2_VALIDATION_GUARD",
-        "    from scd2_validation_failure_count",
-        "    where SCD2_VALIDATION_FAILURE_COUNT = 0",
-        "    union all",
+        "    select",
+        "        case",
+        "            when SCD2_VALIDATION_FAILURE_COUNT = 0 then 0",
         (
-            "    select cast(concat('TYPE_MATERIALISATION_SCD2_VALIDATION_FAILED:', "
-            "SCD2_VALIDATION_FAILURE_COUNT) as number) as SCD2_VALIDATION_GUARD"
+            "            -- Deliberately fail the model rather than allowing a validation failure "
+            "to replace the target with zero rows."
         ),
+        "            else 1 / case when SCD2_VALIDATION_FAILURE_COUNT > 0 then 0 else 1 end",
+        "        end as SCD2_VALIDATION_GUARD",
         "    from scd2_validation_failure_count",
-        "    where SCD2_VALIDATION_FAILURE_COUNT > 0",
         ")",
     ]
 
 
-def _scd2_validation_guard_join_lines(spec: dict[str, Any]) -> list[str]:
+def _scd2_validation_guard_join_lines(spec: dict[str, Any], *, quarantine_enabled: bool) -> list[str]:
     if not _scd2_validation_enabled(spec):
         return []
+    if quarantine_enabled:
+        # A malformed window invalidates the full business-key history, not only
+        # the individual version row. Do not emit partial history for that key.
+        return [
+            "where not exists (",
+            "    select 1",
+            "    from scd2_invalid_validity_rows as invalid_row",
+            f"    where {_business_key_join_condition(spec, 'flagged_rows', 'invalid_row')}",
+            ")",
+        ]
     return [
         "cross join scd2_validation_guard",
         "where scd2_validation_guard.SCD2_VALIDATION_GUARD = 0",

@@ -947,7 +947,9 @@ def test_scd2_validation_failure_rollback_scenarios_generate_guards(tmp_path: Pa
         assert "AUDIT_LAST_CHANGED_DATETIME" in scenario.expected_columns
         assert "unique_key=['ACCOUNT_BUSINESS_KEY']" in model_sql
         assert "VALID_TO_DATETIME <= VALID_FROM_DATETIME" in model_sql
-        assert "TYPE_MATERIALISATION_SCD2_VALIDATION_FAILED" in model_sql
+        assert "TYPE_MATERIALISATION_SCD2_VALIDATION_FAILED" not in model_sql
+        assert "cross join scd2_validation_guard" in model_sql
+        assert "where scd2_validation_guard.SCD2_VALIDATION_GUARD = 0" in model_sql
         assert "post_load_validation_rows as (" in model_sql
         assert ("dateadd(nanosecond, 1, VALID_TO_DATETIME)" in model_sql) is expects_continuity_check
         assert "ACCOUNT_BUSINESS_KEY" in model_sql

@@ -1836,11 +1836,38 @@ def test_scd2_auto_generation_adds_continuous_validity_windows(tmp_path: Path) -
         in model_sql
     )
     assert (
-        "cast(concat('TYPE_MATERIALISATION_SCD2_VALIDATION_FAILED:', SCD2_VALIDATION_FAILURE_COUNT) as number)"
+        "case\n"
+        "            when SCD2_VALIDATION_FAILURE_COUNT = 0 then 0\n"
+        "            -- Deliberately fail the model rather than allowing a validation failure to replace the target with zero rows.\n"
+        "            else 1 / case when SCD2_VALIDATION_FAILURE_COUNT > 0 then 0 else 1 end\n"
+        "        end as SCD2_VALIDATION_GUARD"
         in model_sql
     )
+    assert "TYPE_MATERIALISATION_SCD2_VALIDATION_FAILED" not in model_sql
     assert "cross join scd2_validation_guard" in model_sql
     assert "where scd2_validation_guard.SCD2_VALIDATION_GUARD = 0" in model_sql
+
+
+def test_scd2_quarantine_excludes_invalid_business_key_histories(tmp_path: Path) -> None:
+    result, output_dir = generate(
+        tmp_path,
+        csv_generation_spec(
+            extra_control="""
+            control_data:
+              change_type: scd2_auto
+              failure_mode: quarantine_row
+              scd:
+                insert_time: "{{ var('insert_time') }}"
+            """,
+        ),
+    )
+
+    assert result.errors == []
+    model_sql = (output_dir / "models" / "generated" / "account.sql").read_text(encoding="utf-8")
+    assert "from flagged_rows" in model_sql
+    assert "from scd2_invalid_validity_rows as invalid_row" in model_sql
+    assert "where flagged_rows.ACCOUNT_BUSINESS_KEY = invalid_row.ACCOUNT_BUSINESS_KEY" in model_sql
+    assert "cross join scd2_validation_guard" not in model_sql
 
 
 def test_scd2_derived_exposes_effective_date_in_staging_only(tmp_path: Path) -> None:
