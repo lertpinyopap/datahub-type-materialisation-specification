@@ -1398,6 +1398,33 @@ def test_job_event_hooks_are_generated_at_project_run_level(tmp_path: Path) -> N
     assert "post_hook" not in model_sql
 
 
+def test_incremental_bookmark_is_generated_from_control_data(tmp_path: Path) -> None:
+    result, output_dir = generate(
+        tmp_path,
+        csv_generation_spec(
+            extra_control="""
+            control_data:
+              change_type: scd1
+              incremental_bookmark:
+                pipeline_name: ACCOUNT_INCREMENTAL
+                bookmark_relation: NONPROD_GOVERNANCE.METADATA.TMS_BOOKMARK
+                source_relation: NONPROD_RAW.RAW.ACCOUNT
+                source_timestamp_column: AIRFLOW_DAG_TIME
+            """,
+        ),
+    )
+
+    assert result.errors == []
+    project = load_yaml(output_dir / "dbt_project.yml")
+    macro_sql = (output_dir / "macros" / "generated" / "incremental_bookmark.sql").read_text(encoding="utf-8")
+    assert "tms_incremental_bookmark_predicate(source_timestamp, watermark_filter=none)" in macro_sql
+    assert "LAST_SOURCE_TIMESTAMP" in macro_sql
+    assert "NONPROD_GOVERNANCE.METADATA.TMS_BOOKMARK" in macro_sql
+    assert "create table if not exists NONPROD_GOVERNANCE.METADATA.TMS_BOOKMARK" in project["on-run-start"][0]
+    assert "alter table NONPROD_GOVERNANCE.METADATA.TMS_BOOKMARK add column if not exists LAST_SOURCE_TIMESTAMP" in project["on-run-start"][1]
+    assert "merge into NONPROD_GOVERNANCE.METADATA.TMS_BOOKMARK" in project["on-run-end"][2]
+
+
 def test_generated_schema_name_macro_supports_runtime_schema_override(tmp_path: Path) -> None:
     result, output_dir = generate(tmp_path, csv_generation_spec())
 

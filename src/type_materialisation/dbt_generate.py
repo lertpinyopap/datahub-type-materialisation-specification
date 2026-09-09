@@ -1,8 +1,6 @@
 import csv
 import hashlib
-import json
 import re
-import shutil
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -12,7 +10,6 @@ from .custom_macros import MacroLoadError, PythonMacroResolver
 from .errors import Diagnostic
 from .inheritance import InheritanceError, resolve_spec
 from .schema import require_yaml
-from .source_files import csv_load_method, csv_seed_file_path
 from .spec import (
     BUSINESS_KEY_DATA_TYPE,
     GENERATED_METADATA_FIELD_TYPES,
@@ -24,6 +21,18 @@ from .spec import (
     parse_sql_type,
 )
 from .variables import resolve_python_templates
+
+from .dbt_hooks import _tag_post_hook_lines, _write_generated_macros, _write_project_file
+from .dbt_source import (
+    _defaulted_csv_source_value, _source_column_name, _source_model_name,
+    _source_output_columns, _write_source_model,
+)
+from .dbt_sql import (
+    _dbt_relation_lookup, _job_id_expression, _macro_object_name, _physical_name,
+    _quarantine_has_explicit_schema, _quarantine_relation_config, _quote_identifier,
+    _sql_literal, _sql_scalar, _sql_string, _staging_schema_config_expression,
+    _target_relation_config, _target_schema_config_expression,
+)
 
 
 DBT_PROJECT_NAME = "type_materialisation_generated"
@@ -65,11 +74,6 @@ class GenerateDbtOptions:
     vars: dict[str, Any] = field(default_factory=dict)
 
 
-@dataclass(frozen=True)
-class RelationConfig:
-    database: str | None
-    schema: str
-    table: str
 
 
 def generate_dbt_project(options: GenerateDbtOptions) -> DbtGenerationResult:
@@ -132,7 +136,7 @@ def generate_dbt_project(options: GenerateDbtOptions) -> DbtGenerationResult:
         return result
     if _fail_load_enabled(spec):
         _write_validation_guard_model(spec, result)
-    _write_generated_macros(options.output_dir, generated_macros, result)
+    _write_generated_macros(options.output_dir, generated_macros, spec, result)
     if options.unit_test_csv is not None:
         try:
             _write_unit_tests(spec, options, macros, result)
@@ -282,32 +286,6 @@ def _ensure_dirs(output_dir: Path) -> None:
     (output_dir / "seeds").mkdir(parents=True, exist_ok=True)
 
 
-def _write_project_file(output_dir: Path, spec: dict[str, Any], spec_file_name: str, result: DbtGenerationResult) -> None:
-    yaml = require_yaml()
-    pre_hooks, post_hooks = _job_hooks(spec, spec_file_name)
-    project = {
-        "name": DBT_PROJECT_NAME,
-        "version": "1.0",
-        "config-version": 2,
-        "profile": DBT_PROFILE_NAME,
-        "model-paths": ["models"],
-        "seed-paths": ["seeds"],
-        "macro-paths": ["macros"],
-        "on-run-start": pre_hooks,
-        "on-run-end": post_hooks,
-        "models": {
-            DBT_PROJECT_NAME: {
-                "generated": {
-                    "+materialized": "view",
-                }
-            }
-        },
-    }
-    seed_config = _seed_project_config(spec)
-    if seed_config is not None:
-        project["seeds"] = seed_config
-    content = yaml.safe_dump(project, sort_keys=False, width=10_000)
-    _write(output_dir / "dbt_project.yml", content, result)
 
 
 def _write_status_file(output_dir: Path, result: DbtGenerationResult) -> None:
@@ -321,264 +299,16 @@ def _write_status_file(output_dir: Path, result: DbtGenerationResult) -> None:
     _write(output_dir / "NOT_IMPLEMENTED.md", "\n".join(lines) + "\n", result)
 
 
-def _write_source_model(spec: dict[str, Any], options: GenerateDbtOptions, result: DbtGenerationResult) -> None:
-    source = spec["source"]
-    if source["format"] == "table":
-        _write_table_source_model(spec, options, result)
-    else:
-        _write_csv_source_model(spec, options, result)
 
 
-def _write_csv_source_model(spec: dict[str, Any], options: GenerateDbtOptions, result: DbtGenerationResult) -> None:
-    if csv_load_method(spec["source"]) == "dbt_seed":
-        _write_csv_seed_source_model(spec, options, result)
-        return
-
-    target = spec["target"]
-    model_name = _source_model_name(target["id"])
-    stage = _stage_reference(options.csv_stage) if options.csv_stage else _csv_stage_location(spec["source"])
-    source_query_select_lines = []
-    seen_source_query_columns: set[str] = set()
-    for field in fields(spec):
-        source = field.get("source", {})
-        if "fixed_value" in source:
-            continue
-        if isinstance(source.get("macro"), str):
-            helper_column = _macro_helper_source_column_name(field)
-            if helper_column is None:
-                continue
-            helper_key = case_key(helper_column)
-            if helper_key in seen_source_query_columns:
-                continue
-            seen_source_query_columns.add(helper_key)
-            pos = source.get("pos")
-            if isinstance(pos, int):
-                ordinal = pos + 1
-                expression = _apply_default_value_expression(f"${ordinal}::string", source)
-                source_query_select_lines.append(
-                    f"        {expression} as {_quote_identifier(helper_column)}"
-                )
-            continue
-        column = _source_column_name(field)
-        column_key = case_key(column)
-        if column_key in seen_source_query_columns:
-            continue
-        seen_source_query_columns.add(column_key)
-        pos = source.get("pos")
-        ordinal = int(pos) + 1
-        expression = _apply_default_value_expression(f"${ordinal}::string", source)
-        source_query_select_lines.append(f"        {expression} as {_quote_identifier(column)}")
-    select_lines = []
-    for field in fields(spec):
-        source = field.get("source", {})
-        if isinstance(source.get("macro"), str):
-            expression = _source_macro_field_expression(field)
-            output_column = str(field["id"])
-        elif "fixed_value" in source:
-            expression = _fixed_value_expression(source["fixed_value"])
-            output_column = _source_column_name(field)
-        else:
-            column = _source_column_name(field)
-            expression = f"source_query.{_quote_identifier(column)}"
-            output_column = column
-        select_lines.append(f"    {expression} as {_quote_identifier(output_column)}")
-    sql = "\n".join(
-        [
-            "{{",
-            "  config(",
-            *_model_config_lines(
-                materialized="view",
-                database=_target_relation_config(spec).database,
-                schema=_staging_schema_config_expression(spec),
-                alias=model_name,
-                schema_is_expression=True,
-            ),
-            "  )",
-            "}}",
-            "",
-            "with source_query as (",
-            "    select",
-            ",\n".join(source_query_select_lines) if source_query_select_lines else "        1 as _DUMMY_SOURCE_COLUMN",
-            f"    from {stage}",
-            ")",
-            "",
-            "select",
-            ",\n".join(select_lines),
-            "from source_query as source_query",
-            *_source_macro_join_lines(spec),
-            "",
-        ]
-    )
-    _write(options.output_dir / "models" / "generated" / f"{model_name}.sql", sql, result)
 
 
-def _write_csv_seed_source_model(spec: dict[str, Any], options: GenerateDbtOptions, result: DbtGenerationResult) -> None:
-    target = spec["target"]
-    model_name = _source_model_name(target["id"])
-    seed_name = _csv_seed_name(spec)
-    try:
-        seed_path = _write_csv_seed_file(spec, options, result)
-    except OSError as exc:
-        result.errors.append(Diagnostic(str(exc), "$.source.seed.file"))
-        return
-
-    source_query_select_lines = []
-    seen_source_query_columns: set[str] = set()
-    for field in fields(spec):
-        source = field.get("source", {})
-        if "fixed_value" in source:
-            continue
-        if isinstance(source.get("macro"), str):
-            helper_column = _macro_helper_source_column_name(field)
-            if helper_column is None:
-                continue
-            helper_key = case_key(helper_column)
-            if helper_key in seen_source_query_columns:
-                continue
-            seen_source_query_columns.add(helper_key)
-            expression = _apply_default_value_expression(
-                f"cast({_quote_identifier(helper_column)} as string)",
-                source,
-            )
-            source_query_select_lines.append(
-                f"        {expression} as {_quote_identifier(helper_column)}"
-            )
-            continue
-        column = _source_column_name(field)
-        column_key = case_key(column)
-        if column_key in seen_source_query_columns:
-            continue
-        seen_source_query_columns.add(column_key)
-        expression = _apply_default_value_expression(f"cast({_quote_identifier(column)} as string)", source)
-        source_query_select_lines.append(f"        {expression} as {_quote_identifier(column)}")
-    select_lines = []
-    for field in fields(spec):
-        source = field.get("source", {})
-        if isinstance(source.get("macro"), str):
-            expression = _source_macro_field_expression(field)
-            output_column = str(field["id"])
-        elif "fixed_value" in source:
-            expression = _fixed_value_expression(source["fixed_value"])
-            output_column = _source_column_name(field)
-        else:
-            column = _source_column_name(field)
-            expression = f"source_query.{_quote_identifier(column)}"
-            output_column = column
-        select_lines.append(f"    {expression} as {_quote_identifier(output_column)}")
-    sql = "\n".join(
-        [
-            "{{",
-            "  config(",
-            *_model_config_lines(
-                materialized="view",
-                database=_target_relation_config(spec).database,
-                schema=_staging_schema_config_expression(spec),
-                alias=model_name,
-                schema_is_expression=True,
-            ),
-            "  )",
-            "}}",
-            "",
-            "with source_query as (",
-            "    select",
-            ",\n".join(source_query_select_lines) if source_query_select_lines else "        1 as _DUMMY_SOURCE_COLUMN",
-            f"    from {{{{ ref('{seed_name}') }}}}",
-            ")",
-            "",
-            "select",
-            ",\n".join(select_lines),
-            "from source_query as source_query",
-            *_source_macro_join_lines(spec),
-            "",
-        ]
-    )
-    _write(result.output_dir / "models" / "generated" / f"{model_name}.sql", sql, result)
-    result.files.append(seed_path)
 
 
-def _write_csv_seed_file(spec: dict[str, Any], options: GenerateDbtOptions, result: DbtGenerationResult) -> Path:
-    seed_file = csv_seed_file_path(spec, options.spec_path)
-    seed_name = _csv_seed_name(spec)
-    target_path = result.output_dir / "seeds" / f"{seed_name}.csv"
-    if spec["source"].get("header") is False:
-        _write_headerless_seed_file(spec, seed_file, target_path)
-    else:
-        shutil.copyfile(seed_file, target_path)
-    return target_path
 
 
-def _write_headerless_seed_file(spec: dict[str, Any], seed_file: Path, target_path: Path) -> None:
-    source = spec["source"]
-    dialect = {
-        "delimiter": source.get("delimiter", ","),
-        "quotechar": source.get("quotechar", '"'),
-        "lineterminator": source.get("lineterminator", "\r\n"),
-    }
-    with seed_file.open("r", encoding="utf-8", newline="") as source_handle:
-        reader = csv.reader(
-            source_handle,
-            delimiter=dialect["delimiter"],
-            quotechar=dialect["quotechar"],
-        )
-        rows = list(reader)
-        positions = [
-            int(field["source"]["pos"])
-            for field in fields(spec)
-            if isinstance(field.get("source"), dict) and isinstance(field["source"].get("pos"), int)
-        ]
-        column_count = max([*(pos + 1 for pos in positions), *(len(row) for row in rows)], default=0)
-        header = [_position_column_name(index) for index in range(column_count)]
-        with target_path.open("w", encoding="utf-8", newline="") as target_handle:
-            writer = csv.writer(
-                target_handle,
-                delimiter=dialect["delimiter"],
-                quotechar=dialect["quotechar"],
-                lineterminator=dialect["lineterminator"],
-            )
-            writer.writerow(header)
-            writer.writerows(rows)
 
 
-def _write_table_source_model(spec: dict[str, Any], options: GenerateDbtOptions, result: DbtGenerationResult) -> None:
-    del options
-    source = spec["source"]
-    target = spec["target"]
-    model_name = _source_model_name(target["id"])
-    flatten_aliases = _flatten_aliases(source)
-    select_lines = []
-    for field in fields(spec):
-        column = _source_column_name(field)
-        expression = (
-            _source_macro_field_expression(field)
-            or _table_field_source_expression(field, flatten_aliases)
-        )
-        select_lines.append(f"    {expression} as {_quote_identifier(column)}")
-    select_lines.extend(_scd2_derived_source_helper_lines(spec))
-    source_sql = _table_source_sql(source)
-    type_guard_lines = _semistructured_source_type_guard_lines(spec)
-    sql = "\n".join(
-        [
-            "{{",
-            "  config(",
-            *_model_config_lines(
-                materialized="view",
-                database=_target_relation_config(spec).database,
-                schema=_staging_schema_config_expression(spec),
-                alias=model_name,
-                schema_is_expression=True,
-            ),
-            "  )",
-            "}}",
-            "",
-            *type_guard_lines,
-            *source_sql,
-            "select",
-            ",\n".join(select_lines),
-            *_table_source_from_lines(spec),
-            "",
-        ]
-    )
-    _write(result.output_dir / "models" / "generated" / f"{model_name}.sql", sql, result)
 
 
 def _scd2_derived_source_helper_lines(spec: dict[str, Any]) -> list[str]:
@@ -1966,46 +1696,16 @@ def _model_config_lines(
     return config_lines
 
 
-def _tag_post_hook_lines(spec: dict[str, Any]) -> list[str]:
-    """Apply declarative target and column tags after the target relation exists."""
-    target = spec.get("target", {})
-    if not isinstance(target, dict):
-        return []
-
-    statements: list[str] = []
-    target_tags = target.get("tags", {})
-    if isinstance(target_tags, dict):
-        for tag_name, tag_value in target_tags.items():
-            statements.append(
-                "alter table {{ this }} set tag "
-                f"{_tag_identifier(tag_name)} = {_sql_string(str(tag_value))}"
-            )
-
-    for field in fields(spec):
-        field_tags = field.get("tags", {}) if isinstance(field, dict) else {}
-        if not isinstance(field_tags, dict):
-            continue
-        for tag_name, tag_value in field_tags.items():
-            statements.append(
-                "alter table {{ this }} modify column "
-                f"{_quote_identifier(str(field['id']))} set tag "
-                f"{_tag_identifier(tag_name)} = {_sql_string(str(tag_value))}"
-            )
-
-    if not statements:
-        return []
-    lines = ["    post_hook=["]
-    lines.extend(f"        {json.dumps(statement)}," for statement in statements)
-    lines.append("    ],")
-    return lines
 
 
-def _tag_identifier(value: Any) -> str:
-    """Keep qualified Snowflake tag names usable while normalizing simple names."""
-    text = str(value).strip()
-    if not text:
-        raise ValueError("tag name must not be empty")
-    return ".".join(_quote_identifier(part) for part in text.split("."))
+
+
+
+
+
+
+
+
 
 
 def _write_quarantine_model(spec: dict[str, Any], result: DbtGenerationResult) -> None:
@@ -2058,37 +1758,10 @@ def _write_quarantine_model(spec: dict[str, Any], result: DbtGenerationResult) -
     _write(result.output_dir / "models" / "generated" / f"{model_name}.sql", sql, result)
 
 
-def _write_generated_macros(output_dir: Path, macros: dict[str, str], result: DbtGenerationResult) -> None:
-    _write(output_dir / "macros" / "generated" / "create_schema.sql", _create_schema_macro(), result)
-    _write(output_dir / "macros" / "generated" / "generate_schema_name.sql", _generate_schema_name_macro(), result)
-    for macro_name, macro_sql in sorted(macros.items()):
-        _write(output_dir / "macros" / "generated" / f"{macro_name}.sql", macro_sql + "\n", result)
 
 
-def _create_schema_macro() -> str:
-    return "\n".join(
-        [
-            "{% macro create_schema(relation) -%}",
-            "    {# Schemas must be provisioned outside generated TMS dbt projects. #}",
-            "{%- endmacro %}",
-            "",
-        ]
-    )
 
 
-def _generate_schema_name_macro() -> str:
-    return "\n".join(
-        [
-            "{% macro generate_schema_name(custom_schema_name, node) -%}",
-            "    {%- if custom_schema_name is none -%}",
-            "        {{ target.schema | upper }}",
-            "    {%- else -%}",
-            "        {{ custom_schema_name | trim | upper }}",
-            "    {%- endif -%}",
-            "{%- endmacro %}",
-            "",
-        ]
-    )
 
 
 def _write_unit_tests(
@@ -3358,8 +3031,6 @@ def _business_data_hash_ineligible_field_ids(spec: dict[str, Any]) -> set[str]:
     return excluded_fields
 
 
-def _source_model_name(target_id: str) -> str:
-    return f"{target_id}__source"
 
 
 def _quarantine_model_name(target_id: str) -> str:
@@ -3370,333 +3041,66 @@ def _validation_guard_model_name(target_id: str) -> str:
     return f"{target_id}__validation_guard"
 
 
-def _csv_seed_name(spec: dict[str, Any]) -> str:
-    seed = spec["source"].get("seed", {})
-    if not isinstance(seed, dict):
-        seed = {}
-    return str(seed.get("name", f"{spec['target']['id']}__seed"))
 
 
-def _seed_project_config(spec: dict[str, Any]) -> dict[str, Any] | None:
-    source = spec.get("source", {})
-    if not isinstance(source, dict) or source.get("format") != "csv" or csv_load_method(source) != "dbt_seed":
-        return None
-
-    seed = source.get("seed", {})
-    if not isinstance(seed, dict):
-        seed = {}
-    seed_name = _csv_seed_name(spec)
-    seed_schema = seed.get("schema")
-    config: dict[str, Any] = {
-        "+quote_columns": False,
-        "+schema": (
-            _physical_name(seed_schema)
-            if seed_schema
-            else "{{ var('tms_staging_schema', '" + _staging_schema(spec) + "') | upper }}"
-        ),
-        "+alias": _physical_name(seed_name),
-        "+column_types": {
-            _physical_name(column): "varchar"
-            for column in _csv_physical_source_columns(spec)
-        },
-    }
-    if seed.get("database"):
-        config["+database"] = _physical_name(seed["database"])
-    if source.get("delimiter", ",") != ",":
-        config["+delimiter"] = source["delimiter"]
-    return {DBT_PROJECT_NAME: {seed_name: config}}
 
 
-def _csv_stage_location(source: dict[str, Any]) -> str:
-    location = source.get("location", {})
-    if not isinstance(location, dict):
-        location = {}
-    database = location.get("database")
-    schema = location.get("schema", "AD_HOC")
-    stage = location.get("stage", "@csv_stage")
-    filename = location.get("filename")
-    parts = []
-    if database:
-        parts.append(_physical_name(database))
-    if schema:
-        parts.append(_physical_name(schema))
-    stage_text = str(stage)
-    if stage_text.startswith("@"):
-        stage_text = stage_text[1:]
-    parts.append(_physical_name(stage_text))
-    relation = ".".join(parts)
-    if filename:
-        relation = f"{relation}/{filename}"
-    return _stage_reference(relation)
 
 
-def _table_source_relation(source: dict[str, Any]) -> str:
-    parts = []
-    if source.get("database"):
-        parts.append(_physical_name(source["database"]))
-    parts.extend([_physical_name(source["schema"]), _physical_name(source["table"])])
-    return ".".join(parts)
 
 
-def _table_source_sql(source: dict[str, Any]) -> list[str]:
-    query = source.get("query")
-    if isinstance(query, str) and query.strip():
-        return ["with source_query as (", _indent_sql(query.strip()), ")", ""]
-    return ["with source_query as (", f"    select * from {_table_source_relation(source)}", ")", ""]
 
 
-def _table_source_from_lines(spec: dict[str, Any]) -> list[str]:
-    source = spec["source"]
-    lines = ["from source_query"]
-    previous_aliases: set[str] = set()
-    for entry in _flatten_entries(source):
-        alias = _physical_name(entry["alias"])
-        input_expression = _table_source_variant_expression(str(entry["column"]), previous_aliases)
-        path = entry.get("path")
-        if isinstance(path, str):
-            input_expression = _snowflake_get_path_expression(input_expression, path)
-        arguments = [f"input => {input_expression}"]
-        if entry.get("outer") is True:
-            arguments.append("outer => true")
-        mode = str(entry.get("mode", "both")).upper()
-        arguments.append(f"mode => {_sql_string(mode)}")
-        lines.append(f", lateral flatten({', '.join(arguments)}) as {alias}")
-        previous_aliases.add(case_key(str(entry["alias"])))
-    lines.extend(_source_macro_join_lines(spec))
-    return lines
 
 
-def _source_macro_field_expression(field: dict[str, Any]) -> str | None:
-    source = field.get("source")
-    if not isinstance(source, dict) or not isinstance(source.get("macro"), str):
-        return None
-    alias = _source_macro_alias(field)
-    return f"{alias}.{_quote_identifier(str(field['id']))}"
 
 
-def _source_macro_join_lines(spec: dict[str, Any]) -> list[str]:
-    lines: list[str] = []
-    for field in fields(spec):
-        if not isinstance(field, dict):
-            continue
-        source = field.get("source")
-        if not isinstance(source, dict) or not isinstance(source.get("macro"), str):
-            continue
-        args = source.get("args", {})
-        if not isinstance(args, dict):
-            args = {}
-        macro_args = dict(args)
-        macro_args.setdefault("output_column", str(field["id"]))
-        macro_args.setdefault("ref_alias", _source_macro_alias(field))
-        lines.append(_source_macro_expression(str(source["macro"]), macro_args))
-    return lines
 
 
-def _source_macro_alias(field: dict[str, Any]) -> str:
-    return _physical_name(f"lookup_{field['id']}")
 
 
-def _table_field_source_expression(field: dict[str, Any], flatten_aliases: set[str]) -> str:
-    source = field.get("source", {})
-    if "fixed_value" in source:
-        return _fixed_value_expression(source["fixed_value"])
-    if "column" not in source and "default_value" in source:
-        return _default_value_expression(source["default_value"])
-    if "column" not in source and isinstance(source.get("default_from_field"), str):
-        default_from_field = str(source["default_from_field"])
-        return to_varchar_expression(_table_source_variant_expression(default_from_field, flatten_aliases))
-    column = str(source.get("column", field["id"]))
-    base_expression = _table_source_variant_expression(column, flatten_aliases)
-    path = source.get("snowflake_path")
-    expression: str
-    if isinstance(path, str):
-        expression = f"to_varchar({_snowflake_get_path_expression(base_expression, path)})"
-    else:
-        expression = base_expression
-    return _apply_default_source_expression(expression, source, flatten_aliases)
 
 
-def _table_source_variant_expression(column: str, flatten_aliases: set[str]) -> str:
-    if case_key(column) in flatten_aliases:
-        return f"{_physical_name(column)}.value"
-    return f"source_query.{_quote_identifier(column)}"
 
 
-def _snowflake_get_path_expression(expression: str, path: str) -> str:
-    return f"get_path({expression}, {_sql_string(path)})"
 
 
-def _fixed_value_expression(value: Any) -> str:
-    return f"cast({_sql_scalar(value)} as string)"
 
 
-def _default_value_expression(value: Any) -> str:
-    return f"cast({_sql_scalar(value)} as string)"
 
 
-def _source_macro_expression(macro_reference: str, args: Any) -> str:
-    macro_name = _macro_object_name(macro_reference)
-    if not isinstance(args, dict):
-        args = {}
-    formatted_args = ", ".join(
-        f"{key}={_jinja_literal(value)}" for key, value in sorted(args.items())
-    )
-    return "{{ " + f"{macro_name}({formatted_args})" + " }}"
 
 
-def _jinja_literal(value: Any) -> str:
-    if value is None:
-        return "none"
-    if isinstance(value, bool):
-        return "true" if value else "false"
-    if isinstance(value, int | float):
-        return str(value)
-    return json.dumps(str(value))
 
 
-def _apply_default_value_expression(expression: str, source: dict[str, Any]) -> str:
-    if "default_value" not in source:
-        return expression
-    return f"coalesce(nullif({expression}, ''), {_default_value_expression(source['default_value'])})"
 
 
-def _apply_default_source_expression(
-    expression: str,
-    source: dict[str, Any],
-    flatten_aliases: set[str],
-) -> str:
-    expressions = [f"nullif({_to_varchar_for_default(expression)}, '')"]
-    default_from_field = source.get("default_from_field")
-    if isinstance(default_from_field, str):
-        default_expression = to_varchar_expression(
-            _table_source_variant_expression(default_from_field, flatten_aliases)
-        )
-        expressions.append(f"nullif({default_expression}, '')")
-    if "default_value" in source:
-        expressions.append(_default_value_expression(source["default_value"]))
-    if len(expressions) == 1:
-        return expression
-    return f"coalesce({', '.join(expressions)})"
 
 
-def to_varchar_expression(expression: str) -> str:
-    return f"to_varchar({expression})"
 
 
-def _to_varchar_for_default(expression: str) -> str:
-    if expression.startswith("to_varchar("):
-        return expression
-    return to_varchar_expression(expression)
 
 
-def _defaulted_csv_source_value(source: dict[str, Any], value: str | None) -> str | None:
-    if value in {None, ""} and "default_value" in source:
-        default_value = source["default_value"]
-        return None if default_value is None else str(default_value)
-    return value
 
 
-def _flatten_entries(source: dict[str, Any]) -> list[dict[str, Any]]:
-    flatten = source.get("flatten")
-    if isinstance(flatten, dict):
-        return [flatten]
-    if isinstance(flatten, list):
-        return [entry for entry in flatten if isinstance(entry, dict)]
-    return []
 
 
-def _flatten_aliases(source: dict[str, Any]) -> set[str]:
-    return {
-        case_key(str(entry["alias"]))
-        for entry in _flatten_entries(source)
-        if isinstance(entry.get("alias"), str)
-    }
 
 
-def _semistructured_source_type_guard_lines(spec: dict[str, Any]) -> list[str]:
-    source = spec["source"]
-    if source.get("format") != "table" or source.get("query"):
-        return []
-    if _relation_has_templated_part(source):
-        return []
-    columns = sorted(_semistructured_source_columns_to_guard(spec))
-    if not columns:
-        return []
-
-    database = source.get("database")
-    information_schema = (
-        f"{_physical_name(database)}.information_schema.columns"
-        if database
-        else "information_schema.columns"
-    )
-    column_list = ", ".join(_sql_string(column) for column in columns)
-    return [
-        "{% if execute %}",
-        "{% set tms_semistructured_source_type_sql %}",
-        "select column_name, data_type",
-        f"from {information_schema}",
-        f"where table_schema = {_sql_string(_physical_name(source['schema']))}",
-        f"  and table_name = {_sql_string(_physical_name(source['table']))}",
-        f"  and upper(column_name) in ({column_list})",
-        "  and data_type not in ('VARIANT', 'OBJECT', 'ARRAY')",
-        "{% endset %}",
-        "{% set tms_semistructured_source_type_result = run_query(tms_semistructured_source_type_sql) %}",
-        "{% if tms_semistructured_source_type_result is not none and (tms_semistructured_source_type_result.rows | length) > 0 %}",
-        '  {{ exceptions.raise_compiler_error("field.source.snowflake_path requires Snowflake VARIANT, OBJECT, or ARRAY source columns") }}',
-        "{% endif %}",
-        "{% endif %}",
-        "",
-    ]
 
 
-def _relation_has_templated_part(source: dict[str, Any]) -> bool:
-    return any("{{" in str(source.get(part, "")) for part in ("database", "schema", "table"))
 
 
-def _semistructured_source_columns_to_guard(spec: dict[str, Any]) -> set[str]:
-    source = spec["source"]
-    flatten_aliases = _flatten_aliases(source)
-    guarded = {
-        _physical_name(field["source"]["column"])
-        for field in fields(spec)
-        if isinstance(field.get("source"), dict)
-        and isinstance(field["source"].get("column"), str)
-        and isinstance(field["source"].get("snowflake_path"), str)
-        and case_key(field["source"]["column"]) not in flatten_aliases
-    }
-    for entry in _flatten_entries(source):
-        column = entry.get("column")
-        if isinstance(column, str) and case_key(column) not in flatten_aliases:
-            guarded.add(_physical_name(column))
-    return guarded
 
 
-def _indent_sql(sql: str) -> str:
-    return "\n".join(f"    {line}" if line.strip() else "" for line in sql.splitlines())
 
 
-def _stage_reference(value: str) -> str:
-    text = value[1:] if value.startswith("@") else value
-    relation, separator, path = text.partition("/")
-    stage_reference = _physical_name(relation)
-    if separator:
-        stage_reference = f"{stage_reference}/{path}"
-    return f"@{stage_reference}"
 
 
-def _macro_object_name(macro_name: str) -> str:
-    return macro_name.rpartition(".")[2]
 
 
-def _quote_identifier(value: str) -> str:
-    return _physical_name(value)
 
 
-def _physical_name(value: Any) -> str:
-    text = str(value)
-    if "{{" in text:
-        return text
-    return text.upper()
 
 
 def _validation_enabled(spec: dict[str, Any]) -> bool:
@@ -3720,350 +3124,62 @@ def _failure_mode(spec: dict[str, Any]) -> str:
     return str(control_data.get("failure_mode", "fail_load"))
 
 
-def _staging_schema(spec: dict[str, Any]) -> str:
-    control_data = spec.get("control_data", {})
-    if isinstance(control_data, dict) and control_data.get("staging_schema"):
-        return _physical_name(control_data["staging_schema"])
-    return STAGING_SCHEMA_DEFAULT
 
 
-def _staging_schema_config_expression(spec: dict[str, Any]) -> str:
-    return "var('tms_staging_schema', '" + _staging_schema(spec) + "') | upper"
 
 
-def _target_schema_config_expression(spec: dict[str, Any]) -> str:
-    target = spec["target"]
-    return "var('target_schema', '" + _physical_name(target["schema"]) + "') | upper"
 
 
-def _target_relation_config(spec: dict[str, Any]) -> RelationConfig:
-    target = spec["target"]
-    return RelationConfig(
-        database=_physical_name(target["database"]) if target.get("database") else None,
-        schema=_physical_name(target["schema"]),
-        table=_physical_name(target.get("table_name", target["id"])),
-    )
 
 
-def _quarantine_relation_config(spec: dict[str, Any]) -> RelationConfig:
-    target = _target_relation_config(spec)
-    quarantine = spec.get("control_data", {}).get("quarantine", {})
-    if not isinstance(quarantine, dict):
-        quarantine = {}
-    return RelationConfig(
-        database=_physical_name(quarantine["database"]) if quarantine.get("database") else target.database,
-        schema=_physical_name(quarantine["schema"]) if quarantine.get("schema") else _staging_schema(spec),
-        table=_physical_name(quarantine.get("table", f"{target.table}__QUARANTINE")),
-    )
 
 
-def _quarantine_has_explicit_schema(spec: dict[str, Any]) -> bool:
-    quarantine = spec.get("control_data", {}).get("quarantine", {})
-    return isinstance(quarantine, dict) and bool(quarantine.get("schema"))
 
 
-def _job_relation_config(spec: dict[str, Any]) -> RelationConfig:
-    target = _target_relation_config(spec)
-    job = spec.get("control_data", {}).get("job", {})
-    if not isinstance(job, dict):
-        job = {}
-    job_schema = _physical_name(job.get("schema", "BUSINESS"))
-    return RelationConfig(
-        database=_physical_name(job["database"]) if job.get("database") else target.database,
-        schema=f"{{{{ var('tms_job_schema', '{job_schema}') | upper }}}}",
-        table=_physical_name(job.get("table", "TYPE_MATERIALISATION_JOBS")),
-    )
 
 
-def _relation_name(relation: RelationConfig) -> str:
-    parts = []
-    if relation.database:
-        parts.append(relation.database)
-    parts.extend([relation.schema, relation.table])
-    return ".".join(parts)
 
 
-def _runtime_relation_label(relation: RelationConfig, *, schema_var: str | None = None) -> str:
-    database = relation.database or "{{ target.database | upper }}"
-    if schema_var is None:
-        schema = relation.schema
-    else:
-        schema = '{{ var("' + schema_var + '", "' + relation.schema + '") | upper }}'
-    return ".".join([database, schema, relation.table])
 
 
-def _dbt_relation_lookup(relation: RelationConfig, variable_name: str, *, schema_var: str | None = None) -> str:
-    database = _sql_string(relation.database) if relation.database else "(target.database | upper)"
-    if schema_var is None:
-        schema = _sql_string(relation.schema)
-    else:
-        schema = f'(var("{schema_var}", "{relation.schema}") | upper)'
-    return (
-        "{% set "
-        + variable_name
-        + " = adapter.get_relation(database="
-        + database
-        + ", schema="
-        + schema
-        + ", identifier="
-        + _sql_string(_physical_name(relation.table))
-        + ") %}"
-    )
 
 
-def _count_expression(relation_variable_name: str) -> str:
-    return (
-        "{% if "
-        + relation_variable_name
-        + " is not none %}(select count(*) from {{ "
-        + relation_variable_name
-        + " }}){% else %}null{% endif %}"
-    )
 
 
-def _count_cte(relation_variable_name: str, cte_name: str, column_name: str) -> str:
-    return (
-        cte_name
-        + " as (select "
-        + _count_expression(relation_variable_name)
-        + " as "
-        + _physical_name(column_name)
-        + ")"
-    )
 
 
-def _job_id_expression() -> str:
-    return "cast('{{ invocation_id }}' as varchar(64))"
 
 
-def _source_output_columns(spec: dict[str, Any]) -> list[str]:
-    target_fields = fields(spec)
-    if spec["source"]["format"] == "csv":
-        target_fields = sorted(
-            target_fields,
-            key=lambda field: field.get("source", {}).get("pos", 999999),
-        )
-    return [_source_column_name(field) for field in target_fields]
 
 
-def _csv_physical_source_columns(spec: dict[str, Any]) -> list[str]:
-    columns: list[str] = []
-    seen: set[str] = set()
-    target_fields = sorted(fields(spec), key=lambda field: field.get("source", {}).get("pos", 999999))
-    for field in target_fields:
-        source = field.get("source", {})
-        if not isinstance(source, dict) or "fixed_value" in source:
-            continue
-        if isinstance(source.get("macro"), str):
-            helper_column = _macro_helper_source_column_name(field)
-            if helper_column is None:
-                continue
-            helper_key = case_key(helper_column)
-            if helper_key not in seen:
-                seen.add(helper_key)
-                columns.append(helper_column)
-            continue
-        column = _source_column_name(field)
-        column_key = case_key(column)
-        if column_key not in seen:
-            seen.add(column_key)
-            columns.append(column)
-    return columns
 
 
-def _source_column_name(field: dict[str, Any]) -> str:
-    source = field.get("source", {})
-    if isinstance(source, dict) and isinstance(source.get("macro"), str):
-        return _physical_name(field["id"])
-    if isinstance(source, dict) and "fixed_value" in source:
-        return _physical_name(field["id"])
-    if isinstance(source, dict) and isinstance(source.get("snowflake_path"), str):
-        return _physical_name(field["id"])
-    column = source.get("column")
-    if isinstance(column, str):
-        return _physical_name(column)
-    pos = source.get("pos")
-    if isinstance(pos, int):
-        return _position_column_name(pos)
-    return _physical_name(field["id"])
 
 
-def _position_column_name(pos: int) -> str:
-    return f"COL_{pos}"
 
 
-def _macro_helper_source_column_name(field: dict[str, Any]) -> str | None:
-    source = field.get("source", {})
-    if not isinstance(source, dict) or not isinstance(source.get("macro"), str):
-        return None
-    column = source.get("column")
-    if isinstance(column, str):
-        return _physical_name(column)
-    pos = source.get("pos")
-    if isinstance(pos, int):
-        return _position_column_name(pos)
-    return None
 
 
-def _job_hooks(spec: dict[str, Any], spec_file_name: str) -> tuple[list[str], list[str]]:
-    relation = _relation_name(_job_relation_config(spec))
-    target_relation = _target_relation_config(spec)
-    generated_table = _runtime_relation_label(target_relation, schema_var="target_schema")
-    quarantine_relation = _quarantine_relation_config(spec) if _quarantine_enabled(spec) else None
-    quarantine_schema_var = None if _quarantine_has_explicit_schema(spec) else "tms_staging_schema"
-    quarantine_table = (
-        _runtime_relation_label(quarantine_relation, schema_var=quarantine_schema_var)
-        if quarantine_relation is not None
-        else None
-    )
-    generated_relation_lookup = _dbt_relation_lookup(
-        target_relation,
-        "tms_generated_relation",
-        schema_var="target_schema",
-    )
-    quarantine_relation_lookup = (
-        _dbt_relation_lookup(
-            quarantine_relation,
-            "tms_quarantine_relation",
-            schema_var=quarantine_schema_var,
-        )
-        if quarantine_relation is not None
-        else "{% set tms_quarantine_relation = none %}"
-    )
-    result_expression = (
-        "{% set failed_result_count = "
-        "(results | selectattr('status', 'equalto', 'error') | list | length) + "
-        "(results | selectattr('status', 'equalto', 'fail') | list | length) %}"
-        "{% if failed_result_count > 0 %}'FAILED'{% else %}"
-        "case when quarantine_counts.QUARANTINE_COUNT > 0 "
-        "then 'COMPLETED_WITH_QUARANTINE' else 'COMPLETED' end{% endif %}"
-    )
-    failed_validation_guard_expression = (
-        "{% set validation_guard_failed = namespace(value=false) %}"
-        "{% for result in results %}"
-        "{% if result.status in ['error', 'fail'] and result.node.name == "
-        + _sql_string(_validation_guard_model_name(spec["target"]["id"]))
-        + " %}{% set validation_guard_failed.value = true %}{% endif %}"
-        "{% if result.status in ['error', 'fail'] and "
-        "'TYPE_MATERIALISATION_VALIDATION_FAILED' in (result.message | string) "
-        "%}{% set validation_guard_failed.value = true %}{% endif %}"
-        "{% endfor %}"
-    )
-    details_expression = (
-        "{% set explicit_job_details = var(\"job_details\", none) %}"
-        "{% if explicit_job_details is not none %}"
-        "'{{ explicit_job_details | replace(\"'\", \"''\") }}'"
-        "{% elif failed_result_count > 0 and validation_guard_failed.value %}"
-        "'validation errors failed the load'"
-        "{% elif failed_result_count > 0 %}"
-        "'dbt run failed; inspect dbt artifacts for runtime details'"
-        "{% else %}case when quarantine_counts.QUARANTINE_COUNT > 0 "
-        "then 'validation errors written to quarantine output' else null end{% endif %}"
-    )
-    create_sql = (
-        f"create table if not exists {relation} ("
-        "JOB_ID varchar(64), "
-        "EVENT_TYPE varchar(32), "
-        "EVENT_TIMESTAMP timestamp_tz, "
-        "RESULT varchar(64), "
-        "DETAILS varchar(16777216), "
-        "SPEC_FILE_NAME varchar(1024), "
-        "GENERATED_TABLE varchar(1024), "
-        "QUARANTINE_TABLE varchar(1024), "
-        "LOADED_COUNT number(38, 0), "
-        "QUARANTINE_COUNT number(38, 0), "
-        f"AUDIT_DATA_PROCESS_KEY {GENERATED_METADATA_FIELD_TYPES['audit_data_process_key']}, "
-        f"AUDIT_CREATED_DATETIME {GENERATED_METADATA_FIELD_TYPES['audit_created_datetime']}, "
-        f"AUDIT_LAST_CHANGED_DATETIME {GENERATED_METADATA_FIELD_TYPES['audit_last_changed_datetime']}"
-        ")"
-    )
-    start_sql = (
-        f"insert into {relation} "
-        "(JOB_ID, EVENT_TYPE, EVENT_TIMESTAMP, RESULT, DETAILS, SPEC_FILE_NAME, GENERATED_TABLE, "
-        "QUARANTINE_TABLE, LOADED_COUNT, QUARANTINE_COUNT, AUDIT_DATA_PROCESS_KEY, "
-        "AUDIT_CREATED_DATETIME, AUDIT_LAST_CHANGED_DATETIME) select "
-        f"{_job_id_expression()}, "
-        "'JOB_START', "
-        "cast(current_timestamp() as timestamp_tz), "
-        "null, "
-        "null, "
-        f"cast({_sql_string(spec_file_name)} as varchar(1024)), "
-        f"cast({_sql_string(generated_table)} as varchar(1024)), "
-        f"{_nullable_sql_string(quarantine_table)}, "
-        "cast(null as number(38, 0)), "
-        "cast(null as number(38, 0)), "
-        f"cast('{{{{ var(\"audit_data_process_key\", \"manual\") }}}}' as "
-        f"{GENERATED_METADATA_FIELD_TYPES['audit_data_process_key']}), "
-        "cast(current_timestamp() as timestamp_tz), "
-        "cast(current_timestamp() as timestamp_tz)"
-    )
-    end_sql = (
-        f"{generated_relation_lookup}{quarantine_relation_lookup}insert into {relation} "
-        "(JOB_ID, EVENT_TYPE, EVENT_TIMESTAMP, RESULT, DETAILS, SPEC_FILE_NAME, GENERATED_TABLE, "
-        "QUARANTINE_TABLE, LOADED_COUNT, QUARANTINE_COUNT, AUDIT_DATA_PROCESS_KEY, "
-        "AUDIT_CREATED_DATETIME, AUDIT_LAST_CHANGED_DATETIME) "
-        "with "
-        f"{_count_cte('tms_generated_relation', 'loaded_counts', 'loaded_count')}, "
-        f"{_count_cte('tms_quarantine_relation', 'quarantine_counts', 'quarantine_count')} "
-        "select "
-        f"{_job_id_expression()}, "
-        "'JOB_END', "
-        "cast(current_timestamp() as timestamp_tz), "
-        f"{result_expression}, "
-        f"{failed_validation_guard_expression}{details_expression}, "
-        f"cast({_sql_string(spec_file_name)} as varchar(1024)), "
-        f"cast({_sql_string(generated_table)} as varchar(1024)), "
-        f"{_nullable_sql_string(quarantine_table)}, "
-        "loaded_counts.LOADED_COUNT, "
-        "quarantine_counts.QUARANTINE_COUNT, "
-        f"cast('{{{{ var(\"audit_data_process_key\", \"manual\") }}}}' as "
-        f"{GENERATED_METADATA_FIELD_TYPES['audit_data_process_key']}), "
-        "cast(current_timestamp() as timestamp_tz), "
-        "cast(current_timestamp() as timestamp_tz) "
-        "from loaded_counts cross join quarantine_counts"
-    )
-    return (
-        [_optional_job_hook(create_sql), _optional_job_hook(start_sql)],
-        [_optional_job_hook(create_sql), _optional_job_hook(end_sql)],
-    )
 
 
-def _optional_job_hook(sql: str) -> str:
-    return "{% if var('tms_enable_job_hooks', true) %}" + sql + "{% endif %}"
 
 
-def _sql_string(value: str) -> str:
-    return "'" + value.replace("'", "''") + "'"
 
 
-def _sql_scalar(value: Any) -> str:
-    if value is None:
-        return "null"
-    if isinstance(value, bool):
-        return "true" if value else "false"
-    if isinstance(value, int | float):
-        return str(value)
-    string_value = str(value)
-    if _is_jinja_expression(string_value):
-        return f"'{string_value}'"
-    return _sql_string(string_value)
 
 
-def _is_jinja_expression(value: str) -> bool:
-    stripped = value.strip()
-    return stripped.startswith("{{") and stripped.endswith("}}")
 
 
-def _nullable_sql_string(value: str | None) -> str:
-    if value is None:
-        return "cast(null as varchar(1024))"
-    return f"cast({_sql_string(value)} as varchar(1024))"
 
 
-def _sql_literal(value: Any, data_type: str) -> str:
-    if value is None:
-        return f"cast(null as {data_type})"
-    return f"cast({_sql_string(str(value))} as {data_type})"
+
+
+
+
+
+
+
+
 
 
 def _write(path: Path, content: str, result: DbtGenerationResult) -> None:

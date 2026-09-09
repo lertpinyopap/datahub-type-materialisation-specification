@@ -1307,6 +1307,9 @@ target ::=
   schema
   table_name?
   tags?
+  tag_application?
+  apply_governance_procedure?
+  governance_contract?
   fields[]
 
 id ::= identifier
@@ -1314,6 +1317,9 @@ database ::= string
 schema ::= string
 table_name ::= string
 tags ::= map<string, scalar>
+tag_application ::= alter_table | apply_governance
+apply_governance_procedure ::= qualified identifier
+governance_contract ::= { table, source?, version? }
 ```
 
 `target` describes the typed data produced by the materialisation.
@@ -1333,6 +1339,38 @@ or platform policy integration. dbt implementations that support Snowflake tags
 should apply these as table tags after the target relation exists. Tags do not
 control generated surrogate keys, generated business keys, or
 `business_data_hash`; those columns are controlled by `control_data`.
+
+`target.tag_application` controls how TMS applies declared target and field
+tags after a successful model build. It defaults to `alter_table`, which emits
+Snowflake `ALTER TABLE ... SET TAG` post-hooks. Set it to `apply_governance` to
+call the procedure named by `target.apply_governance_procedure` instead. This
+mode is intended for a governance service that reads its own metadata contract.
+When `target.governance_contract` is provided, TMS first merges each classified
+field into that contract table and then calls the governance procedure.
+
+Example:
+
+```yaml
+target:
+  id: card_customer
+  schema: core
+  tag_application: apply_governance
+  apply_governance_procedure: NONPROD_GOVERNANCE.OVERRIDES.APPLY_GOVERNANCE
+  governance_contract:
+    table: NONPROD_GOVERNANCE.METADATA.CONTRACT_COLUMNS
+    source: dbt:card_customer
+    version: "1"
+```
+
+This generates a model post-hook equivalent to:
+
+```sql
+CALL NONPROD_GOVERNANCE.OVERRIDES.APPLY_GOVERNANCE(
+  '{{ this.database | upper }}',
+  '{{ this.schema | upper }}',
+  '{{ this.identifier | upper }}'
+);
+```
 
 `target.fields` must contain at least one field.
 
@@ -1454,6 +1492,12 @@ names such as `TAGS.PII_CATEGORY`, or fully qualified names such as
 `GOVERNANCE_DB.TAGS.PII_CATEGORY`. Values are scalar and are not restricted by
 the TMS schema, so platform-controlled allowed values can evolve without
 requiring a TMS schema change.
+
+`field.description` is optional column documentation. When
+`target.governance_contract` is configured, TMS writes it to the contract
+`DESCRIPTION` column. Fields with one of the recognised governance tags
+(`PII_CATEGORY`, `PCI_CATEGORY`, or `DATA_CLASSIFICATION`) or a description are
+merged into the contract table.
 
 Sample: target field.
 

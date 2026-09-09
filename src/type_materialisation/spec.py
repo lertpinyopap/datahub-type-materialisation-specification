@@ -29,7 +29,7 @@ SCD2_MANUAL_FIELD_TYPES = {
 SUPPORTED_TYPE_RE = re.compile(r"^\s*([A-Za-z][A-Za-z0-9_]*)(?:\(([^)]*)\))?\s*$")
 JINJA_EXPR_RE = re.compile(r"{{.*?}}")
 SUPPORTED_JINJA_EXPR_RE = re.compile(
-    r"""^\s*{{\s*(var|env_var|tms_var)\(\s*(['"])[^'"]+\2\s*(,\s*(['"])[^'"]*\4\s*)?\)\s*}}\s*$"""
+    r"""^\s*{{\s*((var|env_var|tms_var)\(\s*(['"])[^'"]+\3\s*(,\s*(['"])[^'"]*\5\s*)?\)|tms_incremental_bookmark_predicate\([^}]*\))\s*}}\s*$"""
 )
 
 

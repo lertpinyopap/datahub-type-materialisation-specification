@@ -19,7 +19,7 @@ where = ["src"]
 dependencies = {file = ["requirements-runtime.txt"]}
 
 [tool.setuptools.package-data]
-"type_materialisation" = ["*.json"]
+"type_materialisation" = ["*.json", "templates/*.sql"]
 
 [tool.pytest.ini_options]
 filterwarnings = ["error"]

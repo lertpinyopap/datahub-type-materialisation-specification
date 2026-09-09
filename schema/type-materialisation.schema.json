@@ -247,6 +247,9 @@
         },
         "job": {
           "$ref": "#/$defs/jobTable"
+        },
+        "incremental_bookmark": {
+          "$ref": "#/$defs/incrementalBookmark"
         }
       }
     },
@@ -311,6 +314,26 @@
           "$ref": "#/$defs/templatedString"
         },
         "table": {
+          "$ref": "#/$defs/templatedString"
+        }
+      }
+    },
+    "incrementalBookmark": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["bookmark_relation", "source_relation"],
+      "properties": {
+        "bookmark_relation": {
+          "$ref": "#/$defs/templatedString"
+        },
+        "source_relation": {
+          "$ref": "#/$defs/templatedString"
+        },
+        "source_timestamp_column": {
+          "$ref": "#/$defs/specificationId",
+          "default": "AIRFLOW_DAG_TIME"
+        },
+        "pipeline_name": {
           "$ref": "#/$defs/templatedString"
         }
       }
@@ -780,6 +803,17 @@
         "tags": {
           "$ref": "#/$defs/tags"
         },
+        "tag_application": {
+          "type": "string",
+          "enum": ["alter_table", "apply_governance"],
+          "default": "alter_table"
+        },
+        "apply_governance_procedure": {
+          "$ref": "#/$defs/templatedString"
+        },
+        "governance_contract": {
+          "$ref": "#/$defs/governanceContract"
+        },
         "fields": {
           "type": "array",
           "minItems": 1,
@@ -787,7 +821,22 @@
             "$ref": "#/$defs/fieldPatch"
           }
         }
-      }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "tag_application": {
+                "const": "apply_governance"
+              }
+            },
+            "required": ["tag_application"]
+          },
+          "then": {
+            "required": ["apply_governance_procedure"]
+          }
+        }
+      ]
     },
     "fullTarget": {
       "type": "object",
@@ -809,6 +858,17 @@
         "tags": {
           "$ref": "#/$defs/tags"
         },
+        "tag_application": {
+          "type": "string",
+          "enum": ["alter_table", "apply_governance"],
+          "default": "alter_table"
+        },
+        "apply_governance_procedure": {
+          "$ref": "#/$defs/templatedString"
+        },
+        "governance_contract": {
+          "$ref": "#/$defs/governanceContract"
+        },
         "fields": {
           "type": "array",
           "minItems": 1,
@@ -816,7 +876,22 @@
             "$ref": "#/$defs/fullField"
           }
         }
-      }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "tag_application": {
+                "const": "apply_governance"
+              }
+            },
+            "required": ["tag_application"]
+          },
+          "then": {
+            "required": ["apply_governance_procedure"]
+          }
+        }
+      ]
     },
     "fieldPatch": {
       "type": "object",
@@ -845,6 +920,9 @@
         },
         "tags": {
           "$ref": "#/$defs/tags"
+        },
+        "description": {
+          "type": "string"
         },
         "unique": {
           "type": "boolean"
@@ -911,6 +989,22 @@
       "type": "object",
       "additionalProperties": {
         "$ref": "#/$defs/scalarValue"
+      }
+    },
+    "governanceContract": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["table"],
+      "properties": {
+        "table": {
+          "$ref": "#/$defs/templatedString"
+        },
+        "source": {
+          "$ref": "#/$defs/templatedString"
+        },
+        "version": {
+          "$ref": "#/$defs/scalarValue"
+        }
       }
     },
     "csvField": {
