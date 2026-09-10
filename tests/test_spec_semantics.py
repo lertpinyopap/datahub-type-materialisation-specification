@@ -1861,3 +1861,42 @@ def test_table_source_query_rejects_non_select_or_statement(
     )
 
     assert message in diagnostic_messages(diagnostics)
+
+
+def test_scd2_derived_allows_omitting_declared_valid_to_datetime(tmp_path: Path) -> None:
+    _, diagnostics = parse_yaml(
+        tmp_path,
+        """
+        id: account_spec
+        control_data:
+          change_type: scd2_derived
+          business_key:
+            fields:
+              - account_id
+          business_data_hash:
+            business_data_hash_mode: include
+            fields:
+              - account_name
+        source:
+          format: table
+          query: select * from landing.account_source
+        target:
+          id: account
+          schema: business
+          fields:
+            - id: account_id
+              source:
+                column: account_id
+              data_type: varchar(20)
+            - id: account_name
+              source:
+                column: account_name
+              data_type: varchar(255)
+            - id: valid_from_datetime
+              source:
+                column: SOURCE_EFFECTIVE_FROM_DATETIME
+              data_type: timestamp_tz
+        """,
+    )
+
+    assert diagnostics == []

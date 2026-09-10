@@ -375,12 +375,6 @@
           "enum": ["previous_and_next"],
           "default": "previous_and_next"
         },
-        "valid_from_datetime": {
-          "$ref": "#/$defs/scdValidFromDatetime"
-        },
-        "valid_to_datetime": {
-          "$ref": "#/$defs/scdValidToDatetime"
-        },
         "current_flag": {
           "$ref": "#/$defs/scdCurrentFlag"
         },

@@ -324,7 +324,7 @@ def _incremental_bookmark_hooks(spec: dict[str, Any]) -> tuple[list[str], list[s
         f"create table if not exists {relation} ("
         "PIPELINE_NAME varchar not null, SOURCE_RELATION varchar not null, "
         "LAST_SOURCE_TIMESTAMP timestamp_ntz, "
-        "UPDATED_AT timestamp_tz not null default current_timestamp(), "
+        "UPDATED_AT timestamp_ntz not null default current_timestamp(), "
         "UPDATED_BY varchar not null default current_role())"
     )
     migrate_sql = f"alter table {relation} add column if not exists LAST_SOURCE_TIMESTAMP timestamp_ntz"
@@ -341,10 +341,10 @@ def _incremental_bookmark_hooks(spec: dict[str, Any]) -> tuple[list[str], list[s
             ") as source on target.PIPELINE_NAME = source.PIPELINE_NAME ",
             "and target.SOURCE_RELATION = source.SOURCE_RELATION ",
             "when matched then update set LAST_SOURCE_TIMESTAMP = source.LAST_SOURCE_TIMESTAMP, ",
-            "UPDATED_AT = current_timestamp(), UPDATED_BY = current_role() ",
+            "UPDATED_AT = current_timestamp()::timestamp_ntz, UPDATED_BY = current_role() ",
             "when not matched then insert (PIPELINE_NAME, SOURCE_RELATION, LAST_SOURCE_TIMESTAMP, UPDATED_AT, UPDATED_BY) ",
             "values (source.PIPELINE_NAME, source.SOURCE_RELATION, source.LAST_SOURCE_TIMESTAMP, ",
-            "current_timestamp(), current_role())",
+            "current_timestamp()::timestamp_ntz, current_role())",
             "{% else %}select 1 where false{% endif %}",
         ]
     )

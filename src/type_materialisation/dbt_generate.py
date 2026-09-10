@@ -102,6 +102,20 @@ def generate_dbt_project(options: GenerateDbtOptions) -> DbtGenerationResult:
     if diagnostics:
         result.errors.extend(diagnostics)
         return result
+    if _change_type(spec) in {"scd2_auto", "scd2_derived"} and not _scd2_validation_enabled(spec):
+        result.warnings.append(
+            Diagnostic(
+                "WARNING! SCD2 validity-window validation is disabled; invalid, overlapping, or non-continuous history may be loaded",
+                "$.control_data.scd.scd2_validation_enabled",
+            )
+        )
+    if not _validation_enabled(spec):
+        result.warnings.append(
+            Diagnostic(
+                "WARNING! General validation is disabled; validation failures will not block or quarantine rows.",
+                "$.control_data.validation_enabled",
+            )
+        )
 
     macros = PythonMacroResolver(spec_path=options.spec_path, macro_paths=options.macro_paths)
     custom_macro_names = _custom_macro_names(spec)
@@ -198,13 +212,10 @@ def _unsupported_for_initial_dbt_generation(spec: dict[str, Any]) -> list[Diagno
                 )
             )
     if _change_type(spec) == "scd2_derived":
-        valid_from_datetime = scd.get("valid_from_datetime")
-        if not isinstance(valid_from_datetime, dict) or not (
-            valid_from_datetime.get("source_column") or valid_from_datetime.get("expression")
-        ):
+        if "valid_from_datetime" in scd:
             diagnostics.append(
                 Diagnostic(
-                    "`scd.valid_from_datetime.source_column` or `expression` is required when `change_type` is scd2_derived",
+                    "`scd.valid_from_datetime` is not valid for `scd2_derived`; declare `target.fields.valid_from_datetime` instead",
                     "$.control_data.scd.valid_from_datetime",
                 )
             )
@@ -312,24 +323,9 @@ def _write_status_file(output_dir: Path, result: DbtGenerationResult) -> None:
 
 
 def _scd2_derived_source_helper_lines(spec: dict[str, Any]) -> list[str]:
-    """Expose simple SCD2 derived source aliases in staging, not in the final target."""
-    if _change_type(spec) != "scd2_derived":
-        return []
-    config = _scd_config(spec).get("valid_from_datetime", {})
-    helper = (
-        config.get("source_column") or config.get("expression")
-        if isinstance(config, dict)
-        else None
-    )
-    if not isinstance(helper, str) or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_$]*", helper.strip()):
-        return []
-    helper_name = helper.strip()
-    source_columns = {case_key(column) for column in _source_output_columns(spec)}
-    if case_key(helper_name) in source_columns:
-        return []
-    return [
-        f"    source_query.{_quote_identifier(helper_name)} as {_quote_identifier(helper_name)}",
-    ]
+    """SCD2-derived valid-from values are projected through target.fields."""
+    del spec
+    return []
 
 
 def _write_final_model(spec: dict[str, Any], result: DbtGenerationResult) -> None:
@@ -341,6 +337,8 @@ def _write_final_model(spec: dict[str, Any], result: DbtGenerationResult) -> Non
     fail_load_enabled = _fail_load_enabled(spec)
     field_select_lines = []
     for field in fields(spec):
+        if _scd2_derived_declared_metadata(field, spec):
+            continue
         expression = _field_expression(field)
         data_type = field["data_type"]
         field_select_lines.append(f"    cast({expression} as {data_type}) as {_quote_identifier(field['id'])}")
@@ -552,6 +550,12 @@ def _audit_select_lines() -> list[str]:
 
 def _field_select_line(field: dict[str, Any]) -> str:
     return f"    cast({_field_expression(field)} as {field['data_type']}) as {_quote_identifier(field['id'])}"
+
+
+def _scd2_derived_declared_metadata(field: dict[str, Any], spec: dict[str, Any]) -> bool:
+    return _change_type(spec) == "scd2_derived" and case_key(str(field.get("id", ""))) in {
+        "valid_from_datetime", "valid_to_datetime"
+    }
 
 
 def _scd2_manual_select_lines(
@@ -1271,7 +1275,7 @@ def _scd2_existing_target_rows_lines(spec: dict[str, Any]) -> list[str]:
 
 def _scd2_change_row_columns(spec: dict[str, Any]) -> list[str]:
     return [
-        *[_quote_identifier(field["id"]) for field in fields(spec)],
+        *[_quote_identifier(field["id"]) for field in fields(spec) if not _scd2_derived_declared_metadata(field, spec)],
         *_surrogate_key_change_row_columns(spec),
         *_business_key_change_row_columns(spec),
         "TMS_VALID_FROM_DATETIME_CANDIDATE",
@@ -1399,12 +1403,7 @@ def _scd2_deduplicate_order_by_expressions(spec: dict[str, Any]) -> list[str]:
     if not isinstance(deduplicate, dict):
         return []
     expressions: list[str] = []
-    valid_from_config = _scd_config(spec).get("valid_from_datetime", {})
-    valid_from_reference = (
-        valid_from_config.get("source_column") or valid_from_config.get("expression")
-        if isinstance(valid_from_config, dict)
-        else None
-    )
+    valid_from_reference = _source_column_name(_field_by_id(spec, "valid_from_datetime"))
     for order_by in deduplicate.get("order_by", []):
         if not isinstance(order_by, dict):
             continue
@@ -2683,8 +2682,7 @@ def _scd_config(spec: dict[str, Any]) -> dict[str, Any]:
 
 def _valid_from_datetime_config(spec: dict[str, Any]) -> dict[str, Any]:
     if _change_type(spec) == "scd2_derived":
-        config = _scd_config(spec).get("valid_from_datetime", {})
-        return config if isinstance(config, dict) else {}
+        return {}
     value = _insert_time_value(spec)
     return {"value": value} if value is not None else {}
 
@@ -2748,10 +2746,8 @@ def _delete_detection_field_condition(spec: dict[str, Any]) -> str:
 
 def _valid_from_datetime_expression(spec: dict[str, Any]) -> str:
     config = _valid_from_datetime_config(spec)
-    if _change_type(spec) == "scd2_derived" and "source_column" in config:
-        return f"cast({_quote_identifier(str(config['source_column']))} as timestamp_tz)"
-    if _change_type(spec) == "scd2_derived" and "expression" in config:
-        return f"cast({config['expression']} as timestamp_tz)"
+    if _change_type(spec) == "scd2_derived":
+        return f"cast({_field_expression(_field_by_id(spec, 'valid_from_datetime'))} as timestamp_tz)"
     return f"cast({_sql_scalar(config['value'])} as timestamp_tz)"
 
 
@@ -3031,76 +3027,12 @@ def _business_data_hash_ineligible_field_ids(spec: dict[str, Any]) -> set[str]:
     return excluded_fields
 
 
-
-
 def _quarantine_model_name(target_id: str) -> str:
     return f"{target_id}__quarantine"
 
 
 def _validation_guard_model_name(target_id: str) -> str:
     return f"{target_id}__validation_guard"
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 def _validation_enabled(spec: dict[str, Any]) -> bool:
@@ -3122,64 +3054,6 @@ def _failure_mode(spec: dict[str, Any]) -> str:
     if not isinstance(control_data, dict):
         return "fail_load"
     return str(control_data.get("failure_mode", "fail_load"))
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 def _write(path: Path, content: str, result: DbtGenerationResult) -> None:

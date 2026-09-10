@@ -1421,8 +1421,10 @@ def test_incremental_bookmark_is_generated_from_control_data(tmp_path: Path) -> 
     assert "LAST_SOURCE_TIMESTAMP" in macro_sql
     assert "NONPROD_GOVERNANCE.METADATA.TMS_BOOKMARK" in macro_sql
     assert "create table if not exists NONPROD_GOVERNANCE.METADATA.TMS_BOOKMARK" in project["on-run-start"][0]
+    assert "UPDATED_AT timestamp_ntz not null" in project["on-run-start"][0]
     assert "alter table NONPROD_GOVERNANCE.METADATA.TMS_BOOKMARK add column if not exists LAST_SOURCE_TIMESTAMP" in project["on-run-start"][1]
     assert "merge into NONPROD_GOVERNANCE.METADATA.TMS_BOOKMARK" in project["on-run-end"][2]
+    assert "current_timestamp()::timestamp_ntz, current_role())" in project["on-run-end"][2]
 
 
 def test_generated_schema_name_macro_supports_runtime_schema_override(tmp_path: Path) -> None:
@@ -1911,9 +1913,6 @@ def test_scd2_derived_exposes_effective_date_in_staging_only(tmp_path: Path) -> 
             business_data_hash_mode: include
             fields:
               - account_name
-          scd:
-            valid_from_datetime:
-              expression: SOURCE_EFFECTIVE_FROM_DATETIME
         source:
           format: table
           query: |
@@ -1934,6 +1933,10 @@ def test_scd2_derived_exposes_effective_date_in_staging_only(tmp_path: Path) -> 
               source:
                 column: account_name
               data_type: varchar(255)
+            - id: valid_from_datetime
+              source:
+                column: SOURCE_EFFECTIVE_FROM_DATETIME
+              data_type: timestamp_tz
         """,
     )
 
@@ -1959,8 +1962,6 @@ def test_scd2_derived_valid_from_source_column_is_supported(tmp_path: Path) -> N
             fields:
               - account_name
           scd:
-            valid_from_datetime:
-              source_column: SOURCE_EFFECTIVE_FROM_DATETIME
             deduplicate:
               order_by:
                 - column: SOURCE_EFFECTIVE_FROM_DATETIME
@@ -1984,6 +1985,10 @@ def test_scd2_derived_valid_from_source_column_is_supported(tmp_path: Path) -> N
               source:
                 column: account_name
               data_type: varchar(255)
+            - id: valid_from_datetime
+              source:
+                column: SOURCE_EFFECTIVE_FROM_DATETIME
+              data_type: timestamp_tz
         """,
     )
 
@@ -2698,8 +2703,6 @@ def test_scd2_derived_scopes_existing_target_to_incoming_keys(tmp_path: Path) ->
             control_data:
               change_type: scd2_derived
               scd:
-                valid_from_datetime:
-                  expression: updated_at
                 scd2_validation_enabled: false
                 validation_scope: affected_window
             """,
@@ -2710,7 +2713,7 @@ def test_scd2_derived_scopes_existing_target_to_incoming_keys(tmp_path: Path) ->
             column: account_id
           data_type: varchar(20)
           unique: true
-        - id: updated_at
+        - id: valid_from_datetime
           source:
             pos: 1
             column: updated_at
@@ -2920,6 +2923,27 @@ def test_scd2_unit_tests_reject_insert_time_without_timezone(tmp_path: Path) -> 
 
     assert diagnostic_messages(result.errors) == ["unit-test timestamp value must include a timezone"]
     assert result.errors[0].location == str(csv_path)
+
+
+def test_scd2_validation_disabled_emits_generation_warning(tmp_path: Path) -> None:
+    result, _ = generate(
+        tmp_path,
+        csv_generation_spec(
+            extra_control="""
+            control_data:
+              change_type: scd2_auto
+              scd:
+                insert_time: "{{ var('insert_time') }}"
+                scd2_validation_enabled: false
+            """,
+        ),
+    )
+
+    assert result.errors == []
+    assert [warning.message for warning in result.warnings] == [
+        "WARNING! SCD2 validity-window validation is disabled; invalid, overlapping, or non-continuous history may be loaded"
+    ]
+    assert result.warnings[0].location == "$.control_data.scd.scd2_validation_enabled"
 
 
 def test_custom_macro_files_are_generated(tmp_path: Path) -> None:

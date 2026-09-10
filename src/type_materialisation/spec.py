@@ -142,7 +142,10 @@ def _validate_target_fields(spec: dict[str, Any]) -> list[Diagnostic]:
             continue
         key = case_key(field_id)
         location = f"$.target.fields[{index}].id"
-        if key in reserved_generated_fields:
+        if key in reserved_generated_fields and not (
+            _change_type(spec) == "scd2_derived"
+            and key in {"valid_from_datetime", "valid_to_datetime"}
+        ):
             diagnostics.append(Diagnostic("uses a reserved generated metadata field id", location))
         if key in seen:
             diagnostics.append(
@@ -489,16 +492,31 @@ def _validate_scd(spec: dict[str, Any], *, abstract: bool) -> list[Diagnostic]:
             diagnostics.append(Diagnostic("`scd.insert_time` is required when `change_type` is scd2_auto", "$.control_data.scd.insert_time"))
 
     if change_type == "scd2_derived":
-        if not isinstance(scd, dict):
-            diagnostics.append(Diagnostic("`scd` is required when `change_type` is scd2_derived", "$.control_data.scd"))
-        else:
-            valid_from_datetime = scd.get("valid_from_datetime")
-            if not isinstance(valid_from_datetime, dict) or not (
-                valid_from_datetime.get("source_column") or valid_from_datetime.get("expression")
+        if isinstance(scd, dict):
+            for field_id in ("valid_from_datetime",):
+                field = next((field for field in target_fields if isinstance(field, dict) and case_key(field.get("id", "")) == field_id), None)
+                if field is None:
+                    diagnostics.append(Diagnostic(f"`scd2_derived` requires target field `{field_id}`", "$.target.fields"))
+                elif not isinstance(field.get("data_type"), str) or not _is_timestamp_type(field["data_type"]):
+                    diagnostics.append(Diagnostic(f"`{field_id}` must use a timestamp data type for `scd2_derived`", "$.target.fields"))
+            valid_to_field = next(
+                (field for field in target_fields if isinstance(field, dict) and case_key(field.get("id", "")) == "valid_to_datetime"),
+                None,
+            )
+            if valid_to_field is not None and (
+                not isinstance(valid_to_field.get("data_type"), str)
+                or not _is_timestamp_type(valid_to_field["data_type"])
             ):
                 diagnostics.append(
                     Diagnostic(
-                        "`scd.valid_from_datetime.source_column` or `expression` is required when `change_type` is scd2_derived",
+                        "`valid_to_datetime` must use a timestamp data type for `scd2_derived`",
+                        "$.target.fields",
+                    )
+                )
+            if "valid_from_datetime" in scd:
+                diagnostics.append(
+                    Diagnostic(
+                        "`scd.valid_from_datetime` is not valid for `scd2_derived`; declare `target.fields.valid_from_datetime` instead",
                         "$.control_data.scd.valid_from_datetime",
                     )
                 )

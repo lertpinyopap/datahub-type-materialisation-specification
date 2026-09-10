@@ -698,8 +698,6 @@ scd2_auto_scd_config ::=
 scd2_derived_scd_config ::=
   scd2_validation_enabled?
   scd2_validation?
-  valid_from_datetime
-  valid_to_datetime?
   current_flag?
   deleted_flag?
   derivation_scope?
@@ -716,10 +714,6 @@ insert_time ::= scalar
 scd2_auto_from_sot ::= true | false
 scd2_validation_enabled ::= true | false
 scd2_validation ::= continuous | sparse
-valid_from_datetime ::=
-  source_column | expression
-source_column ::= target field id or generated source alias
-expression ::= SQL expression evaluated against generated source rows
 update_mode ::= append_only | upsert
 update_key ::=
   fields[]
@@ -875,27 +869,27 @@ rather than leaving adjacent duplicate business-data versions.
 
 For `scd2_derived`, implementations preserve historical versions and generate
 the same SCD2 target metadata columns as `scd2_auto`, but the proposed
-`valid_from_datetime` comes from `scd.valid_from_datetime.source_column` or
-`scd.valid_from_datetime.expression` rather than from load `insert_time`.
+`valid_from_datetime` comes from the declared `target.fields` mapping rather
+than from load `insert_time`.
 
-Generated SCD metadata columns for `scd2_derived` are not declared in
-`target.fields`. Target field ids must not use generated SCD metadata column
-names.
+For `scd2_derived`, `valid_from_datetime` must be declared in `target.fields`
+with a timestamp data type. `valid_to_datetime` may also be declared with a
+timestamp data type; when omitted, the implementation generates it using the
+default SCD2 validity-window behavior. Their values are still derived from the
+`scd` control data; declarations define target schema and output columns. Other
+generated SCD metadata columns are not declared in `target.fields`.
 
 `scd2_derived` requires:
 
-- `scd.valid_from_datetime.source_column` or
-  `scd.valid_from_datetime.expression`: effective start value evaluated against
-  the generated source rows.
+- `target.fields.valid_from_datetime`: effective start value mapped from the
+  source and used to derive validity windows.
 - `business_key.fields`: target fields used to partition customer/entity
   history.
 - `business_data_hash.fields`: source-derived target fields used to detect
   business-value changes for a version.
 
-Prefer `source_column` when the source query already projects the business
-effective start as a named column. Use `expression` when the effective start
-needs inline SQL over generated source fields. `expression` remains supported
-for backward compatibility.
+Use the normal target-field source mapping and transforms to derive the
+business effective start.
 
 `scd2_derived` supports the following scope and window options:
 
@@ -916,13 +910,12 @@ for backward compatibility.
   adjacent windows for a business key to meet exactly, from the earliest row
   through the end-of-time row. `sparse` permits gaps but still rejects overlaps,
   null boundaries, and windows where the end is not after the start.
-- `valid_from_datetime` is required. Specify either `source_column`, naming a
-  source-query column, or `expression`, containing a SQL expression evaluated
-  against generated source rows. Both are cast to `timestamp_tz`; when both are
-  supplied, `source_column` takes precedence.
-- `valid_to_datetime` is optional. Its `mode` defaults to, and currently only
-  supports, `next_valid_from`: each row ends immediately before the next later
-  version for the same business key. `offset` defaults to
+- `target.fields.valid_from_datetime` is required and must use a timestamp data
+  type. Its source mapping and transforms are evaluated against the generated
+  source rows, then cast to `timestamp_tz`.
+- `scd.valid_to_datetime` is optional. Its `mode` defaults to, and currently
+  only supports, `next_valid_from`: each row ends immediately before the next
+  later version for the same business key. `offset` defaults to
   `{unit: nanosecond, value: -1}`; its `unit` may be `nanosecond` or `second`
   and its `value` is an integer. `end_of_time` defaults to
   `9999-12-31T23:59:59Z` and may be overridden with a timestamp expression.
@@ -1014,14 +1007,6 @@ control_data:
     derivation_scope: affected_keys
     validation_scope: affected_window
     window_strategy: previous_and_next
-    valid_from_datetime:
-      source_column: source_effective_from_datetime
-    valid_to_datetime:
-      mode: next_valid_from
-      offset:
-        unit: nanosecond
-        value: -1
-      end_of_time: "9999-12-31 23:59:59 +00:00"
     current_flag:
       mode: latest_per_business_key
     deleted_flag:
@@ -1029,21 +1014,15 @@ control_data:
       value: "N"
 ```
 
-Sample: SCD2 derived effective date with an inline expression.
+Sample: SCD2 derived valid-from target field.
 
 ```yaml
-control_data:
-  change_type: scd2_derived
-  business_key:
-    fields:
-      - customer_id
-  business_data_hash:
-    business_data_hash_mode: include
-    fields:
-      - customer_status_code
-  scd:
-    valid_from_datetime:
-      expression: coalesce(updated_datetime, created_datetime)
+target:
+  fields:
+    - id: valid_from_datetime
+      source:
+        column: source_effective_from_datetime
+      data_type: timestamp_tz
 ```
 
 ## 6. Source
