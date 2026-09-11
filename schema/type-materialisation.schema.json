@@ -348,6 +348,11 @@
         "insert_time": {
           "$ref": "#/$defs/scalarValue"
         },
+        "timestamp_data_type": {
+          "type": "string",
+          "enum": ["timestamp_ltz", "timestamp_tz", "timestamp_ntz"],
+          "default": "timestamp_ltz"
+        },
         "scd2_auto_from_sot": {
           "type": "boolean"
         },
