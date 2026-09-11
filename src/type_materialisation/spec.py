@@ -11,17 +11,17 @@ SURROGATE_KEY_DATA_TYPE = "varchar(36)"
 GENERATED_METADATA_FIELD_TYPES = {
     "is_current_flag": "varchar(1)",
     "is_deleted_flag": "varchar(1)",
-    "valid_from_datetime": "timestamp_tz",
-    "valid_to_datetime": "timestamp_tz",
+    "valid_from_datetime": "timestamp_ltz",
+    "valid_to_datetime": "timestamp_ltz",
     "business_data_hash": "varchar(64)",
-    "audit_created_datetime": "timestamp_tz",
-    "audit_last_changed_datetime": "timestamp_tz",
+    "audit_created_datetime": "timestamp_ltz",
+    "audit_last_changed_datetime": "timestamp_ltz",
     "audit_data_process_key": "varchar(256)",
 }
 RESERVED_GENERATED_FIELDS = set(GENERATED_METADATA_FIELD_TYPES)
 SCD2_MANUAL_FIELD_TYPES = {
-    "valid_from_datetime": "timestamp",
-    "valid_to_datetime": "timestamp",
+    "valid_from_datetime": "timestamp_ltz",
+    "valid_to_datetime": "timestamp_ltz",
     "is_current_flag": "varchar(1)",
     "is_deleted_flag": "varchar(1)",
 }
@@ -79,6 +79,7 @@ def parse_sql_type(value: str) -> SqlType:
         "date",
         "timestamp",
         "timestamp_tz",
+        "timestamp_ltz",
         "timestamptz",
         "datetime",
         "boolean",
@@ -867,7 +868,7 @@ def _is_timestamp_type(value: str) -> bool:
         parsed = parse_sql_type(value)
     except ValueError:
         return False
-    return parsed.name in {"timestamp", "timestamp_tz", "timestamptz", "datetime"}
+    return parsed.name in {"timestamp", "timestamp_tz", "timestamp_ltz", "timestamptz", "datetime"}
 
 
 def _is_varchar_1_type(value: str) -> bool:

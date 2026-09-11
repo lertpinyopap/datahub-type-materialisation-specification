@@ -670,8 +670,8 @@ def test_generated_final_model_uses_audit_metadata_types(tmp_path: Path) -> None
     assert result.errors == []
     model_sql = (output_dir / "models" / "generated" / "account.sql").read_text(encoding="utf-8")
     assert "cast('{{ var(\"audit_data_process_key\", \"manual\") }}' as varchar(256))" in model_sql
-    assert "cast(current_timestamp() as timestamp_tz) as AUDIT_CREATED_DATETIME" in model_sql
-    assert "cast(current_timestamp() as timestamp_tz) as AUDIT_LAST_CHANGED_DATETIME" in model_sql
+    assert "cast(current_timestamp() as timestamp_ltz) as AUDIT_CREATED_DATETIME" in model_sql
+    assert "cast(current_timestamp() as timestamp_ltz) as AUDIT_LAST_CHANGED_DATETIME" in model_sql
 
 
 def test_scd2_manual_output_orders_keys_business_fields_scd2_hash_and_audit_groups(tmp_path: Path) -> None:

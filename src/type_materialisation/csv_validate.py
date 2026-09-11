@@ -286,7 +286,7 @@ def _coerce_type(value: Any, sql_type: SqlType) -> Any:
         if isinstance(value, date) and not isinstance(value, datetime):
             return value
         return datetime.fromisoformat(str(value)).date()
-    if name in {"timestamp", "datetime", "timestamp_tz", "timestamptz"}:
+    if name in {"timestamp", "datetime", "timestamp_tz", "timestamp_ltz", "timestamptz"}:
         if isinstance(value, datetime):
             return _require_timezone(value, "must include a timezone")
         return _require_timezone(
