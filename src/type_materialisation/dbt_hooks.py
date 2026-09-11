@@ -4,7 +4,17 @@ from __future__ import annotations
 from importlib.resources import files
 import json
 from pathlib import Path
+import sys
 from typing import Any
+
+# Airflow may load this runtime helper from its file path rather than as a
+# package module. Make the package root available before resolving relative
+# imports in that mode.
+if __package__ in {None, ""}:
+    _package_root = Path(__file__).resolve().parent.parent
+    if str(_package_root) not in sys.path:
+        sys.path.insert(0, str(_package_root))
+    __package__ = "type_materialisation"
 
 from .schema import require_yaml
 from .spec import GENERATED_METADATA_FIELD_TYPES, fields
