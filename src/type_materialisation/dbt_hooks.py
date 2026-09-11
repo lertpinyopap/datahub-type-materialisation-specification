@@ -27,6 +27,7 @@ from .dbt_sql import (
 
 DBT_PROJECT_NAME = "type_materialisation_generated"
 DBT_PROFILE_NAME = "datahub_type_materialisation"
+JOB_TIMESTAMP_DATA_TYPE = "timestamp_ltz"
 
 
 def _write(path: Path, content: str, result: Any) -> None:
@@ -421,7 +422,7 @@ def _job_hooks(spec: dict[str, Any], spec_file_name: str) -> tuple[list[str], li
         f"create table if not exists {relation} ("
         "JOB_ID varchar(64), "
         "EVENT_TYPE varchar(32), "
-        "EVENT_TIMESTAMP timestamp_tz, "
+        f"EVENT_TIMESTAMP {JOB_TIMESTAMP_DATA_TYPE}, "
         "RESULT varchar(64), "
         "DETAILS varchar(16777216), "
         "SPEC_FILE_NAME varchar(1024), "
@@ -429,19 +430,16 @@ def _job_hooks(spec: dict[str, Any], spec_file_name: str) -> tuple[list[str], li
         "QUARANTINE_TABLE varchar(1024), "
         "LOADED_COUNT number(38, 0), "
         "QUARANTINE_COUNT number(38, 0), "
-        f"AUDIT_DATA_PROCESS_KEY {GENERATED_METADATA_FIELD_TYPES['audit_data_process_key']}, "
-        f"AUDIT_CREATED_DATETIME {GENERATED_METADATA_FIELD_TYPES['audit_created_datetime']}, "
-        f"AUDIT_LAST_CHANGED_DATETIME {GENERATED_METADATA_FIELD_TYPES['audit_last_changed_datetime']}"
+        f"AUDIT_DATA_PROCESS_KEY {GENERATED_METADATA_FIELD_TYPES['audit_data_process_key']}"
         ")"
     )
     start_sql = (
         f"insert into {relation} "
         "(JOB_ID, EVENT_TYPE, EVENT_TIMESTAMP, RESULT, DETAILS, SPEC_FILE_NAME, GENERATED_TABLE, "
-        "QUARANTINE_TABLE, LOADED_COUNT, QUARANTINE_COUNT, AUDIT_DATA_PROCESS_KEY, "
-        "AUDIT_CREATED_DATETIME, AUDIT_LAST_CHANGED_DATETIME) select "
+        "QUARANTINE_TABLE, LOADED_COUNT, QUARANTINE_COUNT, AUDIT_DATA_PROCESS_KEY) select "
         f"{_job_id_expression()}, "
         "'JOB_START', "
-        "cast(current_timestamp() as timestamp_tz), "
+        f"cast(current_timestamp() as {JOB_TIMESTAMP_DATA_TYPE}), "
         "null, "
         "null, "
         f"cast({_sql_string(spec_file_name)} as varchar(1024)), "
@@ -450,22 +448,19 @@ def _job_hooks(spec: dict[str, Any], spec_file_name: str) -> tuple[list[str], li
         "cast(null as number(38, 0)), "
         "cast(null as number(38, 0)), "
         f"cast('{{{{ var(\"audit_data_process_key\", \"manual\") }}}}' as "
-        f"{GENERATED_METADATA_FIELD_TYPES['audit_data_process_key']}), "
-        "cast(current_timestamp() as timestamp_tz), "
-        "cast(current_timestamp() as timestamp_tz)"
+        f"{GENERATED_METADATA_FIELD_TYPES['audit_data_process_key']})"
     )
     end_sql = (
         f"{generated_relation_lookup}{quarantine_relation_lookup}insert into {relation} "
         "(JOB_ID, EVENT_TYPE, EVENT_TIMESTAMP, RESULT, DETAILS, SPEC_FILE_NAME, GENERATED_TABLE, "
-        "QUARANTINE_TABLE, LOADED_COUNT, QUARANTINE_COUNT, AUDIT_DATA_PROCESS_KEY, "
-        "AUDIT_CREATED_DATETIME, AUDIT_LAST_CHANGED_DATETIME) "
+        "QUARANTINE_TABLE, LOADED_COUNT, QUARANTINE_COUNT, AUDIT_DATA_PROCESS_KEY) "
         "with "
         f"{_count_cte('tms_generated_relation', 'loaded_counts', 'loaded_count')}, "
         f"{_count_cte('tms_quarantine_relation', 'quarantine_counts', 'quarantine_count')} "
         "select "
         f"{_job_id_expression()}, "
         "'JOB_END', "
-        "cast(current_timestamp() as timestamp_tz), "
+        f"cast(current_timestamp() as {JOB_TIMESTAMP_DATA_TYPE}), "
         f"{result_expression}, "
         f"{failed_validation_guard_expression}{details_expression}, "
         f"cast({_sql_string(spec_file_name)} as varchar(1024)), "
@@ -474,9 +469,7 @@ def _job_hooks(spec: dict[str, Any], spec_file_name: str) -> tuple[list[str], li
         "loaded_counts.LOADED_COUNT, "
         "quarantine_counts.QUARANTINE_COUNT, "
         f"cast('{{{{ var(\"audit_data_process_key\", \"manual\") }}}}' as "
-        f"{GENERATED_METADATA_FIELD_TYPES['audit_data_process_key']}), "
-        "cast(current_timestamp() as timestamp_tz), "
-        "cast(current_timestamp() as timestamp_tz) "
+        f"{GENERATED_METADATA_FIELD_TYPES['audit_data_process_key']}) "
         "from loaded_counts cross join quarantine_counts"
     )
     bookmark_start_hooks, bookmark_end_hooks = _incremental_bookmark_hooks(spec)
