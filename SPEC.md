@@ -605,7 +605,7 @@ The job event columns are:
   caller.
 - `event_type`: the lifecycle event type.
 - `event_timestamp`: the timezone-aware time the event occurred. The physical
-  data type is `timestamp_tz`.
+  data type is `timestamp_ltz`.
 - `result`: the load result. `JOB_START` events should leave this value null
   unless the materialisation fails before load time. `JOB_END` events must set
   it to `COMPLETED`, `COMPLETED_WITH_QUARANTINE`, or `FAILED`.
@@ -788,9 +788,9 @@ following target metadata columns:
   The current specification does not define field-based delete detection for
   `scd2_auto`, so generated rows normally use `N`.
 - `valid_from_datetime`: the timezone-aware timestamp from which the version is
-  valid. The physical data type is `timestamp_tz`.
+  valid. The physical data type is `timestamp_ltz`.
 - `valid_to_datetime`: the timezone-aware timestamp until which the version is
-  valid. The physical data type is `timestamp_tz`.
+  valid. The physical data type is `timestamp_ltz`.
 
 Generated SCD metadata columns for `scd2_auto` are not declared in
 `target.fields`. Target field ids must not use generated SCD metadata column
@@ -1372,7 +1372,7 @@ The target audit metadata columns are:
 - `audit_last_changed_datetime`: the timezone-aware timestamp of the most recent
   change applied to the row. This value is updated on every insert, update, or
   delete and supports incremental processing and observability. The physical
-  data type is `timestamp_tz`.
+  data type is `timestamp_ltz`.
 
 The generated surrogate-key, business-key, audit, and `scd2_auto` metadata
 column data type contract is:
@@ -1386,8 +1386,8 @@ column data type contract is:
 | `valid_from_datetime` | `timestamp_tz` | timezone-aware timestamp value |
 | `valid_to_datetime` | `timestamp_tz` | timezone-aware timestamp value |
 | `business_data_hash` | `varchar(64)` | hash value |
-| `audit_created_datetime` | `timestamp_tz` | timezone-aware timestamp value |
-| `audit_last_changed_datetime` | `timestamp_tz` | timezone-aware timestamp value |
+| `audit_created_datetime` | `timestamp_ltz` | timezone-aware timestamp value |
+| `audit_last_changed_datetime` | `timestamp_ltz` | timezone-aware timestamp value |
 | `audit_data_process_key` | `varchar(64)` | operational process key |
 
 Target field ids must not use the reserved generated metadata column names,
