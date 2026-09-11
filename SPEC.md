@@ -605,7 +605,7 @@ The job event columns are:
   caller.
 - `event_type`: the lifecycle event type.
 - `event_timestamp`: the timezone-aware time the event occurred. The physical
-  data type is `timestamp_ltz`.
+  data type is `timestamp_tz`.
 - `result`: the load result. `JOB_START` events should leave this value null
   unless the materialisation fails before load time. `JOB_END` events must set
   it to `COMPLETED`, `COMPLETED_WITH_QUARANTINE`, or `FAILED`.
@@ -691,6 +691,7 @@ scd2_manual_scd_config ::=
 
 scd2_auto_scd_config ::=
   insert_time
+  timestamp_data_type?
   scd2_auto_from_sot?
   scd2_validation_enabled?
   scd2_validation?
@@ -711,6 +712,7 @@ delete_detection ::=
     value
 
 insert_time ::= scalar
+timestamp_data_type ::= timestamp_ltz | timestamp_tz | timestamp_ntz
 scd2_auto_from_sot ::= true | false
 scd2_validation_enabled ::= true | false
 scd2_validation ::= continuous | sparse
@@ -788,9 +790,9 @@ following target metadata columns:
   The current specification does not define field-based delete detection for
   `scd2_auto`, so generated rows normally use `N`.
 - `valid_from_datetime`: the timezone-aware timestamp from which the version is
-  valid. The physical data type is `timestamp_ltz`.
+  valid. The physical data type is `timestamp_tz`.
 - `valid_to_datetime`: the timezone-aware timestamp until which the version is
-  valid. The physical data type is `timestamp_ltz`.
+  valid. The physical data type is `timestamp_tz`.
 
 Generated SCD metadata columns for `scd2_auto` are not declared in
 `target.fields`. Target field ids must not use generated SCD metadata column
@@ -805,6 +807,10 @@ names.
 
 - `insert_time`: scalar or templated timestamp value used as the proposed
   `valid_from_datetime` for incoming changes. It is typically a dbt variable.
+- `timestamp_data_type`: physical type for generated SCD2 validity timestamps.
+  It defaults to `timestamp_ltz`; use `timestamp_tz` or `timestamp_ntz` when
+  the target contract requires that type. TMS applies the setting consistently
+  to generated SCD2 branches, including full-refresh and validation queries.
 - `scd2_auto_from_sot`: when `true`, the earliest version for a business key
   starts at the platform start-of-time timestamp. When `false`, the earliest
   version starts at `insert_time`. If omitted, implementations should default
@@ -1372,7 +1378,7 @@ The target audit metadata columns are:
 - `audit_last_changed_datetime`: the timezone-aware timestamp of the most recent
   change applied to the row. This value is updated on every insert, update, or
   delete and supports incremental processing and observability. The physical
-  data type is `timestamp_ltz`.
+  data type is `timestamp_tz`.
 
 The generated surrogate-key, business-key, audit, and `scd2_auto` metadata
 column data type contract is:
@@ -1386,8 +1392,8 @@ column data type contract is:
 | `valid_from_datetime` | `timestamp_tz` | timezone-aware timestamp value |
 | `valid_to_datetime` | `timestamp_tz` | timezone-aware timestamp value |
 | `business_data_hash` | `varchar(64)` | hash value |
-| `audit_created_datetime` | `timestamp_ltz` | timezone-aware timestamp value |
-| `audit_last_changed_datetime` | `timestamp_ltz` | timezone-aware timestamp value |
+| `audit_created_datetime` | `timestamp_tz` | timezone-aware timestamp value |
+| `audit_last_changed_datetime` | `timestamp_tz` | timezone-aware timestamp value |
 | `audit_data_process_key` | `varchar(64)` | operational process key |
 
 Target field ids must not use the reserved generated metadata column names,

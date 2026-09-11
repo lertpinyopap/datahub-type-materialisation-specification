@@ -625,7 +625,7 @@ def _scd2_final_body_lines(
         "        *,",
         "        case",
         f"            when row_number() over ({_scd2_window_clause(spec, 'TMS_VALID_FROM_DATETIME_CANDIDATE')}) = 1",
-        f"            then cast({_sql_string(SCD2_START_OF_TIME)} as timestamp_tz)",
+        f"            then cast({_sql_string(SCD2_START_OF_TIME)} as {_scd2_timestamp_data_type(spec)})",
         "            else TMS_VALID_FROM_DATETIME_CANDIDATE",
         "        end as VALID_FROM_DATETIME",
         "    from typed_rows",
@@ -684,7 +684,7 @@ def _scd2_duplicate_hash_runtime_log_lines(
                 f"    {_valid_from_datetime_expression(spec)} as TMS_VALID_FROM_DATETIME_CANDIDATE",
                 f"    {_business_data_hash_expression(spec)} as BUSINESS_DATA_HASH",
                 f"    {_is_deleted_flag_expression(spec)} as TMS_IS_DELETED_FLAG_CANDIDATE",
-                "    cast(null as timestamp_tz) as TMS_EXISTING_VALID_TO_DATETIME",
+                f"    cast(null as {_scd2_timestamp_data_type(spec)}) as TMS_EXISTING_VALID_TO_DATETIME",
                 "    cast(null as varchar(1)) as TMS_EXISTING_IS_CURRENT_FLAG",
                 "    'N' as TMS_IS_EXISTING_TARGET_ROW",
                 *audit_select_lines,
@@ -891,7 +891,7 @@ def _scd2_target_merge_body_lines(
                 f"    {_valid_from_datetime_expression(spec)} as TMS_VALID_FROM_DATETIME_CANDIDATE",
                 f"    {_business_data_hash_expression(spec)} as BUSINESS_DATA_HASH",
                 f"    {_is_deleted_flag_expression(spec)} as TMS_IS_DELETED_FLAG_CANDIDATE",
-                "    cast(null as timestamp_tz) as TMS_EXISTING_VALID_TO_DATETIME",
+                f"    cast(null as {_scd2_timestamp_data_type(spec)}) as TMS_EXISTING_VALID_TO_DATETIME",
                 "    cast(null as varchar(1)) as TMS_EXISTING_IS_CURRENT_FLAG",
                 "    'N' as TMS_IS_EXISTING_TARGET_ROW",
                 *audit_select_lines,
@@ -1162,7 +1162,7 @@ def _scd2_declared_column_types(fields_to_emit: list[dict[str, Any]]) -> list[tu
     return [(str(field["id"]), str(field["data_type"])) for field in fields_to_emit]
 
 
-def _scd2_state_column_types(declared_scd2_fields: list[dict[str, Any]]) -> list[tuple[str, str]]:
+def _scd2_state_column_types(spec: dict[str, Any], declared_scd2_fields: list[dict[str, Any]]) -> list[tuple[str, str]]:
     declared_by_key = {case_key(str(field["id"])): field for field in declared_scd2_fields}
     columns: list[tuple[str, str]] = []
     for column_id in SCD2_STATE_COLUMN_IDS:
@@ -1177,7 +1177,8 @@ def _scd2_state_column_types(declared_scd2_fields: list[dict[str, Any]]) -> list
             case_key("VALID_FROM_DATETIME"): "valid_from_datetime",
             case_key("VALID_TO_DATETIME"): "valid_to_datetime",
         }[generated_key]
-        columns.append((column_id, GENERATED_METADATA_FIELD_TYPES[metadata_name]))
+        data_type = _scd2_timestamp_data_type(spec) if metadata_name in {"valid_from_datetime", "valid_to_datetime"} else GENERATED_METADATA_FIELD_TYPES[metadata_name]
+        columns.append((column_id, data_type))
     return columns
 
 
@@ -1236,7 +1237,7 @@ def _scd2_target_column_types(spec: dict[str, Any]) -> list[tuple[str, str]]:
     if _business_key_enabled(spec):
         columns.append((_business_key_column(spec), BUSINESS_KEY_DATA_TYPE))
     columns.extend(_scd2_declared_column_types(business_fields))
-    columns.extend(_scd2_state_column_types(scd2_state_fields))
+    columns.extend(_scd2_state_column_types(spec, scd2_state_fields))
     columns.append(("BUSINESS_DATA_HASH", GENERATED_METADATA_FIELD_TYPES["business_data_hash"]))
     columns.extend(_scd2_declared_column_types(source_audit_fields))
     columns.extend(_scd2_system_audit_column_types())
@@ -1302,10 +1303,10 @@ def _scd2_empty_delete_rows_lines(spec: dict[str, Any], audit_select_lines: list
                 ],
                 *_surrogate_key_null_select_lines(spec),
                 *_business_key_null_select_lines(spec),
-                "        cast(null as timestamp_tz) as TMS_VALID_FROM_DATETIME_CANDIDATE",
+                f"        cast(null as {_scd2_timestamp_data_type(spec)}) as TMS_VALID_FROM_DATETIME_CANDIDATE",
                 "        cast(null as varchar(64)) as BUSINESS_DATA_HASH",
                 "        cast(null as varchar(1)) as TMS_IS_DELETED_FLAG_CANDIDATE",
-                "        cast(null as timestamp_tz) as TMS_EXISTING_VALID_TO_DATETIME",
+                f"        cast(null as {_scd2_timestamp_data_type(spec)}) as TMS_EXISTING_VALID_TO_DATETIME",
                 "        cast(null as varchar(1)) as TMS_EXISTING_IS_CURRENT_FLAG",
                 "        cast(null as varchar(1)) as TMS_IS_EXISTING_TARGET_ROW",
                 *audit_select_lines,
@@ -1435,7 +1436,7 @@ def _scd2_window_and_flag_lines(
         valid_from_expression_lines = [
             "        case",
             f"            when row_number() over ({_scd2_window_clause(spec, 'TMS_VALID_FROM_DATETIME_CANDIDATE')}) = 1",
-            f"            then cast({_sql_string(SCD2_START_OF_TIME)} as timestamp_tz)",
+            f"            then cast({_sql_string(SCD2_START_OF_TIME)} as {_scd2_timestamp_data_type(spec)})",
             "            else TMS_VALID_FROM_DATETIME_CANDIDATE",
             "        end as VALID_FROM_DATETIME",
         ]
@@ -1530,7 +1531,7 @@ def _scd2_validation_cte_lines(spec: dict[str, Any], *, input_cte: str = "flagge
                 ),
                 (
                     "TMS_NEXT_VALID_FROM_DATETIME is null "
-                    f"and VALID_TO_DATETIME < cast({_sql_string(SCD2_END_OF_TIME_VALIDATION_THRESHOLD)} as timestamp_tz)"
+                    f"and VALID_TO_DATETIME < cast({_sql_string(SCD2_END_OF_TIME_VALIDATION_THRESHOLD)} as {_scd2_timestamp_data_type(spec)})"
                 ),
             ]
         )
@@ -2747,8 +2748,8 @@ def _delete_detection_field_condition(spec: dict[str, Any]) -> str:
 def _valid_from_datetime_expression(spec: dict[str, Any]) -> str:
     config = _valid_from_datetime_config(spec)
     if _change_type(spec) == "scd2_derived":
-        return f"cast({_field_expression(_field_by_id(spec, 'valid_from_datetime'))} as timestamp_tz)"
-    return f"cast({_sql_scalar(config['value'])} as timestamp_tz)"
+        return f"cast({_field_expression(_field_by_id(spec, 'valid_from_datetime'))} as {_scd2_timestamp_data_type(spec)})"
+    return f"cast({_sql_scalar(config['value'])} as {_scd2_timestamp_data_type(spec)})"
 
 
 def _valid_to_datetime_expression(spec: dict[str, Any]) -> str:
@@ -2780,8 +2781,15 @@ def _valid_to_datetime_offset(spec: dict[str, Any]) -> dict[str, Any]:
 def _scd2_end_of_time_expression(spec: dict[str, Any]) -> str:
     config = _scd_config(spec).get("valid_to_datetime", {})
     if isinstance(config, dict) and config.get("end_of_time") is not None:
-        return f"cast({_sql_string(str(config['end_of_time']))} as timestamp_tz)"
-    return f"cast({_sql_string(SCD2_END_OF_TIME)} as timestamp_tz)"
+        return f"cast({_sql_string(str(config['end_of_time']))} as {_scd2_timestamp_data_type(spec)})"
+    return f"cast({_sql_string(SCD2_END_OF_TIME)} as {_scd2_timestamp_data_type(spec)})"
+
+
+def _scd2_timestamp_data_type(spec: dict[str, Any]) -> str:
+    configured_type = _scd_config(spec).get("timestamp_data_type")
+    if configured_type in {"timestamp_ltz", "timestamp_tz", "timestamp_ntz"}:
+        return str(configured_type)
+    return GENERATED_METADATA_FIELD_TYPES["valid_from_datetime"]
 
 
 def _scd_validation_scope(spec: dict[str, Any]) -> str:

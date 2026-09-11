@@ -868,7 +868,7 @@ def _is_timestamp_type(value: str) -> bool:
         parsed = parse_sql_type(value)
     except ValueError:
         return False
-    return parsed.name in {"timestamp", "timestamp_tz", "timestamp_ltz", "timestamptz", "datetime"}
+    return parsed.name in {"timestamp", "timestamp_tz", "timestamp_ltz", "timestamp_ntz", "timestamptz", "datetime"}
 
 
 def _is_varchar_1_type(value: str) -> bool:

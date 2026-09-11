@@ -1831,16 +1831,16 @@ def test_scd2_auto_generation_adds_continuous_validity_windows(tmp_path: Path) -
 
     assert result.errors == []
     model_sql = (output_dir / "models" / "generated" / "account.sql").read_text(encoding="utf-8")
-    assert "cast('{{ var('insert_time') }}' as timestamp_tz) as TMS_VALID_FROM_DATETIME_CANDIDATE" in model_sql
+    assert "cast('{{ var('insert_time') }}' as timestamp_ltz) as TMS_VALID_FROM_DATETIME_CANDIDATE" in model_sql
     assert "row_number() over (partition by ACCOUNT_BUSINESS_KEY order by TMS_VALID_FROM_DATETIME_CANDIDATE) = 1" in model_sql
-    assert "cast('0001-01-01T00:00:00Z' as timestamp_tz)" in model_sql
+    assert "cast('0001-01-01T00:00:00Z' as timestamp_ltz)" in model_sql
     assert "lead(VALID_FROM_DATETIME) over (partition by ACCOUNT_BUSINESS_KEY order by VALID_FROM_DATETIME)" in model_sql
     assert (
         "dateadd(nanosecond, -1, lead(VALID_FROM_DATETIME) over "
         "(partition by ACCOUNT_BUSINESS_KEY order by VALID_FROM_DATETIME))"
         in model_sql
     )
-    assert "cast('9999-12-31T23:59:59Z' as timestamp_tz)" in model_sql
+    assert "cast('9999-12-31T23:59:59Z' as timestamp_ltz)" in model_sql
     assert "end as IS_CURRENT_FLAG" in model_sql
     assert "'N' as TMS_IS_DELETED_FLAG_CANDIDATE" in model_sql
     assert "BUSINESS_DATA_HASH" in model_sql
@@ -1861,7 +1861,7 @@ def test_scd2_auto_generation_adds_continuous_validity_windows(tmp_path: Path) -
     )
     assert (
         "(TMS_NEXT_VALID_FROM_DATETIME is null "
-        "and VALID_TO_DATETIME < cast('9999-12-30 00:00:00' as timestamp_tz))"
+        "and VALID_TO_DATETIME < cast('9999-12-30 00:00:00' as timestamp_ltz))"
         in model_sql
     )
     assert (
@@ -1875,6 +1875,35 @@ def test_scd2_auto_generation_adds_continuous_validity_windows(tmp_path: Path) -
     assert "TYPE_MATERIALISATION_SCD2_VALIDATION_FAILED" not in model_sql
     assert "cross join scd2_validation_guard" in model_sql
     assert "where scd2_validation_guard.SCD2_VALIDATION_GUARD = 0" in model_sql
+
+
+def test_scd2_auto_timestamp_data_type_override_is_used_consistently(tmp_path: Path) -> None:
+    result, output_dir = generate(
+        tmp_path,
+        csv_generation_spec(
+            extra_control="""
+            control_data:
+              change_type: scd2_auto
+              scd:
+                insert_time: "{{ var('insert_time') }}"
+                timestamp_data_type: timestamp_tz
+            """,
+            fields="""
+        - id: account_id
+          source:
+            pos: 0
+            column: account_id
+          data_type: varchar(20)
+          unique: true
+            """,
+        ),
+    )
+
+    assert result.errors == []
+    model_sql = (output_dir / "models" / "generated" / "account.sql").read_text(encoding="utf-8")
+    assert "cast('{{ var('insert_time') }}' as timestamp_tz) as TMS_VALID_FROM_DATETIME_CANDIDATE" in model_sql
+    assert "cast(null as timestamp_tz) as VALID_FROM_DATETIME" in model_sql
+    assert "cast(null as timestamp_ltz) as VALID_FROM_DATETIME" not in model_sql
 
 
 def test_scd2_quarantine_excludes_invalid_business_key_histories(tmp_path: Path) -> None:
