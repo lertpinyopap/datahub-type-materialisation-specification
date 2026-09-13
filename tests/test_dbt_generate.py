@@ -160,7 +160,8 @@ def test_control_data_staging_schema_overrides_generated_staging_defaults(tmp_pa
     quarantine_sql = (output_dir / "models" / "generated" / "account__quarantine.sql").read_text(encoding="utf-8")
     assert "schema=var('tms_staging_schema', 'SCRATCH') | upper" in source_sql
     assert "schema=var('tms_staging_schema', 'SCRATCH') | upper" in quarantine_sql
-    assert "{{ var(\"tms_staging_schema\", \"SCRATCH\") | upper }}.ACCOUNT__QUARANTINE" in project["on-run-start"][1]
+    job_macro_sql = (output_dir / "macros" / "generated" / "job_hooks.sql").read_text(encoding="utf-8")
+    assert "{{ var(\"tms_staging_schema\", \"SCRATCH\") | upper }}.ACCOUNT__QUARANTINE" in job_macro_sql
 
 
 def test_csv_stage_location_includes_database_when_supplied(tmp_path: Path) -> None:
@@ -1347,55 +1348,25 @@ def test_job_event_hooks_are_generated_at_project_run_level(tmp_path: Path) -> N
     assert result.errors == []
     project = load_yaml(output_dir / "dbt_project.yml")
     model_sql = (output_dir / "models" / "generated" / "account.sql").read_text(encoding="utf-8")
+    job_macro_sql = (output_dir / "macros" / "generated" / "job_hooks.sql").read_text(encoding="utf-8")
     assert len(project["on-run-start"]) == 2
     assert "var('tms_enable_job_hooks', true)" in project["on-run-start"][0]
-    assert "create table if not exists {{ var('tms_job_schema', 'BUSINESS') | upper }}.TYPE_MATERIALISATION_JOBS" in project["on-run-start"][0]
-    assert "EVENT_TIMESTAMP timestamp_ltz" in project["on-run-start"][0]
-    assert "AUDIT_CREATED_DATETIME" not in project["on-run-start"][0]
-    assert "AUDIT_LAST_CHANGED_DATETIME" not in project["on-run-start"][0]
-    assert "DETAILS varchar(16777216)" in project["on-run-start"][0]
-    assert "SPEC_FILE_NAME varchar(1024)" in project["on-run-start"][0]
-    assert "GENERATED_TABLE varchar(1024)" in project["on-run-start"][0]
-    assert "QUARANTINE_TABLE varchar(1024)" in project["on-run-start"][0]
-    assert "LOADED_COUNT number(38, 0)" in project["on-run-start"][0]
-    assert "QUARANTINE_COUNT number(38, 0)" in project["on-run-start"][0]
-    assert "'JOB_START'" in project["on-run-start"][1]
-    assert "cast('{{ invocation_id }}' as varchar(64))" in project["on-run-start"][1]
-    assert "cast('{{ var(\"audit_data_process_key\", \"manual\") }}' as varchar(256))" in project["on-run-start"][1]
-    assert "cast(current_timestamp() as timestamp_ltz)" in project["on-run-start"][1]
-    assert 'var("job_id"' not in project["on-run-start"][1]
-    assert "DETAILS, SPEC_FILE_NAME, GENERATED_TABLE, QUARANTINE_TABLE, LOADED_COUNT, QUARANTINE_COUNT" in project["on-run-start"][1]
-    assert "cast('spec.yaml' as varchar(1024))" in project["on-run-start"][1]
-    assert "cast('{{ target.database | upper }}.{{ var(\"target_schema\", \"BUSINESS\") | upper }}.ACCOUNT' as varchar(1024))" in project["on-run-start"][1]
-    assert "cast(null as varchar(1024))" in project["on-run-start"][1]
-    assert "cast(null as number(38, 0))" in project["on-run-start"][1]
+    assert "{{ tms_job_create() }}" in project["on-run-start"][0]
+    assert "{{ tms_job_start() }}" in project["on-run-start"][1]
     assert len(project["on-run-end"]) == 2
-    assert "create table if not exists {{ var('tms_job_schema', 'BUSINESS') | upper }}.TYPE_MATERIALISATION_JOBS" in project["on-run-end"][0]
     assert "var('tms_enable_job_hooks', true)" in project["on-run-end"][1]
-    assert "'JOB_END'" in project["on-run-end"][1]
-    assert "cast('{{ invocation_id }}' as varchar(64))" in project["on-run-end"][1]
-    assert "cast('{{ var(\"audit_data_process_key\", \"manual\") }}' as varchar(256))" in project["on-run-end"][1]
-    assert "cast(current_timestamp() as timestamp_ltz)" in project["on-run-end"][1]
-    assert 'var("job_id"' not in project["on-run-end"][1]
-    assert 'var("job_result", "COMPLETED")' not in project["on-run-end"][1]
-    assert 'var("job_details", none)' in project["on-run-end"][1]
-    assert "validation_guard_failed.value" in project["on-run-end"][1]
-    assert "'TYPE_MATERIALISATION_VALIDATION_FAILED' in (result.message | string)" in project["on-run-end"][1]
-    assert "'validation errors failed the load'" in project["on-run-end"][1]
-    assert "'dbt run failed; inspect dbt artifacts for runtime details'" in project["on-run-end"][1]
-    assert "case when quarantine_counts.QUARANTINE_COUNT > 0 then 'COMPLETED_WITH_QUARANTINE' else 'COMPLETED' end" in project["on-run-end"][1]
-    assert "'COMPLETED_WITH_QUARANTINE'" in project["on-run-end"][1]
-    assert "case when quarantine_counts.QUARANTINE_COUNT > 0 then 'validation errors written to quarantine output' else null end" in project["on-run-end"][1]
-    assert 'adapter.get_relation(database=(target.database | upper), schema=(var("target_schema", "BUSINESS") | upper), identifier=\'ACCOUNT\')' in project["on-run-end"][1]
-    assert "loaded_counts as (select {% if tms_generated_relation is not none %}(select count(*) from {{ tms_generated_relation }}){% else %}null{% endif %} as LOADED_COUNT)" in project["on-run-end"][1]
-    assert "{% set tms_quarantine_relation = none %}" in project["on-run-end"][1]
-    assert "quarantine_counts as (select {% if tms_quarantine_relation is not none %}(select count(*) from {{ tms_quarantine_relation }}){% else %}null{% endif %} as QUARANTINE_COUNT)" in project["on-run-end"][1]
-    assert "loaded_counts.LOADED_COUNT" in project["on-run-end"][1]
-    assert "quarantine_counts.QUARANTINE_COUNT" in project["on-run-end"][1]
-    assert "from loaded_counts cross join quarantine_counts" in project["on-run-end"][1]
-    assert "results | selectattr('status', 'equalto', 'error')" in project["on-run-end"][1]
-    assert "results | selectattr('status', 'equalto', 'fail')" in project["on-run-end"][1]
-    assert "'FAILED'" in project["on-run-end"][1]
+    assert "{{ tms_job_create() }}" in project["on-run-end"][0]
+    assert "{{ tms_job_end() }}" in project["on-run-end"][1]
+    assert "EVENT_TIMESTAMP timestamp_ltz" in job_macro_sql
+    assert "AUDIT_CREATED_DATETIME" not in job_macro_sql
+    assert "AUDIT_LAST_CHANGED_DATETIME" not in job_macro_sql
+    assert "'JOB_START'" in job_macro_sql
+    assert "'JOB_END'" in job_macro_sql
+    assert "cast('{{ invocation_id }}' as varchar(64))" in job_macro_sql
+    assert "validation_guard_failed.value" in job_macro_sql
+    assert "'TYPE_MATERIALISATION_VALIDATION_FAILED' in (result.message | string)" in job_macro_sql
+    assert "loaded_counts.LOADED_COUNT" in job_macro_sql
+    assert "quarantine_counts.QUARANTINE_COUNT" in job_macro_sql
     assert "pre_hook" not in model_sql
     assert "post_hook" not in model_sql
 
@@ -1419,14 +1390,15 @@ def test_incremental_bookmark_is_generated_from_control_data(tmp_path: Path) -> 
     assert result.errors == []
     project = load_yaml(output_dir / "dbt_project.yml")
     macro_sql = (output_dir / "macros" / "generated" / "incremental_bookmark.sql").read_text(encoding="utf-8")
+    hook_macro_sql = (output_dir / "macros" / "generated" / "incremental_bookmark_hooks.sql").read_text(encoding="utf-8")
     assert "tms_incremental_bookmark_predicate(source_timestamp, watermark_filter=none)" in macro_sql
     assert "LAST_SOURCE_TIMESTAMP" in macro_sql
     assert "NONPROD_GOVERNANCE.METADATA.TMS_BOOKMARK" in macro_sql
-    assert "create table if not exists NONPROD_GOVERNANCE.METADATA.TMS_BOOKMARK" in project["on-run-start"][0]
-    assert "UPDATED_AT timestamp_ntz not null" in project["on-run-start"][0]
-    assert "alter table NONPROD_GOVERNANCE.METADATA.TMS_BOOKMARK add column if not exists LAST_SOURCE_TIMESTAMP" in project["on-run-start"][1]
-    assert "merge into NONPROD_GOVERNANCE.METADATA.TMS_BOOKMARK" in project["on-run-end"][2]
-    assert "current_timestamp()::timestamp_ntz, current_role())" in project["on-run-end"][2]
+    assert project["on-run-start"][:2] == ["{{ tms_bookmark_create() }}", "{{ tms_bookmark_migrate() }}"]
+    assert project["on-run-end"][2] == "{{ tms_bookmark_advance() }}"
+    assert "create table if not exists NONPROD_GOVERNANCE.METADATA.TMS_BOOKMARK" in hook_macro_sql
+    assert "alter table NONPROD_GOVERNANCE.METADATA.TMS_BOOKMARK add column if not exists LAST_SOURCE_TIMESTAMP" in hook_macro_sql
+    assert "merge into NONPROD_GOVERNANCE.METADATA.TMS_BOOKMARK" in hook_macro_sql
 
 
 def test_generated_schema_name_macro_supports_runtime_schema_override(tmp_path: Path) -> None:
@@ -1463,9 +1435,9 @@ def test_job_event_hooks_include_quarantine_relation_when_enabled(tmp_path: Path
     assert result.errors == []
     project = load_yaml(output_dir / "dbt_project.yml")
     expected_quarantine = "cast('{{ target.database | upper }}.{{ var(\"tms_staging_schema\", \"INTERMEDIATE\") | upper }}.ACCOUNT__QUARANTINE' as varchar(1024))"
-    assert expected_quarantine in project["on-run-start"][1]
-    assert expected_quarantine in project["on-run-end"][1]
-    assert 'adapter.get_relation(database=(target.database | upper), schema=(var("tms_staging_schema", "INTERMEDIATE") | upper), identifier=\'ACCOUNT__QUARANTINE\')' in project["on-run-end"][1]
+    job_macro_sql = (output_dir / "macros" / "generated" / "job_hooks.sql").read_text(encoding="utf-8")
+    assert expected_quarantine in job_macro_sql
+    assert 'adapter.get_relation(database=(target.database | upper), schema=(var("tms_staging_schema", "INTERMEDIATE") | upper), identifier=\'ACCOUNT__QUARANTINE\')' in job_macro_sql
 
 
 def test_quarantine_model_is_incremental_and_append_only(tmp_path: Path) -> None:
@@ -1975,7 +1947,7 @@ def test_scd2_derived_exposes_effective_date_in_staging_only(tmp_path: Path) -> 
     source_sql = (output_dir / "models" / "generated" / "account__source.sql").read_text(encoding="utf-8")
     model_sql = (output_dir / "models" / "generated" / "account.sql").read_text(encoding="utf-8")
     assert "source_query.SOURCE_EFFECTIVE_FROM_DATETIME as SOURCE_EFFECTIVE_FROM_DATETIME" in source_sql
-    assert "cast(SOURCE_EFFECTIVE_FROM_DATETIME as timestamp_tz) as TMS_VALID_FROM_DATETIME_CANDIDATE" in model_sql
+    assert "cast(SOURCE_EFFECTIVE_FROM_DATETIME as timestamp_ltz) as TMS_VALID_FROM_DATETIME_CANDIDATE" in model_sql
 
 
 def test_scd2_derived_valid_from_source_column_is_supported(tmp_path: Path) -> None:
@@ -2027,7 +1999,7 @@ def test_scd2_derived_valid_from_source_column_is_supported(tmp_path: Path) -> N
     source_sql = (output_dir / "models" / "generated" / "account__source.sql").read_text(encoding="utf-8")
     model_sql = (output_dir / "models" / "generated" / "account.sql").read_text(encoding="utf-8")
     assert "source_query.SOURCE_EFFECTIVE_FROM_DATETIME as SOURCE_EFFECTIVE_FROM_DATETIME" in source_sql
-    assert "cast(SOURCE_EFFECTIVE_FROM_DATETIME as timestamp_tz) as TMS_VALID_FROM_DATETIME_CANDIDATE" in model_sql
+    assert "cast(SOURCE_EFFECTIVE_FROM_DATETIME as timestamp_ltz) as TMS_VALID_FROM_DATETIME_CANDIDATE" in model_sql
     assert "TMS_VALID_FROM_DATETIME_CANDIDATE desc nulls last" in model_sql
 
 

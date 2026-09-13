@@ -150,7 +150,7 @@ def generate_dbt_project(options: GenerateDbtOptions) -> DbtGenerationResult:
         return result
     if _fail_load_enabled(spec):
         _write_validation_guard_model(spec, result)
-    _write_generated_macros(options.output_dir, generated_macros, spec, result)
+    _write_generated_macros(options.output_dir, generated_macros, spec, options.spec_path.name, result)
     if options.unit_test_csv is not None:
         try:
             _write_unit_tests(spec, options, macros, result)

@@ -19,7 +19,7 @@ if __package__ in {None, ""}:
 from .schema import require_yaml
 from .spec import GENERATED_METADATA_FIELD_TYPES, fields
 from .dbt_sql import (
-    _count_cte, _dbt_relation_lookup, _job_id_expression, _job_relation_config,
+    _dbt_relation_lookup, _job_id_expression, _job_relation_config,
     _nullable_sql_string, _physical_name, _quarantine_has_explicit_schema, _quote_identifier,
     _quarantine_relation_config, _relation_name, _runtime_relation_label,
     _runtime_sql_string, _sql_scalar, _sql_string, _target_relation_config,
@@ -243,15 +243,26 @@ def _write_generated_macros(
     output_dir: Path,
     macros: dict[str, str],
     spec: dict[str, Any],
+    spec_file_name: str,
     result: DbtGenerationResult,
 ) -> None:
     _write(output_dir / "macros" / "generated" / "create_schema.sql", _create_schema_macro(), result)
     _write(output_dir / "macros" / "generated" / "generate_schema_name.sql", _generate_schema_name_macro(), result)
+    _write(
+        output_dir / "macros" / "generated" / "job_hooks.sql",
+        _render_job_hooks_macro(spec, spec_file_name),
+        result,
+    )
     bookmark = _incremental_bookmark_config(spec)
     if bookmark is not None:
         _write(
             output_dir / "macros" / "generated" / "incremental_bookmark.sql",
             _render_incremental_bookmark_macro(bookmark),
+            result,
+        )
+        _write(
+            output_dir / "macros" / "generated" / "incremental_bookmark_hooks.sql",
+            _render_incremental_bookmark_hooks_macro(bookmark),
             result,
         )
     for macro_name, macro_sql in sorted(macros.items()):
@@ -322,162 +333,72 @@ def _render_incremental_bookmark_macro(bookmark: dict[str, str]) -> str:
     return template
 
 
+def _render_incremental_bookmark_hooks_macro(bookmark: dict[str, str]) -> str:
+    template = files("type_materialisation").joinpath(
+        "templates", "incremental_bookmark_hooks.sql"
+    ).read_text(encoding="utf-8")
+    replacements = {
+        "__BOOKMARK_RELATION__": bookmark["bookmark_relation"],
+        "__SOURCE_RELATION__": bookmark["source_relation"],
+        "__SOURCE_RELATION_LITERAL__": _runtime_sql_string(bookmark["source_relation"]),
+        "__SOURCE_TIMESTAMP_COLUMN__": _physical_name(bookmark["source_timestamp_column"]),
+        "__PIPELINE_NAME_LITERAL__": _sql_string(bookmark["pipeline_name"]),
+    }
+    for token, value in replacements.items():
+        template = template.replace(token, value)
+    return template
+
+
 
 def _incremental_bookmark_hooks(spec: dict[str, Any]) -> tuple[list[str], list[str]]:
     bookmark = _incremental_bookmark_config(spec)
     if bookmark is None:
         return [], []
-    relation = bookmark["bookmark_relation"]
-    source_relation = bookmark["source_relation"]
-    timestamp_column = _physical_name(bookmark["source_timestamp_column"])
-    pipeline_name = _sql_string(bookmark["pipeline_name"])
-    create_sql = (
-        f"create table if not exists {relation} ("
-        "PIPELINE_NAME varchar not null, SOURCE_RELATION varchar not null, "
-        "LAST_SOURCE_TIMESTAMP timestamp_ntz, "
-        "UPDATED_AT timestamp_ntz not null default current_timestamp(), "
-        "UPDATED_BY varchar not null default current_role())"
-    )
-    migrate_sql = f"alter table {relation} add column if not exists LAST_SOURCE_TIMESTAMP timestamp_ntz"
-    advance_sql = "".join(
-        [
-            "{% set tms_bookmark_failed_count = ",
-            "(results | selectattr('status', 'equalto', 'error') | list | length) + ",
-            "(results | selectattr('status', 'equalto', 'fail') | list | length) %}",
-            "{% if tms_bookmark_failed_count == 0 %}",
-            f"merge into {relation} as target using (",
-            f"select {pipeline_name} as PIPELINE_NAME, {_runtime_sql_string(source_relation)} as SOURCE_RELATION, ",
-            f"max({timestamp_column}) as LAST_SOURCE_TIMESTAMP from {source_relation} ",
-            f"having max({timestamp_column}) is not null",
-            ") as source on target.PIPELINE_NAME = source.PIPELINE_NAME ",
-            "and target.SOURCE_RELATION = source.SOURCE_RELATION ",
-            "when matched then update set LAST_SOURCE_TIMESTAMP = source.LAST_SOURCE_TIMESTAMP, ",
-            "UPDATED_AT = current_timestamp()::timestamp_ntz, UPDATED_BY = current_role() ",
-            "when not matched then insert (PIPELINE_NAME, SOURCE_RELATION, LAST_SOURCE_TIMESTAMP, UPDATED_AT, UPDATED_BY) ",
-            "values (source.PIPELINE_NAME, source.SOURCE_RELATION, source.LAST_SOURCE_TIMESTAMP, ",
-            "current_timestamp()::timestamp_ntz, current_role())",
-            "{% else %}select 1 where false{% endif %}",
-        ]
-    )
-    return [create_sql, migrate_sql], [create_sql, migrate_sql, advance_sql]
+    return ["{{ tms_bookmark_create() }}", "{{ tms_bookmark_migrate() }}"], [
+        "{{ tms_bookmark_create() }}",
+        "{{ tms_bookmark_migrate() }}",
+        "{{ tms_bookmark_advance() }}",
+    ]
 
 
 
-def _job_hooks(spec: dict[str, Any], spec_file_name: str) -> tuple[list[str], list[str]]:
-    relation = _relation_name(_job_relation_config(spec))
+def _render_job_hooks_macro(spec: dict[str, Any], spec_file_name: str) -> str:
+    """Render job hook SQL once into a generated dbt macro template."""
     target_relation = _target_relation_config(spec)
     generated_table = _runtime_relation_label(target_relation, schema_var="target_schema")
     quarantine_relation = _quarantine_relation_config(spec) if _quarantine_enabled(spec) else None
     quarantine_schema_var = None if _quarantine_has_explicit_schema(spec) else "tms_staging_schema"
     quarantine_table = (
         _runtime_relation_label(quarantine_relation, schema_var=quarantine_schema_var)
-        if quarantine_relation is not None
-        else None
+        if quarantine_relation is not None else None
     )
-    generated_relation_lookup = _dbt_relation_lookup(
-        target_relation,
-        "tms_generated_relation",
-        schema_var="target_schema",
-    )
-    quarantine_relation_lookup = (
-        _dbt_relation_lookup(
-            quarantine_relation,
-            "tms_quarantine_relation",
-            schema_var=quarantine_schema_var,
-        )
-        if quarantine_relation is not None
-        else "{% set tms_quarantine_relation = none %}"
-    )
-    result_expression = (
-        "{% set failed_result_count = "
-        "(results | selectattr('status', 'equalto', 'error') | list | length) + "
-        "(results | selectattr('status', 'equalto', 'fail') | list | length) %}"
-        "{% if failed_result_count > 0 %}'FAILED'{% else %}"
-        "case when quarantine_counts.QUARANTINE_COUNT > 0 "
-        "then 'COMPLETED_WITH_QUARANTINE' else 'COMPLETED' end{% endif %}"
-    )
-    failed_validation_guard_expression = (
-        "{% set validation_guard_failed = namespace(value=false) %}"
-        "{% for result in results %}"
-        "{% if result.status in ['error', 'fail'] and result.node.name == "
-        + _sql_string(_validation_guard_model_name(spec["target"]["id"]))
-        + " %}{% set validation_guard_failed.value = true %}{% endif %}"
-        "{% if result.status in ['error', 'fail'] and "
-        "'TYPE_MATERIALISATION_VALIDATION_FAILED' in (result.message | string) "
-        "%}{% set validation_guard_failed.value = true %}{% endif %}"
-        "{% endfor %}"
-    )
-    details_expression = (
-        "{% set explicit_job_details = var(\"job_details\", none) %}"
-        "{% if explicit_job_details is not none %}"
-        "'{{ explicit_job_details | replace(\"'\", \"''\") }}'"
-        "{% elif failed_result_count > 0 and validation_guard_failed.value %}"
-        "'validation errors failed the load'"
-        "{% elif failed_result_count > 0 %}"
-        "'dbt run failed; inspect dbt artifacts for runtime details'"
-        "{% else %}case when quarantine_counts.QUARANTINE_COUNT > 0 "
-        "then 'validation errors written to quarantine output' else null end{% endif %}"
-    )
-    create_sql = (
-        f"create table if not exists {relation} ("
-        "JOB_ID varchar(64), "
-        "EVENT_TYPE varchar(32), "
-        f"EVENT_TIMESTAMP {JOB_TIMESTAMP_DATA_TYPE}, "
-        "RESULT varchar(64), "
-        "DETAILS varchar(16777216), "
-        "SPEC_FILE_NAME varchar(1024), "
-        "GENERATED_TABLE varchar(1024), "
-        "QUARANTINE_TABLE varchar(1024), "
-        "LOADED_COUNT number(38, 0), "
-        "QUARANTINE_COUNT number(38, 0), "
-        f"AUDIT_DATA_PROCESS_KEY {GENERATED_METADATA_FIELD_TYPES['audit_data_process_key']}"
-        ")"
-    )
-    start_sql = (
-        f"insert into {relation} "
-        "(JOB_ID, EVENT_TYPE, EVENT_TIMESTAMP, RESULT, DETAILS, SPEC_FILE_NAME, GENERATED_TABLE, "
-        "QUARANTINE_TABLE, LOADED_COUNT, QUARANTINE_COUNT, AUDIT_DATA_PROCESS_KEY) select "
-        f"{_job_id_expression()}, "
-        "'JOB_START', "
-        f"cast(current_timestamp() as {JOB_TIMESTAMP_DATA_TYPE}), "
-        "null, "
-        "null, "
-        f"cast({_sql_string(spec_file_name)} as varchar(1024)), "
-        f"cast({_sql_string(generated_table)} as varchar(1024)), "
-        f"{_nullable_sql_string(quarantine_table)}, "
-        "cast(null as number(38, 0)), "
-        "cast(null as number(38, 0)), "
-        f"cast('{{{{ var(\"audit_data_process_key\", \"manual\") }}}}' as "
-        f"{GENERATED_METADATA_FIELD_TYPES['audit_data_process_key']})"
-    )
-    end_sql = (
-        f"{generated_relation_lookup}{quarantine_relation_lookup}insert into {relation} "
-        "(JOB_ID, EVENT_TYPE, EVENT_TIMESTAMP, RESULT, DETAILS, SPEC_FILE_NAME, GENERATED_TABLE, "
-        "QUARANTINE_TABLE, LOADED_COUNT, QUARANTINE_COUNT, AUDIT_DATA_PROCESS_KEY) "
-        "with "
-        f"{_count_cte('tms_generated_relation', 'loaded_counts', 'loaded_count')}, "
-        f"{_count_cte('tms_quarantine_relation', 'quarantine_counts', 'quarantine_count')} "
-        "select "
-        f"{_job_id_expression()}, "
-        "'JOB_END', "
-        f"cast(current_timestamp() as {JOB_TIMESTAMP_DATA_TYPE}), "
-        f"{result_expression}, "
-        f"{failed_validation_guard_expression}{details_expression}, "
-        f"cast({_sql_string(spec_file_name)} as varchar(1024)), "
-        f"cast({_sql_string(generated_table)} as varchar(1024)), "
-        f"{_nullable_sql_string(quarantine_table)}, "
-        "loaded_counts.LOADED_COUNT, "
-        "quarantine_counts.QUARANTINE_COUNT, "
-        f"cast('{{{{ var(\"audit_data_process_key\", \"manual\") }}}}' as "
-        f"{GENERATED_METADATA_FIELD_TYPES['audit_data_process_key']}) "
-        "from loaded_counts cross join quarantine_counts"
-    )
+    template = files("type_materialisation").joinpath("templates", "job_hooks.sql").read_text(encoding="utf-8")
+    replacements = {
+        "__JOB_RELATION__": _relation_name(_job_relation_config(spec)),
+        "__JOB_TIMESTAMP_DATA_TYPE__": JOB_TIMESTAMP_DATA_TYPE,
+        "__AUDIT_DATA_PROCESS_KEY_TYPE__": GENERATED_METADATA_FIELD_TYPES["audit_data_process_key"],
+        "__JOB_ID_EXPRESSION__": _job_id_expression(),
+        "__SPEC_FILE_NAME_LITERAL__": _sql_string(spec_file_name),
+        "__GENERATED_TABLE_LITERAL__": _sql_string(generated_table),
+        "__QUARANTINE_TABLE_EXPRESSION__": _nullable_sql_string(quarantine_table),
+        "__VALIDATION_GUARD_MODEL_NAME_LITERAL__": _sql_string(_validation_guard_model_name(spec["target"]["id"])),
+        "__GENERATED_RELATION_LOOKUP__": _dbt_relation_lookup(target_relation, "tms_generated_relation", schema_var="target_schema"),
+        "__QUARANTINE_RELATION_LOOKUP__": (
+            _dbt_relation_lookup(quarantine_relation, "tms_quarantine_relation", schema_var=quarantine_schema_var)
+            if quarantine_relation is not None else "{% set tms_quarantine_relation = none %}"
+        ),
+    }
+    for token, value in replacements.items():
+        template = template.replace(token, value)
+    return template
+
+
+def _job_hooks(spec: dict[str, Any], spec_file_name: str) -> tuple[list[str], list[str]]:
     bookmark_start_hooks, bookmark_end_hooks = _incremental_bookmark_hooks(spec)
     return (
-        [*bookmark_start_hooks, _optional_job_hook(create_sql), _optional_job_hook(start_sql)],
-        [*bookmark_end_hooks, _optional_job_hook(create_sql), _optional_job_hook(end_sql)],
+        [*bookmark_start_hooks, _optional_job_hook("{{ tms_job_create() }}"), _optional_job_hook("{{ tms_job_start() }}")],
+        [*bookmark_end_hooks, _optional_job_hook("{{ tms_job_create() }}"), _optional_job_hook("{{ tms_job_end() }}")],
     )
-
 
 
 def _optional_job_hook(sql: str) -> str:
