@@ -1,4 +1,5 @@
 {% macro tms_job_create() -%}
+{{ log('TMS hook: ensuring job-event table exists', info=true) }}
 create table if not exists __JOB_RELATION__ (
     JOB_ID varchar(64),
     EVENT_TYPE varchar(32),
@@ -15,6 +16,7 @@ create table if not exists __JOB_RELATION__ (
 {%- endmacro %}
 
 {% macro tms_job_start() -%}
+{{ log('TMS hook: recording JOB_START event', info=true) }}
 insert into __JOB_RELATION__
     (JOB_ID, EVENT_TYPE, EVENT_TIMESTAMP, RESULT, DETAILS, SPEC_FILE_NAME, GENERATED_TABLE,
      QUARANTINE_TABLE, LOADED_COUNT, QUARANTINE_COUNT, AUDIT_DATA_PROCESS_KEY)
@@ -42,6 +44,7 @@ select
 {% if result.status in ['error', 'fail'] and 'TYPE_MATERIALISATION_VALIDATION_FAILED' in (result.message | string) %}{% set validation_guard_failed.value = true %}{% endif %}
 {% endfor %}
 {% set explicit_job_details = var("job_details", none) %}
+{{ log('TMS hook: recording JOB_END event', info=true) }}
 __GENERATED_RELATION_LOOKUP__
 __QUARANTINE_RELATION_LOOKUP__
 insert into __JOB_RELATION__

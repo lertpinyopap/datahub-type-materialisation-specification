@@ -354,11 +354,7 @@ def _incremental_bookmark_hooks(spec: dict[str, Any]) -> tuple[list[str], list[s
     bookmark = _incremental_bookmark_config(spec)
     if bookmark is None:
         return [], []
-    return ["{{ tms_bookmark_create() }}", "{{ tms_bookmark_migrate() }}"], [
-        "{{ tms_bookmark_create() }}",
-        "{{ tms_bookmark_migrate() }}",
-        "{{ tms_bookmark_advance() }}",
-    ]
+    return ["{{ tms_bookmark_create() }}"], ["{{ tms_bookmark_create() }}", "{{ tms_bookmark_advance() }}"]
 
 
 

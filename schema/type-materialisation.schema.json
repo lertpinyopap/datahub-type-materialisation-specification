@@ -351,7 +351,7 @@
         "timestamp_data_type": {
           "type": "string",
           "enum": ["timestamp_ltz", "timestamp_tz", "timestamp_ntz"],
-          "default": "timestamp_ltz"
+          "default": "timestamp_ntz"
         },
         "scd2_auto_from_sot": {
           "type": "boolean"

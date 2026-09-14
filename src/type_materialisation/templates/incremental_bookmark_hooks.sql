@@ -1,4 +1,5 @@
 {% macro tms_bookmark_create() -%}
+{{ log('TMS hook: ensuring incremental bookmark table exists', info=true) }}
 create table if not exists __BOOKMARK_RELATION__ (
     PIPELINE_NAME varchar not null,
     SOURCE_RELATION varchar not null,
@@ -8,14 +9,11 @@ create table if not exists __BOOKMARK_RELATION__ (
 )
 {%- endmacro %}
 
-{% macro tms_bookmark_migrate() -%}
-alter table __BOOKMARK_RELATION__ add column if not exists LAST_SOURCE_TIMESTAMP timestamp_ntz
-{%- endmacro %}
-
 {% macro tms_bookmark_advance() -%}
 {% set tms_bookmark_failed_count =
     (results | selectattr('status', 'equalto', 'error') | list | length) +
     (results | selectattr('status', 'equalto', 'fail') | list | length) %}
+{{ log('TMS hook: advancing incremental bookmark', info=true) }}
 {% if tms_bookmark_failed_count == 0 %}
 merge into __BOOKMARK_RELATION__ as target using (
     select __PIPELINE_NAME_LITERAL__ as PIPELINE_NAME,
