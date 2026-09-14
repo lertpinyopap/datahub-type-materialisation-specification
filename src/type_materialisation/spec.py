@@ -80,6 +80,7 @@ def parse_sql_type(value: str) -> SqlType:
         "timestamp",
         "timestamp_tz",
         "timestamp_ltz",
+        "timestamp_ntz",
         "timestamptz",
         "datetime",
         "boolean",

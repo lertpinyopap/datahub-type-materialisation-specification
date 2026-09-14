@@ -697,6 +697,7 @@ scd2_auto_scd_config ::=
   scd2_validation?
 
 scd2_derived_scd_config ::=
+  timestamp_data_type?
   scd2_validation_enabled?
   scd2_validation?
   current_flag?
@@ -808,7 +809,7 @@ names.
 - `insert_time`: scalar or templated timestamp value used as the proposed
   `valid_from_datetime` for incoming changes. It is typically a dbt variable.
 - `timestamp_data_type`: physical type for generated SCD2 validity timestamps.
-  It defaults to `timestamp_ltz`; use `timestamp_tz` or `timestamp_ntz` when
+  It defaults to `timestamp_ntz`; use `timestamp_tz` or `timestamp_ltz` when
   the target contract requires that type. TMS applies the setting consistently
   to generated SCD2 branches, including full-refresh and validation queries.
 - `scd2_auto_from_sot`: when `true`, the earliest version for a business key
@@ -878,6 +879,9 @@ the same SCD2 target metadata columns as `scd2_auto`, but the proposed
 `valid_from_datetime` comes from the declared `target.fields` mapping rather
 than from load `insert_time`.
 
+`scd.timestamp_data_type` is also supported for `scd2_derived`. It controls
+the generated SCD2 validity columns and defaults to `timestamp_ntz`.
+
 For `scd2_derived`, `valid_from_datetime` must be declared in `target.fields`
 with a timestamp data type. `valid_to_datetime` may also be declared with a
 timestamp data type; when omitted, the implementation generates it using the
@@ -918,7 +922,8 @@ business effective start.
   null boundaries, and windows where the end is not after the start.
 - `target.fields.valid_from_datetime` is required and must use a timestamp data
   type. Its source mapping and transforms are evaluated against the generated
-  source rows, then cast to `timestamp_tz`.
+  source rows, then cast to the configured SCD2 timestamp type (default
+  `timestamp_ntz`).
 - `scd.valid_to_datetime` is optional. Its `mode` defaults to, and currently
   only supports, `next_valid_from`: each row ends immediately before the next
   later version for the same business key. `offset` defaults to
