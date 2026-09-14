@@ -1128,6 +1128,7 @@ SCD2_STATE_COLUMN_IDS = [
     "VALID_FROM_DATETIME",
     "VALID_TO_DATETIME",
 ]
+SCD2_SURROGATE_KEY_NAMESPACE = "5aa788a5-783e-5ce6-b4aa-438de8fc6971"
 SOURCE_AUDIT_COLUMN_IDS = [
     "AUDIT_CREATED_SOURCE",
     "AUDIT_LAST_CHANGED_SOURCE",
@@ -2925,7 +2926,8 @@ def _surrogate_key_output_lines(spec: dict[str, Any]) -> list[str]:
         return []
     if _generated_scd2_enabled(spec):
         return [
-            f"    cast(uuid_string(concat_ws('|', coalesce(cast({_business_key_column(spec)} as varchar), ''), "
+            f"    cast(uuid_string('{SCD2_SURROGATE_KEY_NAMESPACE}', "
+            f"concat_ws('|', coalesce(cast({_business_key_column(spec)} as varchar), ''), "
             "to_char(cast(VALID_FROM_DATETIME as date), 'YYYY-MM-DD'))) "
             f"as {SURROGATE_KEY_DATA_TYPE}) as {_surrogate_key_column(spec)}"
         ]

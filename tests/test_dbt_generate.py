@@ -1771,7 +1771,8 @@ def test_scd2_auto_generation_preserves_existing_surrogate_keys(tmp_path: Path) 
     assert result.errors == []
     model_sql = (output_dir / "models" / "generated" / "account.sql").read_text(encoding="utf-8")
     assert (
-        "cast(uuid_string(concat_ws('|', coalesce(cast(ACCOUNT_BUSINESS_KEY as varchar), ''), "
+        "cast(uuid_string('5aa788a5-783e-5ce6-b4aa-438de8fc6971', concat_ws('|', "
+        "coalesce(cast(ACCOUNT_BUSINESS_KEY as varchar), ''), "
         "to_char(cast(VALID_FROM_DATETIME as date), 'YYYY-MM-DD'))) as varchar(36)) as ACCOUNT_KEY"
         in model_sql
     )
