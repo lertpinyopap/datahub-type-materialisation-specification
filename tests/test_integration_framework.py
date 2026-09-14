@@ -877,7 +877,11 @@ def test_hash_skip_scenario_generates_business_hash_skip_sql(tmp_path: Path) -> 
     assert "name" not in spec["control_data"]["business_key"]
     assert spec["control_data"].get("skip_business_key") is not True
     assert spec["control_data"].get("skip_surrogate_key") is not True
-    assert "cast(uuid_string() as varchar(36)) as ACCOUNT_KEY" in model_sql
+    assert (
+        "cast(uuid_string(concat_ws('|', coalesce(cast(ACCOUNT_BUSINESS_KEY as varchar), ''), "
+        "to_char(cast(VALID_FROM_DATETIME as date), 'YYYY-MM-DD'))) as varchar(36)) as ACCOUNT_KEY"
+        in model_sql
+    )
     assert (
         "cast(sha2(concat_ws('|', coalesce(cast(cast(ACCOUNT_ID as varchar(20)) as varchar), '')), 256) "
         "as varchar) as ACCOUNT_BUSINESS_KEY"

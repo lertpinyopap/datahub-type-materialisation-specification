@@ -2908,6 +2908,13 @@ def _target_key_base(target_id: str) -> str:
 def _surrogate_key_select_lines(spec: dict[str, Any]) -> list[str]:
     if not _surrogate_key_enabled(spec):
         return []
+    if _generated_scd2_enabled(spec):
+        # Generated SCD2 models create the key only after the final validity
+        # window has been calculated.  Keep this intermediate column solely so
+        # the shared change-row CTE shape remains consistent.
+        return [
+            f"    cast(null as {SURROGATE_KEY_DATA_TYPE}) as {_surrogate_key_column(spec)}"
+        ]
     return [
         f"    cast(uuid_string() as {SURROGATE_KEY_DATA_TYPE}) as {_surrogate_key_column(spec)}"
     ]
@@ -2916,6 +2923,12 @@ def _surrogate_key_select_lines(spec: dict[str, Any]) -> list[str]:
 def _surrogate_key_output_lines(spec: dict[str, Any]) -> list[str]:
     if not _surrogate_key_enabled(spec):
         return []
+    if _generated_scd2_enabled(spec):
+        return [
+            f"    cast(uuid_string(concat_ws('|', coalesce(cast({_business_key_column(spec)} as varchar), ''), "
+            "to_char(cast(VALID_FROM_DATETIME as date), 'YYYY-MM-DD'))) "
+            f"as {SURROGATE_KEY_DATA_TYPE}) as {_surrogate_key_column(spec)}"
+        ]
     return [f"    {_surrogate_key_column(spec)}"]
 
 
