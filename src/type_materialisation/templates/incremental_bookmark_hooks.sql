@@ -1,5 +1,6 @@
+{% set tms_bookmark_relation_label = __BOOKMARK_RELATION_LABEL_EXPRESSION__ %}
 {% macro tms_bookmark_create() -%}
-{{ log('TMS hook: ensuring incremental bookmark table exists: __BOOKMARK_RELATION__', info=true) }}
+{{ log('TMS hook: ensuring incremental bookmark table exists: ' ~ tms_bookmark_relation_label, info=true) }}
 create table if not exists __BOOKMARK_RELATION__ (
     PIPELINE_NAME varchar not null,
     SOURCE_RELATION varchar not null,
@@ -13,7 +14,7 @@ create table if not exists __BOOKMARK_RELATION__ (
 {% set tms_bookmark_failed_count =
     (results | selectattr('status', 'equalto', 'error') | list | length) +
     (results | selectattr('status', 'equalto', 'fail') | list | length) %}
-{{ log('TMS hook: advancing incremental bookmark: __BOOKMARK_RELATION__', info=true) }}
+{{ log('TMS hook: advancing incremental bookmark: ' ~ tms_bookmark_relation_label, info=true) }}
 {% if tms_bookmark_failed_count == 0 %}
 merge into __BOOKMARK_RELATION__ as target using (
     select __PIPELINE_NAME_LITERAL__ as PIPELINE_NAME,

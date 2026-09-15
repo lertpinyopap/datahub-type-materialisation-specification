@@ -1402,8 +1402,9 @@ def test_incremental_bookmark_is_generated_from_control_data(tmp_path: Path) -> 
     assert "create table if not exists NONPROD_GOVERNANCE.METADATA.TMS_BOOKMARK" in hook_macro_sql
     assert "tms_bookmark_migrate" not in hook_macro_sql
     assert "merge into NONPROD_GOVERNANCE.METADATA.TMS_BOOKMARK" in hook_macro_sql
-    assert "TMS hook: ensuring incremental bookmark table exists: NONPROD_GOVERNANCE.METADATA.TMS_BOOKMARK" in hook_macro_sql
-    assert "TMS hook: advancing incremental bookmark: NONPROD_GOVERNANCE.METADATA.TMS_BOOKMARK" in hook_macro_sql
+    assert "{% set tms_bookmark_relation_label = 'NONPROD_GOVERNANCE.METADATA.TMS_BOOKMARK' %}" in hook_macro_sql
+    assert "TMS hook: ensuring incremental bookmark table exists: ' ~ tms_bookmark_relation_label" in hook_macro_sql
+    assert "TMS hook: advancing incremental bookmark: ' ~ tms_bookmark_relation_label" in hook_macro_sql
 
 
 def test_generated_schema_name_macro_supports_runtime_schema_override(tmp_path: Path) -> None:

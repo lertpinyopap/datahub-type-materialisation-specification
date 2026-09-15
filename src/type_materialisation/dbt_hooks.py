@@ -4,6 +4,7 @@ from __future__ import annotations
 from importlib.resources import files
 import hashlib
 import json
+import re
 from pathlib import Path
 import sys
 from typing import Any
@@ -409,6 +410,7 @@ def _render_incremental_bookmark_hooks_macro(bookmark: dict[str, str]) -> str:
     ).read_text(encoding="utf-8")
     replacements = {
         "__BOOKMARK_RELATION__": bookmark["bookmark_relation"],
+        "__BOOKMARK_RELATION_LABEL_EXPRESSION__": _runtime_jinja_string_expression(bookmark["bookmark_relation"]),
         "__SOURCE_RELATION__": bookmark["source_relation"],
         "__SOURCE_RELATION_LITERAL__": _runtime_sql_string(bookmark["source_relation"]),
         "__SOURCE_TIMESTAMP_COLUMN__": _physical_name(bookmark["source_timestamp_column"]),
@@ -417,6 +419,21 @@ def _render_incremental_bookmark_hooks_macro(bookmark: dict[str, str]) -> str:
     for token, value in replacements.items():
         template = template.replace(token, value)
     return template
+
+
+def _runtime_jinja_string_expression(value: str) -> str:
+    """Render a relation containing ``var()`` placeholders as a Jinja string expression."""
+    pattern = re.compile(r"\{\{\s*var\(\s*'([^']+)'\s*,\s*'([^']*)'\s*\)\s*\}\}")
+    pieces: list[str] = []
+    position = 0
+    for match in pattern.finditer(value):
+        if match.start() > position:
+            pieces.append(_sql_string(value[position:match.start()]))
+        pieces.append(f'var("{match.group(1)}", "{match.group(2)}")')
+        position = match.end()
+    if position < len(value) or not pieces:
+        pieces.append(_sql_string(value[position:]))
+    return " ~ ".join(pieces)
 
 
 
