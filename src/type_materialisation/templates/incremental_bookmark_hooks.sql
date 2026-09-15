@@ -1,5 +1,5 @@
-{% set tms_bookmark_relation_label = __BOOKMARK_RELATION_LABEL_EXPRESSION__ %}
 {% macro tms_bookmark_create() -%}
+{% set tms_bookmark_relation_label = __BOOKMARK_RELATION_LABEL_EXPRESSION__ %}
 {{ log('TMS hook: ensuring incremental bookmark table exists: ' ~ tms_bookmark_relation_label, info=true) }}
 create table if not exists __BOOKMARK_RELATION__ (
     PIPELINE_NAME varchar not null,
@@ -11,6 +11,7 @@ create table if not exists __BOOKMARK_RELATION__ (
 {%- endmacro %}
 
 {% macro tms_bookmark_advance() -%}
+{% set tms_bookmark_relation_label = __BOOKMARK_RELATION_LABEL_EXPRESSION__ %}
 {% set tms_bookmark_failed_count =
     (results | selectattr('status', 'equalto', 'error') | list | length) +
     (results | selectattr('status', 'equalto', 'fail') | list | length) %}
