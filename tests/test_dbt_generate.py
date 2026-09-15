@@ -1353,10 +1353,10 @@ def test_job_event_hooks_are_generated_at_project_run_level(tmp_path: Path) -> N
     assert "var('tms_enable_job_hooks', true)" in project["on-run-start"][0]
     assert "{{ tms_job_create() }}" in project["on-run-start"][0]
     assert "{{ tms_job_start() }}" in project["on-run-start"][1]
-    assert len(project["on-run-end"]) == 2
-    assert "var('tms_enable_job_hooks', true)" in project["on-run-end"][1]
-    assert "{{ tms_job_create() }}" in project["on-run-end"][0]
-    assert "{{ tms_job_end() }}" in project["on-run-end"][1]
+    assert len(project["on-run-end"]) == 1
+    assert "var('tms_enable_job_hooks', true)" in project["on-run-end"][0]
+    assert "{{ tms_job_create() }}" not in project["on-run-end"][0]
+    assert "{{ tms_job_end() }}" in project["on-run-end"][0]
     assert "EVENT_TIMESTAMP timestamp_ntz" in job_macro_sql
     assert "TMS hook: ensuring job-event table exists" in job_macro_sql
     assert "TMS hook: recording JOB_START event" in job_macro_sql
@@ -1398,7 +1398,7 @@ def test_incremental_bookmark_is_generated_from_control_data(tmp_path: Path) -> 
     assert "LAST_SOURCE_TIMESTAMP" in macro_sql
     assert "NONPROD_GOVERNANCE.METADATA.TMS_BOOKMARK" in macro_sql
     assert project["on-run-start"][0] == "{{ tms_bookmark_create() }}"
-    assert project["on-run-end"][1] == "{{ tms_bookmark_advance() }}"
+    assert project["on-run-end"][0] == "{{ tms_bookmark_advance() }}"
     assert "create table if not exists NONPROD_GOVERNANCE.METADATA.TMS_BOOKMARK" in hook_macro_sql
     assert "tms_bookmark_migrate" not in hook_macro_sql
     assert "merge into NONPROD_GOVERNANCE.METADATA.TMS_BOOKMARK" in hook_macro_sql

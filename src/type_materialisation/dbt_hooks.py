@@ -414,7 +414,7 @@ def _incremental_bookmark_hooks(spec: dict[str, Any]) -> tuple[list[str], list[s
     bookmark = _incremental_bookmark_config(spec)
     if bookmark is None:
         return [], []
-    return ["{{ tms_bookmark_create() }}"], ["{{ tms_bookmark_create() }}", "{{ tms_bookmark_advance() }}"]
+    return ["{{ tms_bookmark_create() }}"], ["{{ tms_bookmark_advance() }}"]
 
 
 
@@ -453,7 +453,7 @@ def _job_hooks(spec: dict[str, Any], spec_file_name: str) -> tuple[list[str], li
     bookmark_start_hooks, bookmark_end_hooks = _incremental_bookmark_hooks(spec)
     return (
         [*bookmark_start_hooks, _optional_job_hook("{{ tms_job_create() }}"), _optional_job_hook("{{ tms_job_start() }}")],
-        [*bookmark_end_hooks, _optional_job_hook("{{ tms_job_create() }}"), _optional_job_hook("{{ tms_job_end() }}")],
+        [*bookmark_end_hooks, _optional_job_hook("{{ tms_job_end() }}")],
     )
 
 
