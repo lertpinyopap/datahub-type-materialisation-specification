@@ -429,8 +429,21 @@ def _render_job_hooks_macro(spec: dict[str, Any], spec_file_name: str) -> str:
         if quarantine_relation is not None else None
     )
     template = files("type_materialisation").joinpath("templates", "job_hooks.sql").read_text(encoding="utf-8")
+    job_relation = _job_relation_config(spec)
+    job_config = spec.get("control_data", {}).get("job", {})
+    if not isinstance(job_config, dict):
+        job_config = {}
+    job_database_expression = (
+        _sql_string(job_relation.database)
+        if job_relation.database is not None
+        else "target.database | upper"
+    )
+    job_schema_default = _physical_name(job_config.get("schema", "BUSINESS"))
     replacements = {
-        "__JOB_RELATION__": _relation_name(_job_relation_config(spec)),
+        "__JOB_RELATION__": _relation_name(job_relation),
+        "__JOB_DATABASE_EXPRESSION__": job_database_expression,
+        "__JOB_SCHEMA_DEFAULT_LITERAL__": _sql_string(job_schema_default),
+        "__JOB_TABLE_LITERAL__": _sql_string(job_relation.table),
         "__JOB_TIMESTAMP_DATA_TYPE__": JOB_TIMESTAMP_DATA_TYPE,
         "__AUDIT_DATA_PROCESS_KEY_TYPE__": GENERATED_METADATA_FIELD_TYPES["audit_data_process_key"],
         "__JOB_ID_EXPRESSION__": _job_id_expression(),
