@@ -98,11 +98,11 @@ def test_generated_metadata_field_type_contract_is_supported() -> None:
     assert GENERATED_METADATA_FIELD_TYPES == {
         "is_current_flag": "varchar(1)",
         "is_deleted_flag": "varchar(1)",
-        "valid_from_datetime": "timestamp_ltz",
-        "valid_to_datetime": "timestamp_ltz",
+        "valid_from_datetime": "timestamp_ntz",
+        "valid_to_datetime": "timestamp_ntz",
         "business_data_hash": "varchar(64)",
-        "audit_created_datetime": "timestamp_ltz",
-        "audit_last_changed_datetime": "timestamp_ltz",
+        "audit_created_datetime": "timestamp_ntz",
+        "audit_last_changed_datetime": "timestamp_ntz",
         "audit_data_process_key": "varchar(256)",
     }
     for data_type in [SURROGATE_KEY_DATA_TYPE, *GENERATED_METADATA_FIELD_TYPES.values()]:

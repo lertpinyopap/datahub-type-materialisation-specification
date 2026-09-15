@@ -896,7 +896,7 @@ def test_hash_skip_scenario_generates_business_hash_skip_sql(tmp_path: Path) -> 
         "coalesce(cast(cast(ACCOUNT_VALUE as number(10,0)) as varchar), '')), 256)"
         in model_sql
     )
-    assert "cast('{{ var(\"insert_time\") }}' as timestamp_ltz)" in model_sql
+    assert "cast('{{ var(\"insert_time\") }}' as timestamp_ntz)" in model_sql
     assert "current_target.BUSINESS_DATA_HASH = typed_rows.BUSINESS_DATA_HASH" in model_sql
     assert "coalesce(current_target.IS_DELETED_FLAG, 'N') = typed_rows.TMS_IS_DELETED_FLAG_CANDIDATE" in model_sql
     assert "duplicate_boundary_rows as (" in model_sql

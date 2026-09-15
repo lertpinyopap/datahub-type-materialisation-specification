@@ -27,7 +27,7 @@ from .dbt_sql import (
 
 DBT_PROJECT_NAME = "type_materialisation_generated"
 DBT_PROFILE_NAME = "datahub_type_materialisation"
-JOB_TIMESTAMP_DATA_TYPE = "timestamp_ltz"
+JOB_TIMESTAMP_DATA_TYPE = "timestamp_ntz"
 
 
 def _write(path: Path, content: str, result: Any) -> None:

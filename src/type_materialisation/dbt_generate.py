@@ -1716,7 +1716,7 @@ def _write_quarantine_model(spec: dict[str, Any], result: DbtGenerationResult) -
     source_model = _source_model_name(target["id"])
     source_columns = _source_output_columns(spec)
     select_lines = [
-        "    cast(current_timestamp() as timestamp_tz) as LOADED_AT",
+        "    cast(current_timestamp() as timestamp_ntz) as LOADED_AT",
         f"    {_job_id_expression()} as JOB_ID",
         "    FAILURE_DETAILS",
     ]

@@ -671,8 +671,8 @@ def test_generated_final_model_uses_audit_metadata_types(tmp_path: Path) -> None
     assert result.errors == []
     model_sql = (output_dir / "models" / "generated" / "account.sql").read_text(encoding="utf-8")
     assert "cast('{{ var(\"audit_data_process_key\", \"manual\") }}' as varchar(256))" in model_sql
-    assert "cast(current_timestamp() as timestamp_ltz) as AUDIT_CREATED_DATETIME" in model_sql
-    assert "cast(current_timestamp() as timestamp_ltz) as AUDIT_LAST_CHANGED_DATETIME" in model_sql
+    assert "cast(current_timestamp() as timestamp_ntz) as AUDIT_CREATED_DATETIME" in model_sql
+    assert "cast(current_timestamp() as timestamp_ntz) as AUDIT_LAST_CHANGED_DATETIME" in model_sql
 
 
 def test_scd2_manual_output_orders_keys_business_fields_scd2_hash_and_audit_groups(tmp_path: Path) -> None:
@@ -1357,7 +1357,7 @@ def test_job_event_hooks_are_generated_at_project_run_level(tmp_path: Path) -> N
     assert "var('tms_enable_job_hooks', true)" in project["on-run-end"][1]
     assert "{{ tms_job_create() }}" in project["on-run-end"][0]
     assert "{{ tms_job_end() }}" in project["on-run-end"][1]
-    assert "EVENT_TIMESTAMP timestamp_ltz" in job_macro_sql
+    assert "EVENT_TIMESTAMP timestamp_ntz" in job_macro_sql
     assert "TMS hook: ensuring job-event table exists" in job_macro_sql
     assert "TMS hook: recording JOB_START event" in job_macro_sql
     assert "TMS hook: recording JOB_END event" in job_macro_sql
@@ -1815,16 +1815,16 @@ def test_scd2_auto_generation_adds_continuous_validity_windows(tmp_path: Path) -
 
     assert result.errors == []
     model_sql = (output_dir / "models" / "generated" / "account.sql").read_text(encoding="utf-8")
-    assert "cast('{{ var('insert_time') }}' as timestamp_ltz) as TMS_VALID_FROM_DATETIME_CANDIDATE" in model_sql
+    assert "cast('{{ var('insert_time') }}' as timestamp_ntz) as TMS_VALID_FROM_DATETIME_CANDIDATE" in model_sql
     assert "row_number() over (partition by ACCOUNT_BUSINESS_KEY order by TMS_VALID_FROM_DATETIME_CANDIDATE) = 1" in model_sql
-    assert "cast('0001-01-01T00:00:00Z' as timestamp_ltz)" in model_sql
+    assert "cast('0001-01-01T00:00:00Z' as timestamp_ntz)" in model_sql
     assert "lead(VALID_FROM_DATETIME) over (partition by ACCOUNT_BUSINESS_KEY order by VALID_FROM_DATETIME)" in model_sql
     assert (
         "dateadd(nanosecond, -1, lead(VALID_FROM_DATETIME) over "
         "(partition by ACCOUNT_BUSINESS_KEY order by VALID_FROM_DATETIME))"
         in model_sql
     )
-    assert "cast('9999-12-31T23:59:59Z' as timestamp_ltz)" in model_sql
+    assert "cast('9999-12-31T23:59:59Z' as timestamp_ntz)" in model_sql
     assert "end as IS_CURRENT_FLAG" in model_sql
     assert "'N' as TMS_IS_DELETED_FLAG_CANDIDATE" in model_sql
     assert "BUSINESS_DATA_HASH" in model_sql
@@ -1845,7 +1845,7 @@ def test_scd2_auto_generation_adds_continuous_validity_windows(tmp_path: Path) -
     )
     assert (
         "(TMS_NEXT_VALID_FROM_DATETIME is null "
-        "and VALID_TO_DATETIME < cast('9999-12-30 00:00:00' as timestamp_ltz))"
+        "and VALID_TO_DATETIME < cast('9999-12-30 00:00:00' as timestamp_ntz))"
         in model_sql
     )
     assert (
@@ -1887,7 +1887,7 @@ def test_scd2_auto_timestamp_data_type_override_is_used_consistently(tmp_path: P
     model_sql = (output_dir / "models" / "generated" / "account.sql").read_text(encoding="utf-8")
     assert "cast('{{ var('insert_time') }}' as timestamp_tz) as TMS_VALID_FROM_DATETIME_CANDIDATE" in model_sql
     assert "cast(null as timestamp_tz) as VALID_FROM_DATETIME" in model_sql
-    assert "cast(null as timestamp_ltz) as VALID_FROM_DATETIME" not in model_sql
+    assert "cast(null as timestamp_ntz) as VALID_FROM_DATETIME" not in model_sql
 
 
 def test_scd2_quarantine_excludes_invalid_business_key_histories(tmp_path: Path) -> None:
@@ -1957,7 +1957,7 @@ def test_scd2_derived_exposes_effective_date_in_staging_only(tmp_path: Path) -> 
     source_sql = (output_dir / "models" / "generated" / "account__source.sql").read_text(encoding="utf-8")
     model_sql = (output_dir / "models" / "generated" / "account.sql").read_text(encoding="utf-8")
     assert "source_query.SOURCE_EFFECTIVE_FROM_DATETIME as SOURCE_EFFECTIVE_FROM_DATETIME" in source_sql
-    assert "cast(SOURCE_EFFECTIVE_FROM_DATETIME as timestamp_ltz) as TMS_VALID_FROM_DATETIME_CANDIDATE" in model_sql
+    assert "cast(SOURCE_EFFECTIVE_FROM_DATETIME as timestamp_ntz) as TMS_VALID_FROM_DATETIME_CANDIDATE" in model_sql
 
 
 def test_scd2_derived_valid_from_source_column_is_supported(tmp_path: Path) -> None:
@@ -2009,7 +2009,7 @@ def test_scd2_derived_valid_from_source_column_is_supported(tmp_path: Path) -> N
     source_sql = (output_dir / "models" / "generated" / "account__source.sql").read_text(encoding="utf-8")
     model_sql = (output_dir / "models" / "generated" / "account.sql").read_text(encoding="utf-8")
     assert "source_query.SOURCE_EFFECTIVE_FROM_DATETIME as SOURCE_EFFECTIVE_FROM_DATETIME" in source_sql
-    assert "cast(SOURCE_EFFECTIVE_FROM_DATETIME as timestamp_ltz) as TMS_VALID_FROM_DATETIME_CANDIDATE" in model_sql
+    assert "cast(SOURCE_EFFECTIVE_FROM_DATETIME as timestamp_ntz) as TMS_VALID_FROM_DATETIME_CANDIDATE" in model_sql
     assert "TMS_VALID_FROM_DATETIME_CANDIDATE desc nulls last" in model_sql
 
 
