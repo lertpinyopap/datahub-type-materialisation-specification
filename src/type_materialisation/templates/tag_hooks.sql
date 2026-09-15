@@ -2,6 +2,6 @@
 {% set tms_tag_statement %}
 __TAG_HOOK_STATEMENT__
 {% endset %}
-{{ log('TMS tag hook: ' ~ (tms_tag_statement | trim), info=true) }}
+{{ log('__TAG_HOOK_LOG_MESSAGE__', info=true) }}
 {{ tms_tag_statement }}
 {%- endmacro %}

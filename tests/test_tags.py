@@ -50,7 +50,8 @@ def test_target_and_field_tags_generate_snowflake_post_hooks(tmp_path: Path) -> 
     assert "{{ tms_apply_tag_" in source_sql
     assert "alter table {{ this }} modify column FIRST_NAME set tag PII_CATEGORY = 'IDENTIFIER'" in tag_macro_sql
     assert "alter view {{ this }} modify column FIRST_NAME set tag PCI_CATEGORY = 'PCI'" in tag_macro_sql
-    assert "{{ log('TMS tag hook: ' ~ (tms_tag_statement | trim), info=true) }}" in tag_macro_sql
+    assert "{{ log('TMS tag hook: applying table or column tag', info=true) }}" in tag_macro_sql
+    assert "tms_tag_statement | trim" not in tag_macro_sql
 
 
 def test_apply_governance_tag_application_generates_procedure_post_hook(tmp_path: Path) -> None:

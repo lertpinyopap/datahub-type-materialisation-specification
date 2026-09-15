@@ -136,6 +136,15 @@ def _tag_hook_macro_name(statement: str) -> str:
     return f"tms_apply_tag_{digest}"
 
 
+def _tag_hook_log_message(statement: str) -> str:
+    normalized = statement.lstrip().lower()
+    if normalized.startswith("merge into"):
+        return "TMS tag hook: merging governance contract"
+    if normalized.startswith("call "):
+        return "TMS tag hook: calling governance procedure"
+    return "TMS tag hook: applying table or column tag"
+
+
 def _source_view_tag_statements(spec: dict[str, Any]) -> list[str]:
     statements: list[str] = []
     for field in fields(spec):
@@ -280,6 +289,7 @@ def _render_tag_hooks_macro(spec: dict[str, Any]) -> str:
         rendered.append(
             template.replace("__TAG_HOOK_MACRO_NAME__", _tag_hook_macro_name(statement))
             .replace("__TAG_HOOK_STATEMENT__", statement)
+            .replace("__TAG_HOOK_LOG_MESSAGE__", _tag_hook_log_message(statement))
         )
     return "\n\n".join(rendered) + ("\n" if rendered else "")
 
