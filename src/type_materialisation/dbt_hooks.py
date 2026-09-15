@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from importlib.resources import files
+import hashlib
 import json
 from pathlib import Path
 import sys
@@ -79,6 +80,10 @@ def _write_project_file(output_dir: Path, spec: dict[str, Any], spec_file_name: 
 
 def _tag_post_hook_lines(spec: dict[str, Any]) -> list[str]:
     """Apply target governance after the target relation exists."""
+    return _tag_post_hook_config_lines(_tag_post_hook_statements(spec))
+
+
+def _tag_post_hook_statements(spec: dict[str, Any]) -> list[str]:
     target = spec.get("target", {})
     if not isinstance(target, dict):
         return []
@@ -87,14 +92,14 @@ def _tag_post_hook_lines(spec: dict[str, Any]) -> list[str]:
         statements = _governance_contract_merge_statements(spec)
         procedure = target.get("apply_governance_procedure")
         if not isinstance(procedure, str):
-            return _post_hook_config_lines(statements)
+            return statements
         statements.append(
             f"call {_tag_identifier(procedure)}("
             "'{{ this.database | upper }}', "
             "'{{ this.schema | upper }}', "
             "'{{ this.identifier | upper }}')"
         )
-        return _post_hook_config_lines(statements)
+        return statements
 
     statements: list[str] = []
     target_tags = target.get("tags", {})
@@ -116,7 +121,45 @@ def _tag_post_hook_lines(spec: dict[str, Any]) -> list[str]:
                 f"{_tag_identifier(tag_name)} = {_sql_string(str(tag_value))}"
             )
 
-    return _post_hook_config_lines(statements)
+    return statements
+
+
+def _tag_post_hook_config_lines(statements: list[str]) -> list[str]:
+    """Call generated dbt macros so every governance hook is logged."""
+    return _post_hook_config_lines(
+        [f"{{{{ {_tag_hook_macro_name(statement)}() }}}}" for statement in statements]
+    )
+
+
+def _tag_hook_macro_name(statement: str) -> str:
+    digest = hashlib.sha256(statement.encode("utf-8")).hexdigest()[:12]
+    return f"tms_apply_tag_{digest}"
+
+
+def _source_view_tag_statements(spec: dict[str, Any]) -> list[str]:
+    statements: list[str] = []
+    for field in fields(spec):
+        source = field.get("source", {})
+        if not isinstance(source, dict):
+            source = {}
+        if isinstance(source.get("macro"), str) or "fixed_value" in source or isinstance(source.get("snowflake_path"), str):
+            column_name = str(field["id"])
+        elif isinstance(source.get("column"), str):
+            column_name = str(source["column"])
+        elif isinstance(source.get("pos"), int):
+            column_name = f"COL_{source['pos']}"
+        else:
+            column_name = str(field["id"])
+        field_tags = field.get("tags", {})
+        if not isinstance(field_tags, dict):
+            continue
+        for tag_name, tag_value in field_tags.items():
+            statements.append(
+                "alter view {{ this }} modify column "
+                f"{_quote_identifier(column_name)} set tag "
+                f"{_tag_identifier(tag_name)} = {_sql_string(str(tag_value))}"
+            )
+    return statements
 
 
 
@@ -229,6 +272,18 @@ def _post_hook_config_lines(statements: list[str]) -> list[str]:
     return lines
 
 
+def _render_tag_hooks_macro(spec: dict[str, Any]) -> str:
+    template = files("type_materialisation").joinpath("templates", "tag_hooks.sql").read_text(encoding="utf-8")
+    statements = [*_tag_post_hook_statements(spec), *_source_view_tag_statements(spec)]
+    rendered: list[str] = []
+    for statement in dict.fromkeys(statements):
+        rendered.append(
+            template.replace("__TAG_HOOK_MACRO_NAME__", _tag_hook_macro_name(statement))
+            .replace("__TAG_HOOK_STATEMENT__", statement)
+        )
+    return "\n\n".join(rendered) + ("\n" if rendered else "")
+
+
 
 def _tag_identifier(value: Any) -> str:
     """Keep qualified Snowflake tag names usable while normalizing simple names."""
@@ -251,6 +306,11 @@ def _write_generated_macros(
     _write(
         output_dir / "macros" / "generated" / "job_hooks.sql",
         _render_job_hooks_macro(spec, spec_file_name),
+        result,
+    )
+    _write(
+        output_dir / "macros" / "generated" / "tag_hooks.sql",
+        _render_tag_hooks_macro(spec),
         result,
     )
     bookmark = _incremental_bookmark_config(spec)

@@ -353,6 +353,9 @@
           "enum": ["timestamp_ltz", "timestamp_tz", "timestamp_ntz"],
           "default": "timestamp_ntz"
         },
+        "validity": {
+          "$ref": "#/$defs/scd2Validity"
+        },
         "scd2_auto_from_sot": {
           "type": "boolean"
         },
@@ -419,6 +422,40 @@
         }
       }
     },
+    "scd2Validity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["valid_from", "valid_to"],
+      "properties": {
+        "data_type": {
+          "type": "string",
+          "enum": ["date", "timestamp_ltz", "timestamp_tz", "timestamp_ntz"],
+          "default": "timestamp_ntz"
+        },
+        "valid_from": { "$ref": "#/$defs/scd2ValidityBoundary" },
+        "valid_to": { "$ref": "#/$defs/scd2ValidityBoundary" }
+      }
+    },
+    "scd2ValidityBoundary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["column"],
+      "properties": {
+        "column": { "$ref": "#/$defs/specificationId" },
+        "source": { "$ref": "#/$defs/fieldSource" },
+        "transforms": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/transformRule" }
+        },
+        "nullable": { "type": "boolean" },
+        "validations": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/validationRule" }
+        },
+        "offset": { "$ref": "#/$defs/scdDatetimeOffset" },
+        "end_of_time": { "$ref": "#/$defs/templatedString" }
+      }
+    },
     "scdValidToDatetime": {
       "type": "object",
       "additionalProperties": false,
@@ -443,7 +480,7 @@
       "properties": {
         "unit": {
           "type": "string",
-          "enum": ["nanosecond", "second"]
+          "enum": ["day", "nanosecond", "second"]
         },
         "value": {
           "type": "integer"

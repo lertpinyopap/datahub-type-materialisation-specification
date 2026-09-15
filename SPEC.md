@@ -604,8 +604,8 @@ The job event columns are:
   for failures from the same load. It must not be supplied or overridden by the
   caller.
 - `event_type`: the lifecycle event type.
-- `event_timestamp`: the timezone-aware time the event occurred. The physical
-  data type is `timestamp_tz`.
+- `event_timestamp`: the time the event occurred. The physical data type is
+  `timestamp_ntz`.
 - `result`: the load result. `JOB_START` events should leave this value null
   unless the materialisation fails before load time. `JOB_END` events must set
   it to `COMPLETED`, `COMPLETED_WITH_QUARANTINE`, or `FAILED`.
@@ -624,9 +624,9 @@ The job event columns are:
   set it when a quarantine table is configured and exists.
 - `audit_data_process_key`: the operational process key for the pipeline
   execution or run that produced the job event.
-- `audit_created_datetime`: the timezone-aware time the job event row was first
+- `audit_created_datetime`: the timezone-free time the job event row was first
   created in the platform.
-- `audit_last_changed_datetime`: the timezone-aware time the job event row was
+- `audit_last_changed_datetime`: the timezone-free time the job event row was
   most recently changed in the platform.
 
 The context columns `details`, `spec_file_name`, `generated_table`, and
@@ -688,15 +688,18 @@ scd1_scd_config ::=
 scd2_manual_scd_config ::=
   update_mode?
   update_key?
+  validity
 
 scd2_auto_scd_config ::=
   insert_time
+  validity?
   timestamp_data_type?
   scd2_auto_from_sot?
   scd2_validation_enabled?
   scd2_validation?
 
 scd2_derived_scd_config ::=
+  validity
   timestamp_data_type?
   scd2_validation_enabled?
   scd2_validation?
@@ -714,6 +717,15 @@ delete_detection ::=
 
 insert_time ::= scalar
 timestamp_data_type ::= timestamp_ltz | timestamp_tz | timestamp_ntz
+validity ::=
+  data_type: date | timestamp_ntz | timestamp_tz | timestamp_ltz
+  valid_from:
+    column
+    source? transforms? nullable? validations?
+  valid_to:
+    column
+    source? transforms? nullable? validations?
+    offset? end_of_time?
 scd2_auto_from_sot ::= true | false
 scd2_validation_enabled ::= true | false
 scd2_validation ::= continuous | sparse
@@ -736,7 +748,37 @@ history metadata. SCD1 may use `delete_detection.mode: field` to physically
 remove matching records from the generated current-state output. Full target
 rebuilds are controlled by `control_data.truncate_before_load`.
 
-For `scd2_manual`, the source must provide SCD2 state values and the
+`scd.validity` is the common SCD2 validity contract. It controls the generated
+output column names and one common physical type for every SCD2 form. The
+default remains `VALID_FROM_DATETIME`, `VALID_TO_DATETIME`, and `timestamp_ntz`.
+For date-effective reference data, use `VALID_FROM_DATE`, `VALID_TO_DATE`, and
+`date`; TMS then uses inclusive day boundaries (the day before the next version)
+and `9999-12-31` as end-of-time.
+
+```yaml
+control_data:
+  scd:
+    validity:
+      data_type: date
+      valid_from:
+        column: VALID_FROM_DATE
+        source:
+          column: SOURCE_EFFECTIVE_DATE
+        transforms: []
+      valid_to:
+        column: VALID_TO_DATE
+```
+
+For `scd2_auto`, omit both `source` mappings: TMS generates the validity
+boundaries from `insert_time`. For `scd2_derived`, `valid_from.source` is
+required and `valid_to` is generated. For `scd2_manual`, both boundaries require
+source mappings, including any transforms. Validity boundaries are generated
+metadata and are not declared in `target.fields` under the new contract.
+
+Legacy specifications that declare `valid_from_datetime` and
+`valid_to_datetime` in `target.fields` remain supported.
+
+For legacy `scd2_manual`, the source must provide SCD2 state values and the
 specification must declare them in `target.fields` as ordinary fields:
 
 - `valid_from_datetime`: timestamp value from which the row is valid.
@@ -790,10 +832,10 @@ following target metadata columns:
 - `is_deleted_flag`: `Y` when the business entity has been logically deleted.
   The current specification does not define field-based delete detection for
   `scd2_auto`, so generated rows normally use `N`.
-- `valid_from_datetime`: the timezone-aware timestamp from which the version is
-  valid. The physical data type is `timestamp_tz`.
-- `valid_to_datetime`: the timezone-aware timestamp until which the version is
-  valid. The physical data type is `timestamp_tz`.
+- `valid_from_datetime`: the timezone-free timestamp from which the version is
+  valid. The physical data type is `timestamp_ntz` by default.
+- `valid_to_datetime`: the timezone-free timestamp until which the version is
+  valid. The physical data type is `timestamp_ntz` by default.
 
 Generated SCD metadata columns for `scd2_auto` are not declared in
 `target.fields`. Target field ids must not use generated SCD metadata column
@@ -876,23 +918,21 @@ rather than leaving adjacent duplicate business-data versions.
 
 For `scd2_derived`, implementations preserve historical versions and generate
 the same SCD2 target metadata columns as `scd2_auto`, but the proposed
-`valid_from_datetime` comes from the declared `target.fields` mapping rather
-than from load `insert_time`.
+valid-from value comes from `scd.validity.valid_from.source` rather than load
+`insert_time`.
 
 `scd.timestamp_data_type` is also supported for `scd2_derived`. It controls
 the generated SCD2 validity columns and defaults to `timestamp_ntz`.
 
-For `scd2_derived`, `valid_from_datetime` must be declared in `target.fields`
-with a timestamp data type. `valid_to_datetime` may also be declared with a
-timestamp data type; when omitted, the implementation generates it using the
-default SCD2 validity-window behavior. Their values are still derived from the
-`scd` control data; declarations define target schema and output columns. Other
-generated SCD metadata columns are not declared in `target.fields`.
+For `scd2_derived`, `scd.validity.valid_from.source` is required. TMS applies
+its transforms and validations before it generates the configured valid-from
+and valid-to output columns. Other generated SCD metadata columns are not
+declared in `target.fields`.
 
 `scd2_derived` requires:
 
-- `target.fields.valid_from_datetime`: effective start value mapped from the
-  source and used to derive validity windows.
+- `scd.validity.valid_from.source`: effective start value mapped from the source
+  and used to derive validity windows.
 - `business_key.fields`: target fields used to partition customer/entity
   history.
 - `business_data_hash.fields`: source-derived target fields used to detect
@@ -1376,14 +1416,14 @@ The target audit metadata columns are:
   execution or run that produced the row. This links target rows to centralized
   operational metadata for lineage tracing, reconciliation, and observability.
   The physical data type is `varchar(64)`.
-- `audit_created_datetime`: the timezone-aware timestamp when the row was first created in the
+- `audit_created_datetime`: the timezone-free timestamp when the row was first created in the
   platform. This value is immutable for the lifetime of the row and supports
   data freshness checks and initial load tracking. The physical data type is
-  `timestamp_tz`.
-- `audit_last_changed_datetime`: the timezone-aware timestamp of the most recent
+  `timestamp_ntz`.
+- `audit_last_changed_datetime`: the timezone-free timestamp of the most recent
   change applied to the row. This value is updated on every insert, update, or
   delete and supports incremental processing and observability. The physical
-  data type is `timestamp_tz`.
+  data type is `timestamp_ntz`.
 
 The generated surrogate-key, business-key, audit, and `scd2_auto` metadata
 column data type contract is:
@@ -1394,11 +1434,11 @@ column data type contract is:
 | `<target.id>_BUSINESS_KEY` | `varchar` | SHA2-256 hashed business key value |
 | `is_current_flag` | `varchar(1)` | `Y` or `N` |
 | `is_deleted_flag` | `varchar(1)` | `Y` or `N` |
-| `valid_from_datetime` | `timestamp_tz` | timezone-aware timestamp value |
-| `valid_to_datetime` | `timestamp_tz` | timezone-aware timestamp value |
+| `valid_from_datetime` | `timestamp_ntz` by default | timezone-free timestamp value |
+| `valid_to_datetime` | `timestamp_ntz` by default | timezone-free timestamp value |
 | `business_data_hash` | `varchar(64)` | hash value |
-| `audit_created_datetime` | `timestamp_tz` | timezone-aware timestamp value |
-| `audit_last_changed_datetime` | `timestamp_tz` | timezone-aware timestamp value |
+| `audit_created_datetime` | `timestamp_ntz` | timezone-free timestamp value |
+| `audit_last_changed_datetime` | `timestamp_ntz` | timezone-free timestamp value |
 | `audit_data_process_key` | `varchar(64)` | operational process key |
 
 Target field ids must not use the reserved generated metadata column names,
@@ -1475,7 +1515,11 @@ is handled according to `failure_mode`.
 
 `field.tags` is optional metadata for column-level classification, governance,
 or platform policy integration. dbt implementations that support Snowflake tags
-should apply these as column tags after the target relation exists.
+should apply these as column tags after both the generated source view and the
+target relation exist. This ensures tag-based masking policies protect users
+who can query the generated source view as well as users of the target table.
+Generated tag post-hooks are rendered through a dbt macro that logs the tag
+statement before it runs, making each application visible in dbt output.
 
 Snowflake tag names may be simple names such as `PII_CATEGORY`, schema-qualified
 names such as `TAGS.PII_CATEGORY`, or fully qualified names such as

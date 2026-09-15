@@ -9,8 +9,13 @@ from typing import Any
 
 from .errors import Diagnostic
 from .source_files import csv_load_method, csv_seed_file_path
-from .spec import case_key, fields
+from .spec import case_key, fields, scd2_validity_fields
+from .dbt_hooks import _source_view_tag_statements, _tag_post_hook_config_lines
 DBT_PROJECT_NAME = "type_materialisation_generated"
+
+
+def _input_fields(spec: dict[str, Any]) -> list[dict[str, Any]]:
+    return [*fields(spec), *scd2_validity_fields(spec)]
 
 from .dbt_sql import (
     _indent_sql, _macro_object_name, _physical_name, _quote_identifier,
@@ -36,6 +41,10 @@ def _scd2_derived_source_helper_lines(spec: dict[str, Any]) -> list[str]:
     from .dbt_generate import _scd2_derived_source_helper_lines as renderer
     return renderer(spec)
 
+
+def _source_view_tag_post_hook_lines(spec: dict[str, Any]) -> list[str]:
+    return _tag_post_hook_config_lines(_source_view_tag_statements(spec))
+
 def _write_source_model(spec: dict[str, Any], options: GenerateDbtOptions, result: DbtGenerationResult) -> None:
     source = spec["source"]
     if source["format"] == "table":
@@ -55,7 +64,7 @@ def _write_csv_source_model(spec: dict[str, Any], options: GenerateDbtOptions, r
     stage = _stage_reference(options.csv_stage) if options.csv_stage else _csv_stage_location(spec["source"])
     source_query_select_lines = []
     seen_source_query_columns: set[str] = set()
-    for field in fields(spec):
+    for field in _input_fields(spec):
         source = field.get("source", {})
         if "fixed_value" in source:
             continue
@@ -85,7 +94,7 @@ def _write_csv_source_model(spec: dict[str, Any], options: GenerateDbtOptions, r
         expression = _apply_default_value_expression(f"${ordinal}::string", source)
         source_query_select_lines.append(f"        {expression} as {_quote_identifier(column)}")
     select_lines = []
-    for field in fields(spec):
+    for field in _input_fields(spec):
         source = field.get("source", {})
         if isinstance(source.get("macro"), str):
             expression = _source_macro_field_expression(field)
@@ -107,6 +116,7 @@ def _write_csv_source_model(spec: dict[str, Any], options: GenerateDbtOptions, r
                 database=_target_relation_config(spec).database,
                 schema=_staging_schema_config_expression(spec),
                 alias=model_name,
+                extra_config_lines=_source_view_tag_post_hook_lines(spec),
                 schema_is_expression=True,
             ),
             "  )",
@@ -141,7 +151,7 @@ def _write_csv_seed_source_model(spec: dict[str, Any], options: GenerateDbtOptio
 
     source_query_select_lines = []
     seen_source_query_columns: set[str] = set()
-    for field in fields(spec):
+    for field in _input_fields(spec):
         source = field.get("source", {})
         if "fixed_value" in source:
             continue
@@ -169,7 +179,7 @@ def _write_csv_seed_source_model(spec: dict[str, Any], options: GenerateDbtOptio
         expression = _apply_default_value_expression(f"cast({_quote_identifier(column)} as string)", source)
         source_query_select_lines.append(f"        {expression} as {_quote_identifier(column)}")
     select_lines = []
-    for field in fields(spec):
+    for field in _input_fields(spec):
         source = field.get("source", {})
         if isinstance(source.get("macro"), str):
             expression = _source_macro_field_expression(field)
@@ -191,6 +201,7 @@ def _write_csv_seed_source_model(spec: dict[str, Any], options: GenerateDbtOptio
                 database=_target_relation_config(spec).database,
                 schema=_staging_schema_config_expression(spec),
                 alias=model_name,
+                extra_config_lines=_source_view_tag_post_hook_lines(spec),
                 schema_is_expression=True,
             ),
             "  )",
@@ -242,7 +253,7 @@ def _write_headerless_seed_file(spec: dict[str, Any], seed_file: Path, target_pa
         rows = list(reader)
         positions = [
             int(field["source"]["pos"])
-            for field in fields(spec)
+            for field in _input_fields(spec)
             if isinstance(field.get("source"), dict) and isinstance(field["source"].get("pos"), int)
         ]
         column_count = max([*(pos + 1 for pos in positions), *(len(row) for row in rows)], default=0)
@@ -266,7 +277,7 @@ def _write_table_source_model(spec: dict[str, Any], options: GenerateDbtOptions,
     model_name = _source_model_name(target["id"])
     flatten_aliases = _flatten_aliases(source)
     select_lines = []
-    for field in fields(spec):
+    for field in _input_fields(spec):
         column = _source_column_name(field)
         expression = (
             _source_macro_field_expression(field)
@@ -285,6 +296,7 @@ def _write_table_source_model(spec: dict[str, Any], options: GenerateDbtOptions,
                 database=_target_relation_config(spec).database,
                 schema=_staging_schema_config_expression(spec),
                 alias=model_name,
+                extra_config_lines=_source_view_tag_post_hook_lines(spec),
                 schema_is_expression=True,
             ),
             "  )",
@@ -420,7 +432,7 @@ def _source_macro_field_expression(field: dict[str, Any]) -> str | None:
 
 def _source_macro_join_lines(spec: dict[str, Any]) -> list[str]:
     lines: list[str] = []
-    for field in fields(spec):
+    for field in _input_fields(spec):
         if not isinstance(field, dict):
             continue
         source = field.get("source")
@@ -620,7 +632,7 @@ def _semistructured_source_columns_to_guard(spec: dict[str, Any]) -> set[str]:
     flatten_aliases = _flatten_aliases(source)
     guarded = {
         _physical_name(field["source"]["column"])
-        for field in fields(spec)
+        for field in _input_fields(spec)
         if isinstance(field.get("source"), dict)
         and isinstance(field["source"].get("column"), str)
         and isinstance(field["source"].get("snowflake_path"), str)
@@ -635,7 +647,7 @@ def _semistructured_source_columns_to_guard(spec: dict[str, Any]) -> set[str]:
 
 
 def _source_output_columns(spec: dict[str, Any]) -> list[str]:
-    target_fields = fields(spec)
+    target_fields = _input_fields(spec)
     if spec["source"]["format"] == "csv":
         target_fields = sorted(
             target_fields,
@@ -648,7 +660,7 @@ def _source_output_columns(spec: dict[str, Any]) -> list[str]:
 def _csv_physical_source_columns(spec: dict[str, Any]) -> list[str]:
     columns: list[str] = []
     seen: set[str] = set()
-    target_fields = sorted(fields(spec), key=lambda field: field.get("source", {}).get("pos", 999999))
+    target_fields = sorted(_input_fields(spec), key=lambda field: field.get("source", {}).get("pos", 999999))
     for field in target_fields:
         source = field.get("source", {})
         if not isinstance(source, dict) or "fixed_value" in source:

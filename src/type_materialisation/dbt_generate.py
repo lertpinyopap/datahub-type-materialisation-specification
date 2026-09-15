@@ -2,7 +2,7 @@ import csv
 import hashlib
 import re
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -19,6 +19,10 @@ from .spec import (
     case_key,
     fields,
     parse_sql_type,
+    scd2_validity_column,
+    scd2_validity_config,
+    scd2_validity_data_type,
+    scd2_validity_fields,
 )
 from .variables import resolve_python_templates
 
@@ -328,6 +332,11 @@ def _scd2_derived_source_helper_lines(spec: dict[str, Any]) -> list[str]:
     return []
 
 
+def _input_fields(spec: dict[str, Any]) -> list[dict[str, Any]]:
+    """Target fields plus virtual source-backed SCD validity boundaries."""
+    return [*fields(spec), *scd2_validity_fields(spec)]
+
+
 def _write_final_model(spec: dict[str, Any], result: DbtGenerationResult) -> None:
     target = spec["target"]
     table_name = target.get("table_name", target["id"])
@@ -336,7 +345,7 @@ def _write_final_model(spec: dict[str, Any], result: DbtGenerationResult) -> Non
     quarantine_enabled = _quarantine_enabled(spec)
     fail_load_enabled = _fail_load_enabled(spec)
     field_select_lines = []
-    for field in fields(spec):
+    for field in _input_fields(spec):
         if _scd2_derived_declared_metadata(field, spec):
             continue
         expression = _field_expression(field)
@@ -553,8 +562,8 @@ def _field_select_line(field: dict[str, Any]) -> str:
 
 
 def _scd2_derived_declared_metadata(field: dict[str, Any], spec: dict[str, Any]) -> bool:
-    return _change_type(spec) == "scd2_derived" and case_key(str(field.get("id", ""))) in {
-        "valid_from_datetime", "valid_to_datetime"
+    return _change_type(spec) in {"scd2_derived", "scd2_manual"} and case_key(str(field.get("id", ""))) in {
+        case_key(_scd2_valid_from_column(spec)), case_key(_scd2_valid_to_column(spec))
     }
 
 
@@ -569,9 +578,14 @@ def _scd2_manual_select_lines(
     declared_scd2_by_key = {case_key(str(field["id"])): field for field in scd2_state_fields}
     scd2_state_select_lines = [
         _field_select_line(declared_scd2_by_key[case_key(column_id)])
-        for column_id in SCD2_STATE_COLUMN_IDS
+        for column_id in _scd2_state_column_ids(spec)
         if case_key(column_id) in declared_scd2_by_key
     ]
+    # New validity contracts keep boundaries out of target.fields; project their
+    # source-backed virtual fields in the generated SCD2 state position.
+    scd2_state_select_lines.extend(
+        _field_select_line(field) for field in scd2_validity_fields(spec)
+    )
     return [
         *surrogate_key_select_lines,
         *business_key_select_lines,
@@ -625,22 +639,22 @@ def _scd2_final_body_lines(
         "        *,",
         "        case",
         f"            when row_number() over ({_scd2_window_clause(spec, 'TMS_VALID_FROM_DATETIME_CANDIDATE')}) = 1",
-        f"            then cast({_sql_string(SCD2_START_OF_TIME)} as {_scd2_timestamp_data_type(spec)})",
+        f"            then cast({_sql_string(_scd2_start_of_time(spec))} as {_scd2_validity_data_type(spec)})",
         "            else TMS_VALID_FROM_DATETIME_CANDIDATE",
-        "        end as VALID_FROM_DATETIME",
+        f"        end as {_scd2_valid_from_column(spec)}",
         "    from typed_rows",
         "),",
         "windowed_rows as (",
         "    select",
         "        *,",
-        f"        {_valid_to_datetime_expression(spec)} as VALID_TO_DATETIME",
+        f"        {_valid_to_datetime_expression(spec)} as {_scd2_valid_to_column(spec)}",
         "    from valid_from_rows",
         "),",
         "flagged_rows as (",
         "    select",
         "        *,",
         "        case",
-        f"            when VALID_TO_DATETIME = {_scd2_end_of_time_expression(spec)}",
+        f"            when {_scd2_valid_to_column(spec)} = {_scd2_end_of_time_expression(spec)}",
         "            then 'Y'",
         "            else 'N'",
         "        end as IS_CURRENT_FLAG,",
@@ -712,7 +726,7 @@ def _scd2_duplicate_hash_runtime_log_lines(
         f"        where {_business_key_join_condition(spec, 'typed_rows', 'current_target')}",
         "          and current_target.BUSINESS_DATA_HASH = typed_rows.BUSINESS_DATA_HASH",
         "          and coalesce(current_target.IS_DELETED_FLAG, 'N') = typed_rows.TMS_IS_DELETED_FLAG_CANDIDATE",
-        "          and typed_rows.TMS_VALID_FROM_DATETIME_CANDIDATE >= current_target.VALID_FROM_DATETIME",
+        f"          and typed_rows.TMS_VALID_FROM_DATETIME_CANDIDATE >= current_target.{_scd2_valid_from_column(spec)}",
         "    )",
         "),",
         "source_change_rows as (",
@@ -724,7 +738,7 @@ def _scd2_duplicate_hash_runtime_log_lines(
         f"        where {_business_key_join_condition(spec, 'typed_rows', 'current_target')}",
         "          and current_target.BUSINESS_DATA_HASH = typed_rows.BUSINESS_DATA_HASH",
         "          and coalesce(current_target.IS_DELETED_FLAG, 'N') = typed_rows.TMS_IS_DELETED_FLAG_CANDIDATE",
-        "          and typed_rows.TMS_VALID_FROM_DATETIME_CANDIDATE >= current_target.VALID_FROM_DATETIME",
+        f"          and typed_rows.TMS_VALID_FROM_DATETIME_CANDIDATE >= current_target.{_scd2_valid_from_column(spec)}",
         "    )",
         "),",
         *_scd2_empty_delete_rows_lines(spec, audit_select_lines),
@@ -752,10 +766,10 @@ def _scd2_duplicate_hash_runtime_log_lines(
                 ],
                 *_surrogate_key_existing_target_select_lines(spec),
                 *_business_key_existing_target_select_lines(spec),
-                "        existing_target.VALID_FROM_DATETIME as TMS_VALID_FROM_DATETIME_CANDIDATE",
+                f"        existing_target.{_scd2_valid_from_column(spec)} as TMS_VALID_FROM_DATETIME_CANDIDATE",
                 "        existing_target.BUSINESS_DATA_HASH as BUSINESS_DATA_HASH",
                 "        existing_target.IS_DELETED_FLAG as TMS_IS_DELETED_FLAG_CANDIDATE",
-                "        existing_target.VALID_TO_DATETIME as TMS_EXISTING_VALID_TO_DATETIME",
+                f"        existing_target.{_scd2_valid_to_column(spec)} as TMS_EXISTING_VALID_TO_DATETIME",
                 "        existing_target.IS_CURRENT_FLAG as TMS_EXISTING_IS_CURRENT_FLAG",
                 "        'Y' as TMS_IS_EXISTING_TARGET_ROW",
                 "        existing_target.AUDIT_DATA_PROCESS_KEY as AUDIT_DATA_PROCESS_KEY",
@@ -940,10 +954,10 @@ def _scd2_target_merge_body_lines(
                 ],
                 *_surrogate_key_existing_target_select_lines(spec),
                 *_business_key_existing_target_select_lines(spec),
-                "        existing_target.VALID_FROM_DATETIME as TMS_VALID_FROM_DATETIME_CANDIDATE",
+                f"        existing_target.{_scd2_valid_from_column(spec)} as TMS_VALID_FROM_DATETIME_CANDIDATE",
                 "        existing_target.BUSINESS_DATA_HASH as BUSINESS_DATA_HASH",
                 "        existing_target.IS_DELETED_FLAG as TMS_IS_DELETED_FLAG_CANDIDATE",
-                "        existing_target.VALID_TO_DATETIME as TMS_EXISTING_VALID_TO_DATETIME",
+                f"        existing_target.{_scd2_valid_to_column(spec)} as TMS_EXISTING_VALID_TO_DATETIME",
                 "        existing_target.IS_CURRENT_FLAG as TMS_EXISTING_IS_CURRENT_FLAG",
                 "        'Y' as TMS_IS_EXISTING_TARGET_ROW",
                 "        existing_target.AUDIT_DATA_PROCESS_KEY as AUDIT_DATA_PROCESS_KEY",
@@ -1001,7 +1015,7 @@ def _scd2_source_change_not_exists_lines(spec: dict[str, Any]) -> list[str]:
             "        select 1",
             "        from existing_target_rows as existing_target",
             f"        where {_business_key_join_condition(spec, 'typed_rows', 'existing_target')}",
-            "          and existing_target.VALID_FROM_DATETIME = typed_rows.TMS_VALID_FROM_DATETIME_CANDIDATE",
+            f"          and existing_target.{_scd2_valid_from_column(spec)} = typed_rows.TMS_VALID_FROM_DATETIME_CANDIDATE",
             "          and existing_target.BUSINESS_DATA_HASH = typed_rows.BUSINESS_DATA_HASH",
             "          and coalesce(existing_target.IS_DELETED_FLAG, 'N') = typed_rows.TMS_IS_DELETED_FLAG_CANDIDATE",
             "    )",
@@ -1012,7 +1026,7 @@ def _scd2_source_change_not_exists_lines(spec: dict[str, Any]) -> list[str]:
             "          and current_target.IS_CURRENT_FLAG = 'Y'",
             "          and current_target.BUSINESS_DATA_HASH = typed_rows.BUSINESS_DATA_HASH",
             "          and coalesce(current_target.IS_DELETED_FLAG, 'N') = typed_rows.TMS_IS_DELETED_FLAG_CANDIDATE",
-            "          and typed_rows.TMS_VALID_FROM_DATETIME_CANDIDATE >= current_target.VALID_FROM_DATETIME",
+            f"          and typed_rows.TMS_VALID_FROM_DATETIME_CANDIDATE >= current_target.{_scd2_valid_from_column(spec)}",
             "    )",
         ]
     return [
@@ -1022,7 +1036,7 @@ def _scd2_source_change_not_exists_lines(spec: dict[str, Any]) -> list[str]:
         f"        where {_business_key_join_condition(spec, 'typed_rows', 'current_target')}",
         "          and current_target.BUSINESS_DATA_HASH = typed_rows.BUSINESS_DATA_HASH",
         "          and coalesce(current_target.IS_DELETED_FLAG, 'N') = typed_rows.TMS_IS_DELETED_FLAG_CANDIDATE",
-        "          and typed_rows.TMS_VALID_FROM_DATETIME_CANDIDATE >= current_target.VALID_FROM_DATETIME",
+        f"          and typed_rows.TMS_VALID_FROM_DATETIME_CANDIDATE >= current_target.{_scd2_valid_from_column(spec)}",
         "    )",
     ]
 
@@ -1122,12 +1136,7 @@ def _scd2_incremental_unique_key(spec: dict[str, Any]) -> str:
     return "[" + ", ".join(_sql_string(column) for column in _business_key_unique_key_columns(spec)) + "]"
 
 
-SCD2_STATE_COLUMN_IDS = [
-    "IS_CURRENT_FLAG",
-    "IS_DELETED_FLAG",
-    "VALID_FROM_DATETIME",
-    "VALID_TO_DATETIME",
-]
+SCD2_STATE_COLUMN_IDS = ["IS_CURRENT_FLAG", "IS_DELETED_FLAG"]
 SCD2_SURROGATE_KEY_NAMESPACE = "5aa788a5-783e-5ce6-b4aa-438de8fc6971"
 SOURCE_AUDIT_COLUMN_IDS = [
     "AUDIT_CREATED_SOURCE",
@@ -1140,8 +1149,20 @@ SYSTEM_AUDIT_COLUMN_IDS = [
 ]
 
 
+def _scd2_valid_from_column(spec: dict[str, Any]) -> str:
+    return _physical_name(scd2_validity_column(spec, "valid_from"))
+
+
+def _scd2_valid_to_column(spec: dict[str, Any]) -> str:
+    return _physical_name(scd2_validity_column(spec, "valid_to"))
+
+
+def _scd2_state_column_ids(spec: dict[str, Any]) -> list[str]:
+    return [*SCD2_STATE_COLUMN_IDS, _scd2_valid_from_column(spec), _scd2_valid_to_column(spec)]
+
+
 def _scd2_declared_field_groups(spec: dict[str, Any]) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
-    scd2_state_keys = {case_key(column_id) for column_id in SCD2_STATE_COLUMN_IDS}
+    scd2_state_keys = {case_key(column_id) for column_id in _scd2_state_column_ids(spec)}
     source_audit_keys = {case_key(column_id) for column_id in SOURCE_AUDIT_COLUMN_IDS}
     business_fields: list[dict[str, Any]] = []
     source_audit_fields: list[dict[str, Any]] = []
@@ -1166,7 +1187,7 @@ def _scd2_declared_column_types(fields_to_emit: list[dict[str, Any]]) -> list[tu
 def _scd2_state_column_types(spec: dict[str, Any], declared_scd2_fields: list[dict[str, Any]]) -> list[tuple[str, str]]:
     declared_by_key = {case_key(str(field["id"])): field for field in declared_scd2_fields}
     columns: list[tuple[str, str]] = []
-    for column_id in SCD2_STATE_COLUMN_IDS:
+    for column_id in _scd2_state_column_ids(spec):
         declared_field = declared_by_key.get(case_key(column_id))
         if declared_field is not None:
             columns.append((str(declared_field["id"]), str(declared_field["data_type"])))
@@ -1175,10 +1196,8 @@ def _scd2_state_column_types(spec: dict[str, Any], declared_scd2_fields: list[di
         metadata_name = {
             case_key("IS_CURRENT_FLAG"): "is_current_flag",
             case_key("IS_DELETED_FLAG"): "is_deleted_flag",
-            case_key("VALID_FROM_DATETIME"): "valid_from_datetime",
-            case_key("VALID_TO_DATETIME"): "valid_to_datetime",
-        }[generated_key]
-        data_type = _scd2_timestamp_data_type(spec) if metadata_name in {"valid_from_datetime", "valid_to_datetime"} else GENERATED_METADATA_FIELD_TYPES[metadata_name]
+        }.get(generated_key)
+        data_type = _scd2_validity_data_type(spec) if column_id in {_scd2_valid_from_column(spec), _scd2_valid_to_column(spec)} else GENERATED_METADATA_FIELD_TYPES[str(metadata_name)]
         columns.append((column_id, data_type))
     return columns
 
@@ -1197,7 +1216,7 @@ def _scd2_output_lines(spec: dict[str, Any]) -> list[str]:
     lines.extend(_surrogate_key_output_lines(spec))
     lines.extend(_business_key_output_lines(spec))
     lines.extend(f"    {_quote_identifier(field['id'])}" for field in business_fields)
-    lines.extend(f"    {column_id}" for column_id in SCD2_STATE_COLUMN_IDS)
+    lines.extend(f"    {column_id}" for column_id in _scd2_state_column_ids(spec))
     lines.append("    BUSINESS_DATA_HASH")
     lines.extend(f"    {_quote_identifier(field['id'])}" for field in source_audit_fields)
     lines.extend(
@@ -1437,13 +1456,13 @@ def _scd2_window_and_flag_lines(
         valid_from_expression_lines = [
             "        case",
             f"            when row_number() over ({_scd2_window_clause(spec, 'TMS_VALID_FROM_DATETIME_CANDIDATE')}) = 1",
-            f"            then cast({_sql_string(SCD2_START_OF_TIME)} as {_scd2_timestamp_data_type(spec)})",
+            f"            then cast({_sql_string(_scd2_start_of_time(spec))} as {_scd2_validity_data_type(spec)})",
             "            else TMS_VALID_FROM_DATETIME_CANDIDATE",
-            "        end as VALID_FROM_DATETIME",
+            f"        end as {_scd2_valid_from_column(spec)}",
         ]
     else:
         valid_from_expression_lines = [
-            "        TMS_VALID_FROM_DATETIME_CANDIDATE as VALID_FROM_DATETIME",
+            f"        TMS_VALID_FROM_DATETIME_CANDIDATE as {_scd2_valid_from_column(spec)}",
         ]
     lines = [
         "valid_from_rows as (",
@@ -1455,14 +1474,14 @@ def _scd2_window_and_flag_lines(
         "windowed_rows as (",
         "    select",
         "        *,",
-        f"        {_valid_to_datetime_expression(spec)} as VALID_TO_DATETIME",
+        f"        {_valid_to_datetime_expression(spec)} as {_scd2_valid_to_column(spec)}",
         "    from valid_from_rows",
         "),",
         "flagged_rows as (",
         "    select",
         "        *,",
         "        case",
-        f"            when VALID_TO_DATETIME = {_scd2_end_of_time_expression(spec)}",
+        f"            when {_scd2_valid_to_column(spec)} = {_scd2_end_of_time_expression(spec)}",
         "            then 'Y'",
         "            else 'N'",
         "        end as IS_CURRENT_FLAG,",
@@ -1482,7 +1501,7 @@ def _scd2_window_and_flag_lines(
 def _scd2_post_load_validation_rows_lines(spec: dict[str, Any]) -> list[str]:
     if not _scd2_validation_enabled(spec):
         return []
-    columns = [*_business_key_partition_columns(spec), "VALID_FROM_DATETIME", "VALID_TO_DATETIME"]
+    columns = [*_business_key_partition_columns(spec), _scd2_valid_from_column(spec), _scd2_valid_to_column(spec)]
     if _change_type(spec) == "scd2_derived" and _scd_validation_scope(spec) == "affected_window":
         return [
             "post_load_validation_rows as (",
@@ -1518,21 +1537,21 @@ def _scd2_validation_cte_lines(spec: dict[str, Any], *, input_cte: str = "flagge
     # SCD2 validity windows are inclusive: VALID_TO_DATETIME is still live.
     # Adjacent continuous rows must therefore start one timestamp tick after the previous row ends.
     conditions = [
-        "VALID_FROM_DATETIME is null",
-        "VALID_TO_DATETIME is null",
-        "VALID_TO_DATETIME <= VALID_FROM_DATETIME",
-        "TMS_NEXT_VALID_FROM_DATETIME <= VALID_TO_DATETIME",
+        f"{_scd2_valid_from_column(spec)} is null",
+        f"{_scd2_valid_to_column(spec)} is null",
+        f"{_scd2_valid_to_column(spec)} <= {_scd2_valid_from_column(spec)}",
+        f"TMS_NEXT_VALID_FROM_DATETIME <= {_scd2_valid_to_column(spec)}",
     ]
     if _scd2_validation_mode(spec) == "continuous":
         conditions.extend(
             [
                 (
                     "TMS_NEXT_VALID_FROM_DATETIME is not null "
-                    "and TMS_NEXT_VALID_FROM_DATETIME <> dateadd(nanosecond, 1, VALID_TO_DATETIME)"
+                    f"and TMS_NEXT_VALID_FROM_DATETIME <> dateadd({_scd2_validity_offset(spec)['unit']}, {-_scd2_validity_offset(spec)['value']}, {_scd2_valid_to_column(spec)})"
                 ),
                 (
                     "TMS_NEXT_VALID_FROM_DATETIME is null "
-                    f"and VALID_TO_DATETIME < cast({_sql_string(SCD2_END_OF_TIME_VALIDATION_THRESHOLD)} as {_scd2_timestamp_data_type(spec)})"
+                    f"and {_scd2_valid_to_column(spec)} < cast({_sql_string(_scd2_end_of_time_validation_threshold(spec))} as {_scd2_validity_data_type(spec)})"
                 ),
             ]
         )
@@ -1542,7 +1561,7 @@ def _scd2_validation_cte_lines(spec: dict[str, Any], *, input_cte: str = "flagge
         "    select",
         "        *,",
         (
-            f"        lead(VALID_FROM_DATETIME) over ({_scd2_window_clause(spec, 'VALID_FROM_DATETIME')}) "
+            f"        lead({_scd2_valid_from_column(spec)}) over ({_scd2_window_clause(spec, _scd2_valid_from_column(spec))}) "
             "as TMS_NEXT_VALID_FROM_DATETIME"
         ),
         f"    from {input_cte}",
@@ -2054,10 +2073,19 @@ def _apply_unit_test_scd2_validity(
     if valid_to_values is _SKIP_EXPECTED:
         return
     for expected_row, valid_from_value in zip(expected_rows, output_valid_from_values, strict=True):
-        expected_row["VALID_FROM_DATETIME"] = _format_unit_test_datetime(valid_from_value)
+        expected_row[_scd2_valid_from_column(spec)] = _format_unit_test_validity(spec, valid_from_value)
     for expected_row, valid_to_value in zip(expected_rows, valid_to_values, strict=True):
-        expected_row["VALID_TO_DATETIME"] = _format_unit_test_datetime(valid_to_value)
-        expected_row["IS_CURRENT_FLAG"] = "Y" if _format_unit_test_datetime(valid_to_value) == SCD2_END_OF_TIME else "N"
+        formatted_valid_to = _format_unit_test_validity(spec, valid_to_value)
+        expected_row[_scd2_valid_to_column(spec)] = formatted_valid_to
+        expected_row["IS_CURRENT_FLAG"] = "Y" if formatted_valid_to == _scd2_end_of_time_unit_test_value(spec) else "N"
+
+
+def _format_unit_test_validity(spec: dict[str, Any], value: datetime) -> str:
+    return value.date().isoformat() if scd2_validity_data_type(spec) == "date" else _format_unit_test_datetime(value)
+
+
+def _scd2_end_of_time_unit_test_value(spec: dict[str, Any]) -> str:
+    return "9999-12-31" if scd2_validity_data_type(spec) == "date" else SCD2_END_OF_TIME
 
 
 def _unit_test_valid_from_datetime(
@@ -2121,7 +2149,7 @@ def _continuous_unit_test_valid_from_datetimes(
         return adjusted
     for group in _unit_test_business_key_groups(spec, transformed_rows, adjusted):
         first_index = group[0]
-        adjusted[first_index] = _parse_unit_test_datetime(SCD2_START_OF_TIME)
+        adjusted[first_index] = _parse_unit_test_datetime(_scd2_start_of_time(spec))
     return adjusted
 
 
@@ -2130,10 +2158,12 @@ def _continuous_unit_test_valid_to_datetimes(
     transformed_rows: list[dict[str, Any]],
     valid_from_values: list[datetime],
 ) -> list[datetime]:
-    valid_to_values = [_parse_unit_test_datetime(SCD2_END_OF_TIME) for _ in valid_from_values]
+    end_of_time = "9999-12-31T00:00:00Z" if scd2_validity_data_type(spec) == "date" else SCD2_END_OF_TIME
+    valid_to_values = [_parse_unit_test_datetime(end_of_time) for _ in valid_from_values]
     for group in _unit_test_business_key_groups(spec, transformed_rows, valid_from_values):
         for current_index, next_index in zip(group, group[1:]):
-            valid_to_values[current_index] = valid_from_values[next_index]
+            next_value = valid_from_values[next_index]
+            valid_to_values[current_index] = next_value - timedelta(days=1 if scd2_validity_data_type(spec) == "date" else 0)
     return valid_to_values
 
 
@@ -2479,8 +2509,8 @@ def _scd2_manual_validation_rows_cte(spec: dict[str, Any], *, trailing_comma: bo
     replaced_row_join = _candidate_join_condition("incoming_manual_rows", "existing_manual_rows", incremental_key_columns)
     invalid_key_join = _candidate_join_condition("incoming_manual_rows", "manual_invalid_candidate_rows", business_key_columns)
     partition_by = ", ".join(business_key_columns)
-    valid_from_column = _physical_name("valid_from_datetime")
-    valid_to_column = _physical_name("valid_to_datetime")
+    valid_from_column = _scd2_valid_from_column(spec)
+    valid_to_column = _scd2_valid_to_column(spec)
     is_current_column = _physical_name("is_current_flag")
     return [
         "{% if flags.FULL_REFRESH %}",
@@ -2549,7 +2579,7 @@ def _scd2_manual_validation_rows_cte(spec: dict[str, Any], *, trailing_comma: bo
         (
             f"            case when {valid_to_column} is not null and {valid_from_column} is not null "
             f"and {valid_to_column} <= {valid_from_column} "
-            f"then {_sql_string('scd2_manual valid_to_datetime must be after valid_from_datetime')} end,"
+            f"then {_sql_string('scd2_manual valid_to must be after valid_from')} end,"
         ),
         (
             f"            case when TMS_NEXT_VALID_FROM_DATETIME is not null and {valid_to_column} is not null "
@@ -2599,7 +2629,7 @@ def _scd2_manual_incoming_candidate_select_lines(spec: dict[str, Any]) -> list[s
         "        TMS_SOURCE_ROW_NUMBER",
         "        'Y' as TMS_IS_INCOMING_ROW",
     ]
-    for field in fields(spec):
+    for field in _input_fields(spec):
         lines.append(
             f"        cast({_field_expression(field)} as {field['data_type']}) as {_quote_identifier(field['id'])}"
         )
@@ -2612,7 +2642,7 @@ def _scd2_manual_existing_candidate_select_lines(spec: dict[str, Any]) -> list[s
         "        cast(null as number) as TMS_SOURCE_ROW_NUMBER",
         "        'N' as TMS_IS_INCOMING_ROW",
     ]
-    for field in fields(spec):
+    for field in _input_fields(spec):
         column = _quote_identifier(field["id"])
         lines.append(f"        existing_target.{column} as {column}")
     if _business_key_enabled(spec):
@@ -2626,7 +2656,7 @@ def _scd2_manual_empty_candidate_select_lines(spec: dict[str, Any]) -> list[str]
         "        cast(null as number) as TMS_SOURCE_ROW_NUMBER",
         "        cast(null as varchar(1)) as TMS_IS_INCOMING_ROW",
     ]
-    for field in fields(spec):
+    for field in _input_fields(spec):
         lines.append(f"        cast(null as {field['data_type']}) as {_quote_identifier(field['id'])}")
     if _business_key_enabled(spec):
         lines.append(f"        cast(null as {BUSINESS_KEY_DATA_TYPE}) as {_business_key_column(spec)}")
@@ -2683,6 +2713,9 @@ def _scd_config(spec: dict[str, Any]) -> dict[str, Any]:
 
 
 def _valid_from_datetime_config(spec: dict[str, Any]) -> dict[str, Any]:
+    configured = scd2_validity_config(spec).get("valid_from")
+    if isinstance(configured, dict) and isinstance(configured.get("source"), dict):
+        return configured
     if _change_type(spec) == "scd2_derived":
         return {}
     value = _insert_time_value(spec)
@@ -2748,8 +2781,8 @@ def _delete_detection_field_condition(spec: dict[str, Any]) -> str:
 
 def _valid_from_datetime_expression(spec: dict[str, Any]) -> str:
     config = _valid_from_datetime_config(spec)
-    if _change_type(spec) == "scd2_derived":
-        return f"cast({_field_expression(_field_by_id(spec, 'valid_from_datetime'))} as {_scd2_timestamp_data_type(spec)})"
+    if _change_type(spec) in {"scd2_derived", "scd2_manual"}:
+        return f"cast({_field_expression(_field_by_id(spec, _scd2_valid_from_column(spec)))} as {_scd2_validity_data_type(spec)})"
     return f"cast({_sql_scalar(config['value'])} as {_scd2_timestamp_data_type(spec)})"
 
 
@@ -2760,7 +2793,7 @@ def _valid_to_datetime_expression(spec: dict[str, Any]) -> str:
     return (
         "coalesce("
         f"dateadd({offset['unit']}, {offset['value']}, "
-        f"lead(VALID_FROM_DATETIME) over ({_scd2_window_clause(spec, 'VALID_FROM_DATETIME')}))"
+        f"lead({_scd2_valid_from_column(spec)}) over ({_scd2_window_clause(spec, _scd2_valid_from_column(spec))}))"
         ", "
         f"{_scd2_end_of_time_expression(spec)}"
         ")"
@@ -2768,29 +2801,46 @@ def _valid_to_datetime_expression(spec: dict[str, Any]) -> str:
 
 
 def _valid_to_datetime_offset(spec: dict[str, Any]) -> dict[str, Any]:
-    config = _scd_config(spec).get("valid_to_datetime", {})
+    return _scd2_validity_offset(spec)
+
+
+def _scd2_validity_offset(spec: dict[str, Any]) -> dict[str, Any]:
+    validity = scd2_validity_config(spec)
+    config = validity.get("valid_to") if isinstance(validity.get("valid_to"), dict) else _scd_config(spec).get("valid_to_datetime", {})
     if isinstance(config, dict):
         offset = config.get("offset", {})
         if isinstance(offset, dict):
-            unit = str(offset.get("unit", "nanosecond"))
+            unit = str(offset.get("unit", "day" if _scd2_validity_data_type(spec) == "date" else "nanosecond"))
             value = offset.get("value", -1)
-            if unit in {"nanosecond", "second"} and isinstance(value, int):
+            allowed_units = {"day"} if _scd2_validity_data_type(spec) == "date" else {"nanosecond", "second"}
+            if unit in allowed_units and isinstance(value, int):
                 return {"unit": unit, "value": value}
-    return {"unit": "nanosecond", "value": -1}
+    return {"unit": "day" if _scd2_validity_data_type(spec) == "date" else "nanosecond", "value": -1}
 
 
 def _scd2_end_of_time_expression(spec: dict[str, Any]) -> str:
-    config = _scd_config(spec).get("valid_to_datetime", {})
+    validity = scd2_validity_config(spec)
+    config = validity.get("valid_to") if isinstance(validity.get("valid_to"), dict) else _scd_config(spec).get("valid_to_datetime", {})
     if isinstance(config, dict) and config.get("end_of_time") is not None:
-        return f"cast({_sql_string(str(config['end_of_time']))} as {_scd2_timestamp_data_type(spec)})"
-    return f"cast({_sql_string(SCD2_END_OF_TIME)} as {_scd2_timestamp_data_type(spec)})"
+        return f"cast({_sql_string(str(config['end_of_time']))} as {_scd2_validity_data_type(spec)})"
+    return f"cast({_sql_string('9999-12-31' if _scd2_validity_data_type(spec) == 'date' else SCD2_END_OF_TIME)} as {_scd2_validity_data_type(spec)})"
 
 
 def _scd2_timestamp_data_type(spec: dict[str, Any]) -> str:
-    configured_type = _scd_config(spec).get("timestamp_data_type")
-    if configured_type in {"timestamp_ltz", "timestamp_tz", "timestamp_ntz"}:
-        return str(configured_type)
-    return GENERATED_METADATA_FIELD_TYPES["valid_from_datetime"]
+    return _scd2_validity_data_type(spec)
+
+
+def _scd2_validity_data_type(spec: dict[str, Any]) -> str:
+    """Compatibility alias for validity SQL helpers."""
+    return scd2_validity_data_type(spec)
+
+
+def _scd2_start_of_time(spec: dict[str, Any]) -> str:
+    return "0001-01-01" if _scd2_validity_data_type(spec) == "date" else SCD2_START_OF_TIME
+
+
+def _scd2_end_of_time_validation_threshold(spec: dict[str, Any]) -> str:
+    return "9999-12-30" if _scd2_validity_data_type(spec) == "date" else SCD2_END_OF_TIME_VALIDATION_THRESHOLD
 
 
 def _scd_validation_scope(spec: dict[str, Any]) -> str:
@@ -2928,7 +2978,7 @@ def _surrogate_key_output_lines(spec: dict[str, Any]) -> list[str]:
         return [
             f"    cast(uuid_string('{SCD2_SURROGATE_KEY_NAMESPACE}', "
             f"concat_ws('|', coalesce(cast({_business_key_column(spec)} as varchar), ''), "
-            "to_char(cast(VALID_FROM_DATETIME as date), 'YYYY-MM-DD'))) "
+            f"to_char(cast({_scd2_valid_from_column(spec)} as date), 'YYYY-MM-DD'))) "
             f"as {SURROGATE_KEY_DATA_TYPE}) as {_surrogate_key_column(spec)}"
         ]
     return [f"    {_surrogate_key_column(spec)}"]
@@ -2956,7 +3006,7 @@ def _surrogate_key_null_select_lines(spec: dict[str, Any]) -> list[str]:
 
 def _field_by_id(spec: dict[str, Any], field_id: str) -> dict[str, Any]:
     key = case_key(field_id)
-    for field in fields(spec):
+    for field in _input_fields(spec):
         if isinstance(field, dict) and isinstance(field.get("id"), str) and case_key(field["id"]) == key:
             return field
     raise ValueError(f"field `{field_id}` does not exist")

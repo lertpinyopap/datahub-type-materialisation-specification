@@ -1890,6 +1890,37 @@ def test_scd2_auto_timestamp_data_type_override_is_used_consistently(tmp_path: P
     assert "cast(null as timestamp_ntz) as VALID_FROM_DATETIME" not in model_sql
 
 
+def test_scd2_auto_date_validity_uses_configured_columns_and_day_windows(tmp_path: Path) -> None:
+    result, output_dir = generate(
+        tmp_path,
+        csv_generation_spec(
+            extra_control="""
+            control_data:
+              change_type: scd2_auto
+              scd:
+                insert_time: "{{ var('insert_time') }}"
+                validity:
+                  data_type: date
+                  valid_from:
+                    column: VALID_FROM_DATE
+                  valid_to:
+                    column: VALID_TO_DATE
+            """,
+        ),
+    )
+
+    assert result.errors == []
+    model_sql = (output_dir / "models" / "generated" / "account.sql").read_text(encoding="utf-8")
+    assert "cast('{{ var('insert_time') }}' as date) as TMS_VALID_FROM_DATETIME_CANDIDATE" in model_sql
+    assert "end as VALID_FROM_DATE" in model_sql
+    assert "dateadd(day, -1, lead(VALID_FROM_DATE)" in model_sql
+    assert "cast('9999-12-31' as date)" in model_sql
+    assert "(VALID_TO_DATE <= VALID_FROM_DATE)" in model_sql
+    assert "dateadd(day, 1, VALID_TO_DATE)" in model_sql
+    assert "end as VALID_FROM_DATETIME" not in model_sql
+    assert " as VALID_TO_DATETIME" not in model_sql
+
+
 def test_scd2_quarantine_excludes_invalid_business_key_histories(tmp_path: Path) -> None:
     result, output_dir = generate(
         tmp_path,

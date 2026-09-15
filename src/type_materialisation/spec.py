@@ -51,6 +51,62 @@ def fields(spec: dict[str, Any]) -> list[dict[str, Any]]:
     return value if isinstance(value, list) else []
 
 
+def scd2_validity_config(spec: dict[str, Any]) -> dict[str, Any]:
+    """Return the optional, declarative SCD2 validity contract."""
+    control_data = spec.get("control_data")
+    if not isinstance(control_data, dict):
+        return {}
+    scd = control_data.get("scd")
+    if not isinstance(scd, dict):
+        return {}
+    validity = scd.get("validity")
+    return validity if isinstance(validity, dict) else {}
+
+
+def scd2_validity_column(spec: dict[str, Any], boundary: str) -> str:
+    validity = scd2_validity_config(spec)
+    boundary_config = validity.get(boundary)
+    if isinstance(boundary_config, dict) and isinstance(boundary_config.get("column"), str):
+        return str(boundary_config["column"])
+    return "VALID_FROM_DATETIME" if boundary == "valid_from" else "VALID_TO_DATETIME"
+
+
+def scd2_validity_data_type(spec: dict[str, Any]) -> str:
+    configured = scd2_validity_config(spec).get("data_type")
+    if configured in {"date", "timestamp_ltz", "timestamp_tz", "timestamp_ntz"}:
+        return str(configured)
+    control_data = spec.get("control_data")
+    scd = control_data.get("scd") if isinstance(control_data, dict) else None
+    legacy = scd.get("timestamp_data_type") if isinstance(scd, dict) else None
+    if legacy in {"timestamp_ltz", "timestamp_tz", "timestamp_ntz"}:
+        return str(legacy)
+    return GENERATED_METADATA_FIELD_TYPES["valid_from_datetime"]
+
+
+def scd2_validity_fields(spec: dict[str, Any]) -> list[dict[str, Any]]:
+    """Expose configured source-backed boundaries as virtual input fields.
+
+    Validity is generated metadata, so these fields must not be repeated under
+    ``target.fields``.  The virtual fields let the normal source projection,
+    transforms, and validation machinery process boundary source mappings.
+    """
+    result: list[dict[str, Any]] = []
+    validity = scd2_validity_config(spec)
+    data_type = scd2_validity_data_type(spec)
+    declared = {case_key(str(field.get("id", ""))) for field in fields(spec) if isinstance(field, dict)}
+    for boundary in ("valid_from", "valid_to"):
+        config = validity.get(boundary)
+        if not isinstance(config, dict) or not isinstance(config.get("source"), dict):
+            continue
+        column = scd2_validity_column(spec, boundary)
+        if case_key(column) in declared:
+            continue
+        field = {key: value for key, value in config.items() if key != "column"}
+        field.update({"id": column, "data_type": data_type})
+        result.append(field)
+    return result
+
+
 def _change_type(spec: dict[str, Any]) -> str | None:
     control_data = spec.get("control_data", {})
     if not isinstance(control_data, dict):
@@ -144,9 +200,19 @@ def _validate_target_fields(spec: dict[str, Any]) -> list[Diagnostic]:
             continue
         key = case_key(field_id)
         location = f"$.target.fields[{index}].id"
-        if key in reserved_generated_fields and not (
-            _change_type(spec) == "scd2_derived"
+        validity_keys = {
+            case_key(scd2_validity_column(spec, "valid_from")),
+            case_key(scd2_validity_column(spec, "valid_to")),
+        }
+        legacy_scd2_validity_field = (
+            not scd2_validity_config(spec)
+            and _change_type(spec) in {"scd2_derived", "scd2_manual"}
             and key in {"valid_from_datetime", "valid_to_datetime"}
+        )
+        if (key in reserved_generated_fields and not legacy_scd2_validity_field) or (
+            _change_type(spec) in {"scd2_auto", "scd2_derived", "scd2_manual"}
+            and key in validity_keys
+            and not legacy_scd2_validity_field
         ):
             diagnostics.append(Diagnostic("uses a reserved generated metadata field id", location))
         if key in seen:
@@ -493,28 +559,36 @@ def _validate_scd(spec: dict[str, Any], *, abstract: bool) -> list[Diagnostic]:
         if not isinstance(scd, dict) or "insert_time" not in scd:
             diagnostics.append(Diagnostic("`scd.insert_time` is required when `change_type` is scd2_auto", "$.control_data.scd.insert_time"))
 
+    validity = scd2_validity_config(spec)
     if change_type == "scd2_derived":
         if isinstance(scd, dict):
-            for field_id in ("valid_from_datetime",):
-                field = next((field for field in target_fields if isinstance(field, dict) and case_key(field.get("id", "")) == field_id), None)
-                if field is None:
-                    diagnostics.append(Diagnostic(f"`scd2_derived` requires target field `{field_id}`", "$.target.fields"))
-                elif not isinstance(field.get("data_type"), str) or not _is_timestamp_type(field["data_type"]):
-                    diagnostics.append(Diagnostic(f"`{field_id}` must use a timestamp data type for `scd2_derived`", "$.target.fields"))
-            valid_to_field = next(
-                (field for field in target_fields if isinstance(field, dict) and case_key(field.get("id", "")) == "valid_to_datetime"),
-                None,
-            )
-            if valid_to_field is not None and (
-                not isinstance(valid_to_field.get("data_type"), str)
-                or not _is_timestamp_type(valid_to_field["data_type"])
-            ):
-                diagnostics.append(
-                    Diagnostic(
-                        "`valid_to_datetime` must use a timestamp data type for `scd2_derived`",
-                        "$.target.fields",
-                    )
+            if validity:
+                valid_from = validity.get("valid_from")
+                if not isinstance(valid_from, dict) or not isinstance(valid_from.get("source"), dict):
+                    diagnostics.append(Diagnostic("`scd2_derived` requires `scd.validity.valid_from.source`", "$.control_data.scd.validity.valid_from"))
+                if scd2_validity_data_type(spec) not in {"date", "timestamp_ltz", "timestamp_tz", "timestamp_ntz"}:
+                    diagnostics.append(Diagnostic("`scd.validity.data_type` must be date or a timestamp type", "$.control_data.scd.validity.data_type"))
+            else:
+                for field_id in ("valid_from_datetime",):
+                    field = next((field for field in target_fields if isinstance(field, dict) and case_key(field.get("id", "")) == field_id), None)
+                    if field is None:
+                        diagnostics.append(Diagnostic(f"`scd2_derived` requires target field `{field_id}`", "$.target.fields"))
+                    elif not isinstance(field.get("data_type"), str) or not _is_timestamp_type(field["data_type"]):
+                        diagnostics.append(Diagnostic(f"`{field_id}` must use a timestamp data type for `scd2_derived`", "$.target.fields"))
+                valid_to_field = next(
+                    (field for field in target_fields if isinstance(field, dict) and case_key(field.get("id", "")) == "valid_to_datetime"),
+                    None,
                 )
+                if valid_to_field is not None and (
+                    not isinstance(valid_to_field.get("data_type"), str)
+                    or not _is_timestamp_type(valid_to_field["data_type"])
+                ):
+                    diagnostics.append(
+                        Diagnostic(
+                            "`valid_to_datetime` must use a timestamp data type for `scd2_derived`",
+                            "$.target.fields",
+                        )
+                    )
             if "valid_from_datetime" in scd:
                 diagnostics.append(
                     Diagnostic(
@@ -541,7 +615,7 @@ def _validate_scd(spec: dict[str, Any], *, abstract: bool) -> list[Diagnostic]:
 
     if change_type == "scd2_manual":
         if isinstance(scd, dict):
-            invalid_keys = set(scd) - {"update_mode", "update_key"}
+            invalid_keys = set(scd) - {"update_mode", "update_key", "validity"}
             if invalid_keys:
                 diagnostics.append(
                     Diagnostic(
@@ -561,7 +635,8 @@ def _validate_scd(spec: dict[str, Any], *, abstract: bool) -> list[Diagnostic]:
                 update_key_fields = update_key.get("fields", [])
                 if isinstance(update_key_fields, list):
                     for index, field_id in enumerate(update_key_fields):
-                        if isinstance(field_id, str) and field_ids and case_key(field_id) not in field_ids:
+                        allowed_field_ids = field_ids | {case_key(scd2_validity_column(spec, "valid_from")), case_key(scd2_validity_column(spec, "valid_to"))}
+                        if isinstance(field_id, str) and allowed_field_ids and case_key(field_id) not in allowed_field_ids:
                             diagnostics.append(
                                 Diagnostic(
                                     "update key field does not exist in target.fields",
@@ -798,6 +873,8 @@ def _business_data_hash_ineligible_field_ids(spec: dict[str, Any]) -> set[str]:
     if _change_type(spec) == "scd2_manual":
         excluded_fields.update(SCD2_MANUAL_FIELD_TYPES)
         excluded_fields.update(_scd2_manual_update_key_field_ids(spec))
+    if _change_type(spec) in {"scd2_auto", "scd2_derived", "scd2_manual"}:
+        excluded_fields.update({case_key(scd2_validity_column(spec, "valid_from")), case_key(scd2_validity_column(spec, "valid_to"))})
     return excluded_fields
 
 
@@ -810,15 +887,22 @@ def _scd2_manual_update_key_field_ids(spec: dict[str, Any]) -> set[str]:
         return set()
     update_key = scd.get("update_key")
     if not isinstance(update_key, dict):
-        return {"valid_from_datetime"}
+        return {case_key(scd2_validity_column(spec, "valid_from"))}
     configured_fields = update_key.get("fields")
     if not isinstance(configured_fields, list) or not configured_fields:
-        return {"valid_from_datetime"}
+        return {case_key(scd2_validity_column(spec, "valid_from"))}
     return {case_key(field_id) for field_id in configured_fields if isinstance(field_id, str)}
 
 
 def _validate_scd2_manual_fields(spec: dict[str, Any]) -> list[Diagnostic]:
     diagnostics: list[Diagnostic] = []
+    validity = scd2_validity_config(spec)
+    if validity:
+        for boundary in ("valid_from", "valid_to"):
+            config = validity.get(boundary)
+            if not isinstance(config, dict) or not isinstance(config.get("source"), dict):
+                diagnostics.append(Diagnostic(f"`scd2_manual` requires `scd.validity.{boundary}.source`", f"$.control_data.scd.validity.{boundary}"))
+        return diagnostics
     fields_by_id = {
         case_key(field["id"]): (index, field)
         for index, field in enumerate(fields(spec))

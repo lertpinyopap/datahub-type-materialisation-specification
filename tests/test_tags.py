@@ -44,8 +44,13 @@ def test_target_and_field_tags_generate_snowflake_post_hooks(tmp_path: Path) -> 
 
     assert result.errors == []
     final_sql = (tmp_path / "generated" / "models" / "generated" / "customer.sql").read_text()
-    assert 'alter table {{ this }} modify column FIRST_NAME set tag PII_CATEGORY = \'IDENTIFIER\'' in final_sql
-    assert 'alter table {{ this }} modify column FIRST_NAME set tag PCI_CATEGORY = \'PCI\'' in final_sql
+    source_sql = (tmp_path / "generated" / "models" / "generated" / "customer__source.sql").read_text()
+    tag_macro_sql = (tmp_path / "generated" / "macros" / "generated" / "tag_hooks.sql").read_text()
+    assert "{{ tms_apply_tag_" in final_sql
+    assert "{{ tms_apply_tag_" in source_sql
+    assert "alter table {{ this }} modify column FIRST_NAME set tag PII_CATEGORY = 'IDENTIFIER'" in tag_macro_sql
+    assert "alter view {{ this }} modify column FIRST_NAME set tag PCI_CATEGORY = 'PCI'" in tag_macro_sql
+    assert "{{ log('TMS tag hook: ' ~ (tms_tag_statement | trim), info=true) }}" in tag_macro_sql
 
 
 def test_apply_governance_tag_application_generates_procedure_post_hook(tmp_path: Path) -> None:
@@ -93,17 +98,21 @@ def test_apply_governance_tag_application_generates_procedure_post_hook(tmp_path
 
     assert result.errors == []
     final_sql = (tmp_path / "generated" / "models" / "generated" / "customer.sql").read_text()
+    source_sql = (tmp_path / "generated" / "models" / "generated" / "customer__source.sql").read_text()
+    tag_macro_sql = (tmp_path / "generated" / "macros" / "generated" / "tag_hooks.sql").read_text()
+    assert "{{ tms_apply_tag_" in final_sql
     assert (
-        '"call NONPROD_GOVERNANCE.OVERRIDES.APPLY_GOVERNANCE(\'{{ this.database | upper }}\', '
-        "'{{ this.schema | upper }}', '{{ this.identifier | upper }}')\""
-        in final_sql
+        "call NONPROD_GOVERNANCE.OVERRIDES.APPLY_GOVERNANCE('{{ this.database | upper }}', "
+        "'{{ this.schema | upper }}', '{{ this.identifier | upper }}')"
+        in tag_macro_sql
     )
-    assert "merge into NONPROD_GOVERNANCE.METADATA.CONTRACT_COLUMNS as t" in final_sql
-    assert "'FIRST_NAME' as column_name" in final_sql
-    assert "'IDENTIFIER' as pii_category" in final_sql
-    assert "null as pci_category" in final_sql
-    assert "'Customer first name' as description" in final_sql
-    assert final_sql.index("merge into NONPROD_GOVERNANCE.METADATA.CONTRACT_COLUMNS as t") < final_sql.index(
+    assert "merge into NONPROD_GOVERNANCE.METADATA.CONTRACT_COLUMNS as t" in tag_macro_sql
+    assert "'FIRST_NAME' as column_name" in tag_macro_sql
+    assert "'IDENTIFIER' as pii_category" in tag_macro_sql
+    assert "null as pci_category" in tag_macro_sql
+    assert "'Customer first name' as description" in tag_macro_sql
+    assert tag_macro_sql.index("merge into NONPROD_GOVERNANCE.METADATA.CONTRACT_COLUMNS as t") < tag_macro_sql.index(
         "call NONPROD_GOVERNANCE.OVERRIDES.APPLY_GOVERNANCE"
     )
     assert "alter table {{ this }} modify column FIRST_NAME set tag" not in final_sql
+    assert "{{ tms_apply_tag_" in source_sql
