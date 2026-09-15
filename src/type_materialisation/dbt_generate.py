@@ -259,11 +259,11 @@ def _unsupported_for_initial_dbt_generation(spec: dict[str, Any]) -> list[Diagno
             )
         )
     if _change_type(spec) == "scd2_manual":
-        invalid_keys = set(scd) - {"update_mode", "update_key"}
+        invalid_keys = set(scd) - {"update_mode", "update_key", "validity"}
         if invalid_keys:
             diagnostics.append(
                 Diagnostic(
-                    "`scd2_manual` supports only `scd.update_mode` and `scd.update_key`",
+                    "`scd2_manual` supports only `scd.update_mode`, `scd.update_key`, and `scd.validity`",
                     "$.control_data.scd",
                 )
             )
