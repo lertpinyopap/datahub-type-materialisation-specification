@@ -146,33 +146,6 @@ def _tag_hook_log_message(statement: str) -> str:
     return "TMS tag hook: applying table or column tag"
 
 
-def _source_view_tag_statements(spec: dict[str, Any]) -> list[str]:
-    statements: list[str] = []
-    for field in fields(spec):
-        source = field.get("source", {})
-        if not isinstance(source, dict):
-            source = {}
-        if isinstance(source.get("macro"), str) or "fixed_value" in source or isinstance(source.get("snowflake_path"), str):
-            column_name = str(field["id"])
-        elif isinstance(source.get("column"), str):
-            column_name = str(source["column"])
-        elif isinstance(source.get("pos"), int):
-            column_name = f"COL_{source['pos']}"
-        else:
-            column_name = str(field["id"])
-        field_tags = field.get("tags", {})
-        if not isinstance(field_tags, dict):
-            continue
-        for tag_name, tag_value in field_tags.items():
-            statements.append(
-                "alter view {{ this }} modify column "
-                f"{_quote_identifier(column_name)} set tag "
-                f"{_tag_identifier(tag_name)} = {_sql_string(str(tag_value))}"
-            )
-    return statements
-
-
-
 def _governance_contract_merge_statements(spec: dict[str, Any]) -> list[str]:
     """Return one idempotent contract upsert per classified target field."""
     target = spec.get("target", {})
@@ -284,7 +257,7 @@ def _post_hook_config_lines(statements: list[str]) -> list[str]:
 
 def _render_tag_hooks_macro(spec: dict[str, Any]) -> str:
     template = files("type_materialisation").joinpath("templates", "tag_hooks.sql").read_text(encoding="utf-8")
-    statements = [*_tag_post_hook_statements(spec), *_source_view_tag_statements(spec)]
+    statements = _tag_post_hook_statements(spec)
     rendered: list[str] = []
     for statement in dict.fromkeys(statements):
         rendered.append(

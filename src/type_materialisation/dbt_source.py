@@ -10,7 +10,6 @@ from typing import Any
 from .errors import Diagnostic
 from .source_files import csv_load_method, csv_seed_file_path
 from .spec import case_key, fields, scd2_validity_fields
-from .dbt_hooks import _source_view_tag_statements, _tag_post_hook_config_lines
 DBT_PROJECT_NAME = "type_materialisation_generated"
 
 
@@ -41,9 +40,6 @@ def _scd2_derived_source_helper_lines(spec: dict[str, Any]) -> list[str]:
     from .dbt_generate import _scd2_derived_source_helper_lines as renderer
     return renderer(spec)
 
-
-def _source_view_tag_post_hook_lines(spec: dict[str, Any]) -> list[str]:
-    return _tag_post_hook_config_lines(_source_view_tag_statements(spec))
 
 def _write_source_model(spec: dict[str, Any], options: GenerateDbtOptions, result: DbtGenerationResult) -> None:
     source = spec["source"]
@@ -116,7 +112,6 @@ def _write_csv_source_model(spec: dict[str, Any], options: GenerateDbtOptions, r
                 database=_target_relation_config(spec).database,
                 schema=_staging_schema_config_expression(spec),
                 alias=model_name,
-                extra_config_lines=_source_view_tag_post_hook_lines(spec),
                 schema_is_expression=True,
             ),
             "  )",
@@ -201,7 +196,6 @@ def _write_csv_seed_source_model(spec: dict[str, Any], options: GenerateDbtOptio
                 database=_target_relation_config(spec).database,
                 schema=_staging_schema_config_expression(spec),
                 alias=model_name,
-                extra_config_lines=_source_view_tag_post_hook_lines(spec),
                 schema_is_expression=True,
             ),
             "  )",
@@ -296,7 +290,6 @@ def _write_table_source_model(spec: dict[str, Any], options: GenerateDbtOptions,
                 database=_target_relation_config(spec).database,
                 schema=_staging_schema_config_expression(spec),
                 alias=model_name,
-                extra_config_lines=_source_view_tag_post_hook_lines(spec),
                 schema_is_expression=True,
             ),
             "  )",
